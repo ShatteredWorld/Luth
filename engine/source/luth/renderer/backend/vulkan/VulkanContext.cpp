@@ -320,6 +320,44 @@ namespace Luth
         }
     }
 
+    static bool DeviceSupportsRayTracing(VkPhysicalDevice device)
+    {
+        u32 extCount = 0;
+        vkEnumerateDeviceExtensionProperties(device, nullptr, &extCount, nullptr);
+        std::vector<VkExtensionProperties> extensions(extCount);
+        vkEnumerateDeviceExtensionProperties(device, nullptr, &extCount, extensions.data());
+
+        const char* required[] = {
+            VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+            VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+            VK_KHR_RAY_QUERY_EXTENSION_NAME,
+            VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+        };
+        for (const char* req : required)
+        {
+            bool found = false;
+            for (const auto& ext : extensions)
+                if (strcmp(ext.extensionName, req) == 0) { found = true; break; }
+            if (!found) return false;
+        }
+
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeatures{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
+        VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtFeatures{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR };
+        VkPhysicalDeviceRayQueryFeaturesKHR rqFeatures{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
+        asFeatures.pNext = &rtFeatures;
+        rtFeatures.pNext = &rqFeatures;
+        VkPhysicalDeviceFeatures2 features{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+        features.pNext = &asFeatures;
+        vkGetPhysicalDeviceFeatures2(device, &features);
+        return asFeatures.accelerationStructure
+            && asFeatures.descriptorBindingAccelerationStructureUpdateAfterBind
+            && rtFeatures.rayTracingPipeline
+            && rqFeatures.rayQuery;
+    }
+
     // Renderer baseline: VK_KHR_swapchain + 4 RT extensions + a graphics queue family.
     // RT-mandatory: a device missing any RT extension is ineligible, not a fallback
     // candidate; hard-fail at the picker rather than after vkCreateDevice.
@@ -332,10 +370,6 @@ namespace Luth
 
         const char* required[] = {
             VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-            VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-            VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-            VK_KHR_RAY_QUERY_EXTENSION_NAME,
-            VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
         };
         for (const char* req : required)
         {
@@ -382,6 +416,7 @@ namespace Luth
             {
                 m_PhysicalDevice = device;
                 m_PhysicalDeviceProperties = props;
+                m_RayTracingSupported = DeviceSupportsRayTracing(device);
                 LH_LOG(Renderer, info, "Vulkan GPU: {0}", props.deviceName);
                 return;
             }
@@ -398,9 +433,7 @@ namespace Luth
             return;
         }
 
-        LH_LOG(Renderer, critical, "No Vulkan device meets baseline (VK_KHR_swapchain + RT extensions "
-                         "[acceleration_structure, ray_tracing_pipeline, ray_query, deferred_host_operations] "
-                         "+ graphics queue). Luth requires ray tracing.");
+        LH_LOG(Renderer, critical, "No Vulkan device meets the requested renderer features and baseline");
     }
 
     void VulkanContext::CreateLogicalDevice()
@@ -409,19 +442,22 @@ namespace Luth
         // queried once here so every RT consumer (SBT builder, BLAS sizing, RT pipeline) reads from
         // one cached struct on VulkanContext. PickPhysicalDevice has two return paths and would
         // duplicate the call; CreateLogicalDevice runs once after the picker settles.
-        m_RtPipelineProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
-        m_AsProperties.sType         = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
-        m_RtPipelineProperties.pNext = &m_AsProperties;
-        VkPhysicalDeviceProperties2 props2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
-        props2.pNext = &m_RtPipelineProperties;
-        vkGetPhysicalDeviceProperties2(m_PhysicalDevice, &props2);
+        if (m_RayTracingSupported)
+        {
+            m_RtPipelineProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+            m_AsProperties.sType         = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+            m_RtPipelineProperties.pNext = &m_AsProperties;
+            VkPhysicalDeviceProperties2 props2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+            props2.pNext = &m_RtPipelineProperties;
+            vkGetPhysicalDeviceProperties2(m_PhysicalDevice, &props2);
 
-        LH_LOG(Renderer, info, "RT: shaderGroupHandleSize={} baseAlignment={} handleAlignment={} maxRecursionDepth={} maxGeometryCount={}",
-            m_RtPipelineProperties.shaderGroupHandleSize,
-            m_RtPipelineProperties.shaderGroupBaseAlignment,
-            m_RtPipelineProperties.shaderGroupHandleAlignment,
-            m_RtPipelineProperties.maxRayRecursionDepth,
-            m_AsProperties.maxGeometryCount);
+            LH_LOG(Renderer, info, "RT: shaderGroupHandleSize={} baseAlignment={} handleAlignment={} maxRecursionDepth={} maxGeometryCount={}",
+                m_RtPipelineProperties.shaderGroupHandleSize,
+                m_RtPipelineProperties.shaderGroupBaseAlignment,
+                m_RtPipelineProperties.shaderGroupHandleAlignment,
+                m_RtPipelineProperties.maxRayRecursionDepth,
+                m_AsProperties.maxGeometryCount);
+        }
 
         // Priority-order queue family discovery. Graphics is the baseline (asserted in PickPhysicalDevice).
         // Compute prefers a family with COMPUTE_BIT but no GRAPHICS_BIT (true async compute on discrete GPUs).
@@ -507,24 +543,57 @@ namespace Luth
                                  b, graphicsBits);
         }
 
+        // Enumerate extensions before querying optional extension feature structs.
+        u32 availCount = 0;
+        vkEnumerateDeviceExtensionProperties(m_PhysicalDevice, nullptr, &availCount, nullptr);
+        std::vector<VkExtensionProperties> available(availCount);
+        vkEnumerateDeviceExtensionProperties(m_PhysicalDevice, nullptr, &availCount, available.data());
+        auto hasDeviceExt = [&available](const char* name) {
+            for (const auto& e : available)
+                if (strcmp(e.extensionName, name) == 0) return true;
+            return false;
+        };
+        const bool hasComputeDerivativesExt = hasDeviceExt(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+
+
         // Verify required 1.1/1.2/1.3 + RT features before enabling them in vkCreateDevice.
         // Chain shape: features2 -> 13 -> 12 -> 11 -> AS -> RT-pipeline -> ray-query.
         VkPhysicalDeviceVulkan11Features avail11{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
         VkPhysicalDeviceVulkan12Features avail12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
         VkPhysicalDeviceVulkan13Features avail13{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+        VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR availComputeDerivatives{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR };
         VkPhysicalDeviceAccelerationStructureFeaturesKHR availAs{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
         VkPhysicalDeviceRayTracingPipelineFeaturesKHR    availRt{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR };
         VkPhysicalDeviceRayQueryFeaturesKHR              availRq{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
         avail12.pNext = &avail11;
         avail13.pNext = &avail12;
-        avail11.pNext = &availAs;
-        availAs.pNext = &availRt;
-        availRt.pNext = &availRq;
+        if (hasComputeDerivativesExt)
+        {
+            avail11.pNext = &availComputeDerivatives;
+            if (m_RayTracingSupported)
+                availComputeDerivatives.pNext = &availAs;
+        }
+        else if (m_RayTracingSupported)
+        {
+            avail11.pNext = &availAs;
+        }
+        if (m_RayTracingSupported)
+        {
+            availAs.pNext = &availRt;
+            availRt.pNext = &availRq;
+        }
         VkPhysicalDeviceFeatures2 avail2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
         avail2.pNext = &avail13;
         vkGetPhysicalDeviceFeatures2(m_PhysicalDevice, &avail2);
 
-        const bool ok = avail11.shaderDrawParameters
+        const bool computeDerivativesSupported = hasComputeDerivativesExt
+            && availComputeDerivatives.computeDerivativeGroupQuads;
+
+        const bool ok = avail2.features.shaderInt16
+                     && avail2.features.shaderInt64
+                     && avail2.features.fragmentStoresAndAtomics
+                     && avail12.shaderFloat16
+                     && avail11.shaderDrawParameters
                      && avail12.descriptorBindingPartiallyBound
                      && avail12.descriptorBindingSampledImageUpdateAfterBind
                      && avail12.descriptorBindingStorageBufferUpdateAfterBind
@@ -537,19 +606,19 @@ namespace Luth
                      && avail12.scalarBlockLayout
                      && avail13.dynamicRendering
                      && avail13.synchronization2
-                     && availAs.accelerationStructure
-                     && availAs.descriptorBindingAccelerationStructureUpdateAfterBind
-                     && availRt.rayTracingPipeline
-                     && availRq.rayQuery;
+                     && avail13.shaderDemoteToHelperInvocation;
         if (!ok)
         {
             LH_LOG(Renderer, critical, "Required Vulkan 1.1/1.2/1.3 + RT features missing on selected device - "
-                "shaderDrawParameters={} descriptorBindingPartiallyBound={} "
+                "shaderInt16={} shaderInt64={} shaderFloat16={} fragmentStoresAndAtomics={} shaderDrawParameters={} descriptorBindingPartiallyBound={} "
                 "descriptorBindingSampledImageUpdateAfterBind={} descriptorBindingStorageBufferUpdateAfterBind={} "
                 "descriptorBindingStorageImageUpdateAfterBind={} descriptorBindingUniformBufferUpdateAfterBind={} "
                 "runtimeDescriptorArray={} shaderSampledImageArrayNonUniformIndexing={} timelineSemaphore={} "
-                "bufferDeviceAddress={} scalarBlockLayout={} dynamicRendering={} synchronization2={} "
-                "accelerationStructure={} asUpdateAfterBind={} rayTracingPipeline={} rayQuery={}",
+                "bufferDeviceAddress={} scalarBlockLayout={} dynamicRendering={} synchronization2={} shaderDemoteToHelperInvocation={} ",
+                (bool)avail2.features.shaderInt16,
+                (bool)avail2.features.shaderInt64,
+                (bool)avail12.shaderFloat16,
+                (bool)avail2.features.fragmentStoresAndAtomics,
                 (bool)avail11.shaderDrawParameters,
                 (bool)avail12.descriptorBindingPartiallyBound,
                 (bool)avail12.descriptorBindingSampledImageUpdateAfterBind,
@@ -563,10 +632,7 @@ namespace Luth
                 (bool)avail12.scalarBlockLayout,
                 (bool)avail13.dynamicRendering,
                 (bool)avail13.synchronization2,
-                (bool)availAs.accelerationStructure,
-                (bool)availAs.descriptorBindingAccelerationStructureUpdateAfterBind,
-                (bool)availRt.rayTracingPipeline,
-                (bool)availRq.rayQuery);
+                (bool)avail13.shaderDemoteToHelperInvocation);
         }
 
         // One VkDeviceQueueCreateInfo per distinct family. Up to 3 (graphics + async-compute + async-transfer);
@@ -596,6 +662,9 @@ namespace Luth
         deviceFeatures.fillModeNonSolid = VK_TRUE;
         deviceFeatures.independentBlend = VK_TRUE;
         deviceFeatures.textureCompressionBC = VK_TRUE; // BCn sampling for import-baked textures
+        deviceFeatures.shaderInt64 = VK_TRUE; // BDA/push-constant addresses lowered to SPIR-V Int64
+        deviceFeatures.shaderInt16 = VK_TRUE; // packed ReSTIR reservoir helpers lowered to SPIR-V Int16
+        deviceFeatures.fragmentStoresAndAtomics = avail2.features.fragmentStoresAndAtomics;
         // Per-pass GPU pipeline statistics (overdraw / geometry counts) for the editor profiler, enabled
         // only when supported; spanning secondary cmd buffers also needs inheritedQueries. GPUTimerPool gates
         // collection on SupportsPipelineStats(), so an unsupported GPU degrades cleanly to timing-only.
@@ -634,12 +703,14 @@ namespace Luth
         // scalarBlockLayout: skinning.slang reads the tight 84 B SkinnedVertex VB directly via a scalar
         // buffer_reference (no padded skin-input copy).
         features12.scalarBlockLayout = VK_TRUE;
+        features12.shaderFloat16 = VK_TRUE; // packed ReSTIR reservoir helpers lowered to SPIR-V Float16
 
         // Vulkan 1.3 Features (Dynamic Rendering, Synchronization2)
         VkPhysicalDeviceVulkan13Features features13{};
         features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
         features13.dynamicRendering = VK_TRUE;
         features13.synchronization2 = VK_TRUE;
+        features13.shaderDemoteToHelperInvocation = VK_TRUE;
         features13.pNext = &features12;
 
         // RT features. Chain tail: 11 -> AS -> RT-pipeline -> ray-query.
@@ -659,15 +730,31 @@ namespace Luth
         rqFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
         rqFeatures.rayQuery = VK_TRUE;
 
+        VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR computeDerivativesFeatures{};
+        computeDerivativesFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
+        computeDerivativesFeatures.computeDerivativeGroupQuads = computeDerivativesSupported;
+
         // NV ray-tracing validation (driver-level AS-build / SBT / shader-type checks). Chained into
         // rqFeatures.pNext below iff the extension is present + validation is on; rayTracingValidation
         // stays VK_FALSE otherwise. Declared here so it outlives vkCreateDevice.
         VkPhysicalDeviceRayTracingValidationFeaturesNV rtValidationFeatures{
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_VALIDATION_FEATURES_NV };
 
-        features11.pNext         = &asFeatures;
-        asFeatures.pNext         = &rtPipelineFeatures;
-        rtPipelineFeatures.pNext = &rqFeatures;
+        if (computeDerivativesSupported)
+        {
+            features11.pNext = &computeDerivativesFeatures;
+            if (m_RayTracingSupported)
+                computeDerivativesFeatures.pNext = &asFeatures;
+        }
+        else if (m_RayTracingSupported)
+        {
+            features11.pNext = &asFeatures;
+        }
+        if (m_RayTracingSupported)
+        {
+            asFeatures.pNext         = &rtPipelineFeatures;
+            rtPipelineFeatures.pNext = &rqFeatures;
+        }
 
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -679,22 +766,18 @@ namespace Luth
         std::vector<const char*> deviceExtensions = {
             VK_KHR_SWAPCHAIN_EXTENSION_NAME,
             VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME, // Enabled for ImGui compatibility
-            VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-            VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-            VK_KHR_RAY_QUERY_EXTENSION_NAME,
-            VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
         };
 
-        // Enumerate device extensions once for the optional-diagnostic probes below.
-        u32 availCount = 0;
-        vkEnumerateDeviceExtensionProperties(m_PhysicalDevice, nullptr, &availCount, nullptr);
-        std::vector<VkExtensionProperties> available(availCount);
-        vkEnumerateDeviceExtensionProperties(m_PhysicalDevice, nullptr, &availCount, available.data());
-        auto hasDeviceExt = [&available](const char* name) {
-            for (const auto& e : available)
-                if (strcmp(e.extensionName, name) == 0) return true;
-            return false;
-        };
+        if (m_RayTracingSupported)
+        {
+            deviceExtensions.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+            deviceExtensions.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+            deviceExtensions.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+            deviceExtensions.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+        }
+        if (computeDerivativesSupported)
+            deviceExtensions.push_back(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+
 
         // Optional diagnostic (NV-only): localizes the failing GPU command after TDR.
         // Absence is a soft-fail (the dump path checks HasCheckpoints() before invoking).
@@ -713,14 +796,14 @@ namespace Luth
         // geometry), bad SBT, unexpected shader types. Opt in via LUTH_VALIDATION=rt (which forces the
         // validation layer on, since it reports through the VK_EXT_debug_utils messenger). The driver
         // only reports the extension when the NV_ALLOW_RAYTRACING_VALIDATION=1 environment var is also set.
-        if (m_ValTiers.rtValidation && hasDeviceExt(VK_NV_RAY_TRACING_VALIDATION_EXTENSION_NAME))
+        if (m_RayTracingSupported && m_ValTiers.rtValidation && hasDeviceExt(VK_NV_RAY_TRACING_VALIDATION_EXTENSION_NAME))
         {
             deviceExtensions.push_back(VK_NV_RAY_TRACING_VALIDATION_EXTENSION_NAME);
             rtValidationFeatures.rayTracingValidation = VK_TRUE;
             rqFeatures.pNext = &rtValidationFeatures;  // extend the feature chain tail
             LH_LOG(Renderer, info, "VK_NV_ray_tracing_validation enabled - RT AS/SBT validation active");
         }
-        else if (m_ValTiers.rtValidation)
+        else if (m_RayTracingSupported && m_ValTiers.rtValidation)
         {
             LH_LOG(Renderer, info, "VK_NV_ray_tracing_validation unavailable (set NV_ALLOW_RAYTRACING_VALIDATION=1)");
         }
@@ -760,7 +843,7 @@ namespace Luth
 
         // KHR ray-tracing entry points are device-level; load right after vkCreateDevice, before queue
         // acquisition (loader doesn't depend on queues).
-        LoadRayTracingFunctions();
+        if(m_RayTracingSupported) LoadRayTracingFunctions();
         if (m_CheckpointsAvailable) LoadCheckpointFunctions();
         LoadDebugUtilsFunctions();
 
