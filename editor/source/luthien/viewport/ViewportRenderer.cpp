@@ -86,7 +86,7 @@ namespace Luth
                 }
 
                 auto vkTex = std::static_pointer_cast<VKTexture>(texture);
-                m_SceneDS = ImGui_ImplVulkan_AddTexture(vkTex->GetSampler(), vkTex->GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                m_SceneDS = ImGui_ImplVulkan_AddTexture(vkTex->GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 m_LastSceneTex = texture;
             }
 
@@ -102,9 +102,9 @@ namespace Luth
         m_IsHovered = ImGui::IsWindowHovered();
     }
 
-    void ViewportRenderer::DrawSceneTextureRaw(VkImageView view, VkSampler sampler)
+    void ViewportRenderer::DrawSceneTextureRaw(VkImageView view)
     {
-        if (view == VK_NULL_HANDLE || sampler == VK_NULL_HANDLE)
+        if (view == VK_NULL_HANDLE)
         {
             ImGui::Text("No Scene Output");
             m_IsFocused = ImGui::IsWindowFocused();
@@ -121,7 +121,7 @@ namespace Luth
                     ImGui_ImplVulkan_RemoveTexture(oldSet);
                 });
             }
-            m_RawDS = ImGui_ImplVulkan_AddTexture(sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            m_RawDS = ImGui_ImplVulkan_AddTexture(view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             m_RawViewCached = view;
         }
 

@@ -191,7 +191,7 @@ namespace Luth
             ImGuiTreeNodeFlags_OpenOnArrow |
             ImGuiTreeNodeFlags_SpanAvailWidth |
             ImGuiTreeNodeFlags_FramePadding |
-            ImGuiTreeNodeFlags_AllowItemOverlap;
+            ImGuiTreeNodeFlags_AllowOverlap;
 
         if (EditorSelection::IsSelected(entity)) flags |= ImGuiTreeNodeFlags_Selected;
 
@@ -267,7 +267,7 @@ namespace Luth
             const ImU32  nameCol = dimThisRow ? ImGui::GetColorU32(ImGuiCol_TextDisabled) : ImGui::GetColorU32(ImGuiCol_Text);
             ImFont*      gFont = iconFilled ? Editor::GetIconFill() : Editor::GetIconRegular();
             ImDrawList*  dl   = ImGui::GetWindowDrawList();
-            dl->AddText(gFont, gFont->FontSize, ImVec2(gx, gy), iconCol, icon);
+            dl->AddText(gFont, gFont->LegacySize, ImVec2(gx, gy), iconCol, icon);
             ImGui::PushFont(gFont);
             const float iconW = ImGui::CalcTextSize(icon).x;
             ImGui::PopFont();

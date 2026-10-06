@@ -40,7 +40,8 @@ namespace Luth
         // Raw-handle overload used by the FrameDebugger viewport overlay to bind an archived RT
         // (VkImageView owned by FrameDebugger, not a Texture wrapper) directly into ImGui. Caches the
         // descriptor by view-pointer identity; recapture invalidates because new views replace old ones.
-        void DrawSceneTextureRaw(VkImageView view, VkSampler sampler);
+        // Sampling uses the ImGui backend's default linear sampler.
+        void DrawSceneTextureRaw(VkImageView view);
 
         // Applied from the panel's resize callback so viewport state stays in sync with the
         // authoritative size used by RenderingSystem + EditorCamera.

@@ -831,7 +831,6 @@ namespace Luth::UI::ThumbnailPreviewScene
                 auto& slot = s_Ring[i];
                 auto vkColor = std::static_pointer_cast<VKTexture>(slot.color);
                 slot.imguiSet = ImGui_ImplVulkan_AddTexture(
-                    vkColor->GetSampler(),
                     vkColor->GetImageView(),
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 if (slot.imguiSet == VK_NULL_HANDLE) return false;

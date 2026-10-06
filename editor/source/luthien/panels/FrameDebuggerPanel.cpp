@@ -950,7 +950,7 @@ namespace Luth
                         });
                     }
                     m_PerDrawPreviewDescSet = ImGui_ImplVulkan_AddTexture(
-                        sampler, previewView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                        previewView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                     m_PerDrawPreviewViewCached = previewView;
                 }
 
@@ -1041,7 +1041,7 @@ namespace Luth
                     });
                 }
                 m_DepthPreviewDescSet = ImGui_ImplVulkan_AddTexture(
-                    sampler, depthPreview, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                    depthPreview, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 m_DepthPreviewViewCached = depthPreview;
             }
 
@@ -1104,7 +1104,7 @@ namespace Luth
                     });
                 }
                 m_SlimPreviewDescSet = ImGui_ImplVulkan_AddTexture(
-                    sampler, slimPreview, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                    slimPreview, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 m_SlimPreviewViewCached = slimPreview;
             }
 
@@ -1139,7 +1139,7 @@ namespace Luth
                 m_DisplayArchiveDescSet = VK_NULL_HANDLE;
             }
             m_DisplayArchiveDescSet = ImGui_ImplVulkan_AddTexture(
-                sampler, archive.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                archive.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             m_DisplayArchiveViewCached = archive.view;
         }
 

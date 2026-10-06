@@ -182,13 +182,13 @@ namespace Luth
         constexpr float kBasePx = 22.0f, kRefDist = 12.0f, kMinPx = 14.0f;
         const float s  = Editor::GetSettings().gizmoIconScale;
         const float d  = Math::Max(distance, 0.001f);
-        const float px = Math::Clamp(kBasePx * s * (kRefDist / d), kMinPx, gf->FontSize);
+        const float px = Math::Clamp(kBasePx * s * (kRefDist / d), kMinPx, gf->LegacySize);
         const float hitRadius = Math::Max(px * 0.6f, 8.0f);
 
         ImGui::PushFont(gf);
         ImVec2 textSize = ImGui::CalcTextSize(icon);     // measured at the 64-px native size
         ImGui::PopFont();
-        const float k = px / gf->FontSize;               // minify the large glyph down to px
+        const float k = px / gf->LegacySize;             // scale the reference-size measurement down to px
         ImVec2 textPos = { screenPos.x - textSize.x * k * 0.5f, screenPos.y - textSize.y * k * 0.5f };
         drawList->AddText(gf, px, textPos, color, icon);
 

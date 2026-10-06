@@ -71,7 +71,6 @@ namespace Luth::UI
             {
                 auto vkTex = std::static_pointer_cast<VKTexture>(texture);
                 VkDescriptorSet set = ImGui_ImplVulkan_AddTexture(
-                    vkTex->GetSampler(),
                     vkTex->GetImageView(),
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
                 s_TextureCache[key] = { set, texture };

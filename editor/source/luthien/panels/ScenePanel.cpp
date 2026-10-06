@@ -434,7 +434,7 @@ namespace Luth
                 }();
 
             if (fdOverlay.view != VK_NULL_HANDLE)
-                m_Viewport->DrawSceneTextureRaw(fdOverlay.view, fdOverlay.sampler);
+                m_Viewport->DrawSceneTextureRaw(fdOverlay.view);
             else
                 m_Viewport->DrawSceneTexture(m_RenderingSystem);
 
@@ -607,10 +607,10 @@ namespace Luth
                 {
                     ImGuiKey key = static_cast<ImGuiKey>(keyInt);
                     // Skip modifiers and mouse buttons as we added them grouped above
-                    if (key == ImGuiKey_LeftCtrl || key == ImGuiKey_RightCtrl || key == ImGuiKey_ModCtrl || key == ImGuiKey_ReservedForModCtrl ||
-                        key == ImGuiKey_LeftShift || key == ImGuiKey_RightShift || key == ImGuiKey_ModShift || key == ImGuiKey_ReservedForModShift ||
-                        key == ImGuiKey_LeftAlt || key == ImGuiKey_RightAlt || key == ImGuiKey_ModAlt || key == ImGuiKey_ReservedForModAlt ||
-                        key == ImGuiKey_LeftSuper || key == ImGuiKey_RightSuper || key == ImGuiKey_ModSuper || key == ImGuiKey_ReservedForModSuper ||
+                    if (key == ImGuiKey_LeftCtrl || key == ImGuiKey_RightCtrl || key == ImGuiKey_ReservedForModCtrl ||
+                        key == ImGuiKey_LeftShift || key == ImGuiKey_RightShift || key == ImGuiKey_ReservedForModShift ||
+                        key == ImGuiKey_LeftAlt || key == ImGuiKey_RightAlt || key == ImGuiKey_ReservedForModAlt ||
+                        key == ImGuiKey_LeftSuper || key == ImGuiKey_RightSuper || key == ImGuiKey_ReservedForModSuper ||
                         key == ImGuiKey_MouseLeft || key == ImGuiKey_MouseRight || key == ImGuiKey_MouseMiddle ||
                         key == ImGuiKey_MouseX1 || key == ImGuiKey_MouseX2)
                         continue;

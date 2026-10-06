@@ -109,14 +109,14 @@ namespace Luth
             DrawPathBar(pathBarWidth);
             ImGui::SameLine();
             
-            ImGui::BeginChild("##SliderBar", ImVec2(sliderWidth, ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y * 2), ImGuiChildFlags_Border);
+            ImGui::BeginChild("##SliderBar", ImVec2(sliderWidth, ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y * 2), ImGuiChildFlags_Borders);
             ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
             ImGui::SliderFloat("##Size", &m_ThumbnailSize, 16.0f, 96.0f, "");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Icon Size");
             ImGui::EndChild();
 
             // left panel: directory tree
-            ImGui::BeginChild("##ProjectTree", ImVec2(ImGui::GetWindowWidth() * 0.2f, 0), ImGuiChildFlags_Border | ImGuiChildFlags_ResizeX);
+            ImGui::BeginChild("##ProjectTree", ImVec2(ImGui::GetWindowWidth() * 0.2f, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_ResizeX);
             
             ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
             if (ImGui::InputTextWithHint("##Search", ICON_SEARCH " Search...", m_SearchBuffer, sizeof(m_SearchBuffer))) {
@@ -138,7 +138,7 @@ namespace Luth
             const ImVec2 prevSpacing = ImGui::GetStyle().ItemSpacing;
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 8.0f));
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,   ImVec2(prevSpacing.x, 4.0f));
-            ImGui::BeginChild("##ProjectContent", ImVec2(0, 0), ImGuiChildFlags_Border);
+            ImGui::BeginChild("##ProjectContent", ImVec2(0, 0), ImGuiChildFlags_Borders);
 
             if (ImGui::IsWindowHovered() && ImGui::GetIO().KeyCtrl)
             {
@@ -292,7 +292,7 @@ namespace Luth
     {
         if (!m_CurrentDirNode) return;
 
-        ImGui::BeginChild("##PathBar", ImVec2(width, ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y * 2), ImGuiChildFlags_Border);
+        ImGui::BeginChild("##PathBar", ImVec2(width, ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y * 2), ImGuiChildFlags_Borders);
 
         // collect segments current-to-root, then reverse for root-to-current display
         std::vector<DirectoryNode*> pathSegments;

@@ -229,7 +229,7 @@ namespace Luth
                 std::string selectableId = "##sel_" + entry.Uuid.ToString();
 
                 if (ImGui::Selectable(selectableId.c_str(), selected,
-                    ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap,
+                    ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
                     ImVec2(0, 0)))
                 {
                     m_SelectedUUID = entry.Uuid;

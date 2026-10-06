@@ -293,7 +293,7 @@ namespace Luth
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.08f, 0.08f, 1.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 4.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.0f, 4.0f));
-        ImGui::BeginChild("##RecentList", { 0, listHeight }, ImGuiChildFlags_Border, ImGuiWindowFlags_AlwaysUseWindowPadding);
+        ImGui::BeginChild("##RecentList", { 0, listHeight }, ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
 
         if (s_RecentProjects.empty())
         {

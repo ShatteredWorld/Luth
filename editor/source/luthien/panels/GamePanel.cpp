@@ -138,7 +138,7 @@ namespace Luth
                     fdOverlay = fd->GetOverlaySource();
 
                 if (fdOverlay.view != VK_NULL_HANDLE) {
-                    m_Viewport->DrawSceneTextureRaw(fdOverlay.view, fdOverlay.sampler);
+                    m_Viewport->DrawSceneTextureRaw(fdOverlay.view);
                 } else {
                     const auto& ldr = m_Targets.GetLDROutput();
                     m_Viewport->DrawSceneTexture(ldr ? ldr : m_Targets.GetSceneColor());

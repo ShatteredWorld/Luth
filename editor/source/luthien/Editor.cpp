@@ -52,6 +52,7 @@
 #include "luthien/widgets/Icons.h"
 
 #include <imgui.h>
+#include <ImGuizmo.h>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_vulkan.h>
 #include <GLFW/glfw3.h>
@@ -159,15 +160,19 @@ namespace Luth
             auto* vkRenderer = static_cast<VulkanBackend*>(Renderer::GetBackend());
 
             // Dedicated pool: ImGui freely allocates/frees per-texture descriptor sets.
-            VkDescriptorPoolSize pool_sizes[] = { { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2000 } };
+            VkDescriptorPoolSize pool_sizes[] = {
+                { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2000 },
+                { VK_DESCRIPTOR_TYPE_SAMPLER, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE }
+            };
             VkDescriptorPoolCreateInfo pool_info = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
             pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-            pool_info.maxSets = 2000;
-            pool_info.poolSizeCount = 1;
+            pool_info.maxSets = 2000 + IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE;
+            pool_info.poolSizeCount = 2;
             pool_info.pPoolSizes = pool_sizes;
             vkCreateDescriptorPool(ctx.GetDevice(), &pool_info, nullptr, &s_ImGuiPool);
 
             ImGui_ImplVulkan_InitInfo init_info = {};
+            init_info.ApiVersion = VK_API_VERSION_1_3;
             init_info.Instance = ctx.GetInstance();
             init_info.PhysicalDevice = ctx.GetPhysicalDevice();
             init_info.Device = ctx.GetDevice();
@@ -175,21 +180,21 @@ namespace Luth
             init_info.Queue = ctx.GetGraphicsQueue();
             init_info.PipelineCache = VK_NULL_HANDLE;
             init_info.DescriptorPool = s_ImGuiPool;
-            init_info.Subpass = 0;
+            init_info.PipelineInfoMain.Subpass = 0;
             init_info.MinImageCount = MAX_FRAMES_IN_FLIGHT;
             init_info.ImageCount = MAX_FRAMES_IN_FLIGHT;
-            init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+            init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+            init_info.PipelineInfoForViewports.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
             init_info.Allocator = nullptr;
             init_info.CheckVkResultFn = nullptr;
             init_info.UseDynamicRendering = true;
 
             static const VkFormat swapChainFormat = vkRenderer->GetSwapchain().GetImageFormat();
-            init_info.PipelineRenderingCreateInfo = { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
-            init_info.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
-            init_info.PipelineRenderingCreateInfo.pColorAttachmentFormats = &swapChainFormat;
+            init_info.PipelineInfoMain.PipelineRenderingCreateInfo = { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
+            init_info.PipelineInfoMain.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
+            init_info.PipelineInfoMain.PipelineRenderingCreateInfo.pColorAttachmentFormats = &swapChainFormat;
 
             ImGui_ImplVulkan_Init(&init_info);
-            ImGui_ImplVulkan_CreateFontsTexture();
         }
     }
 
@@ -328,15 +333,13 @@ namespace Luth
                 s_Settings.activeStylePath.clear();
             }
             s_PendingStyle.clear();
-
-            if (Renderer::GetBackend()->GetAPI() == RenderBackend::API::Vulkan)
-                ImGui_ImplVulkan_CreateFontsTexture();
         }
 
         if (Renderer::GetBackend()->GetAPI() == RenderBackend::API::Vulkan) {
             ImGui_ImplVulkan_NewFrame();
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
+            ImGuizmo::BeginFrame();
         }
     }
 
