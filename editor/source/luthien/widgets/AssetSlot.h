@@ -2,7 +2,7 @@
 
 #include "luthien/widgets/Properties.h"
 #include "luth/core/UUID.h"
-#include "luth/resources/Asset.h"
+#include "luth/assets/Asset.h"
 
 namespace Luth::UI
 {

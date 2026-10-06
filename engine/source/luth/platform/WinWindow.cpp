@@ -5,7 +5,7 @@
 #include "luth/events/KeyEvent.h"
 #include "luth/events/MouseEvent.h"
 #include "luth/events/FileDropEvent.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/FileSystem.h"
 
 #include <backends/imgui_impl_glfw.h>
 #include <stb/stb_image.h>

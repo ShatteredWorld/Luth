@@ -2,7 +2,7 @@
 #include <atomic>
 #include "PipelineCache.h"
 #include "VulkanContext.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/FileSystem.h"
 
 namespace Luth
 {

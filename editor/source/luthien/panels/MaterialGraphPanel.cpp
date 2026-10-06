@@ -5,8 +5,8 @@
 #include "luthien/widgets/Icons.h"
 #include "luth/renderer/material/Material.h"
 #include "luth/renderer/material/MaterialGraphCodegen.h"
-#include "luth/resources/AssetManager.h"
-#include "luth/resources/AssetDatabase.h"
+#include "luth/assets/AssetManager.h"
+#include "luth/assets/AssetDatabase.h"
 
 #include <algorithm>
 #include <cctype>

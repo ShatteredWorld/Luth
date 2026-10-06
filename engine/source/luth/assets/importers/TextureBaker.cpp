@@ -1,8 +1,8 @@
 #include "luthpch.h"
-#include "luth/resources/importers/TextureBaker.h"
-#include "luth/resources/Image.h"
-#include "luth/resources/MetaFile.h"
-#include "luth/resources/AssetDatabase.h"
+#include "luth/assets/importers/TextureBaker.h"
+#include "luth/assets/Image.h"
+#include "luth/assets/MetaFile.h"
+#include "luth/assets/AssetDatabase.h"
 #include "luth/renderer/resources/Texture.h"
 
 #include <algorithm>

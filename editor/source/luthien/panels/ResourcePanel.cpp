@@ -2,8 +2,8 @@
 #include "luthien/panels/ResourcePanel.h"
 #include "luthien/EditorSelection.h"
 #include "luthien/EditorSnapshot.h"
-#include "luth/resources/AssetDatabase.h"
-#include "luth/resources/AssetManager.h"
+#include "luth/assets/AssetDatabase.h"
+#include "luth/assets/AssetManager.h"
 #include "luthien/widgets/ImGuiUtils.h"
 #include "luthien/widgets/Icons.h"
 

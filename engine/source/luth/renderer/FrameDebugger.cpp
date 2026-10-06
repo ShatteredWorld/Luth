@@ -7,7 +7,7 @@
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
 #include "luth/core/FrameData.h"
 
-#include <vma/vk_mem_alloc.h>
+#include <vk_mem_alloc.h>
 #include <backends/imgui_impl_vulkan.h>
 
 namespace Luth

@@ -5,7 +5,7 @@
 #include "luthien/commands/Commands.h"
 #include "luthien/CommandHistory.h"
 #include "luth/scene/Components.h"
-#include "luth/resources/AssetManager.h"
+#include "luth/assets/AssetManager.h"
 
 #include <glm/gtc/quaternion.hpp>
 #include <nlohmann/json.hpp>

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "luth/resources/AssetImporter.h"
-#include "luth/resources/importers/ImportReport.h"
+#include "luth/assets/AssetImporter.h"
+#include "luth/assets/importers/ImportReport.h"
 #include "luth/renderer/resources/Model.h"
 #include "luth/renderer/resources/Skeleton.h"
 #include "luth/renderer/resources/AnimationClip.h"

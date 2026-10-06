@@ -13,8 +13,8 @@
 #include "luth/renderer/backend/vulkan/VulkanBuffer.h"
 #include "luth/renderer/material/Material.h"
 #include "luth/renderer/resources/Model.h"
-#include "luth/resources/AssetManager.h"
-#include <vma/vk_mem_alloc.h>
+#include "luth/assets/AssetManager.h"
+#include <vk_mem_alloc.h>
 #include <backends/imgui_impl_vulkan.h>
 #include <imgui.h>
 

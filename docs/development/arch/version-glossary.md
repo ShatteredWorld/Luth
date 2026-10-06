@@ -34,7 +34,7 @@ When adding new hot-path code in `jobs/` or `renderer/rendergraph/`, comment any
 
 ## Namespace 2 — Asset format versions
 
-Binary artifact files (under `cache/assets/`) store a `Header.Version` field at the top. Importers/serializers branch on it to support old artifacts without forced re-import. Defined in [`luth/source/luth/resources/AssetSerializer.{h,cpp}`](../../../luth/source/luth/resources/AssetSerializer.h).
+Binary artifact files (under `cache/assets/`) store a `Header.Version` field at the top. Importers/serializers branch on it to support old artifacts without forced re-import. Defined in [`luth/source/luth/assets/AssetSerializer.{h,cpp}`](../../../luth/source/luth/assets/AssetSerializer.h).
 
 ### Model artifacts (`.luth.model`)
 

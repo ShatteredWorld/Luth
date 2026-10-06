@@ -1,7 +1,7 @@
 #pragma once
 
 #include "luth/core/UUID.h"
-#include "luth/resources/importers/ModelImporter.h"
+#include "luth/assets/importers/ModelImporter.h"
 #include "luthien/widgets/ThumbnailPreviewScene.h"
 
 namespace Luth

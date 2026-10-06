@@ -1,7 +1,7 @@
 #include "luthpch.h"
 #include "ShaderImporter.h"
 #include "luth/renderer/shader/ShaderCompiler.h"
-#include "luth/resources/AssetSerializer.h"
+#include "luth/assets/AssetSerializer.h"
 
 namespace Luth
 {

@@ -4,7 +4,7 @@
 #include "luth/renderer/rendergraph/RenderGraph.h"
 
 #include <vulkan/vulkan.h>
-#include <vma/vk_mem_alloc.h>
+#include <vk_mem_alloc.h>
 
 namespace Luth
 {

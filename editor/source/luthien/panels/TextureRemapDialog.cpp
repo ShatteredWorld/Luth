@@ -2,9 +2,9 @@
 #include "luthien/panels/TextureRemapDialog.h"
 #include "luthien/EditorColors.h"
 #include "luthien/Editor.h"
-#include "luth/resources/AssetDatabase.h"
-#include "luth/resources/MetaFile.h"
-#include "luth/resources/importers/TextureResolver.h"
+#include "luth/assets/AssetDatabase.h"
+#include "luth/assets/MetaFile.h"
+#include "luth/assets/importers/TextureResolver.h"
 #include "luth/platform/FileDialog.h"
 #include "luth/renderer/material/Material.h"
 

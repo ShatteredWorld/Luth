@@ -2,9 +2,9 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: [veyra-main]
   pull_request:
-    branches: [main]
+    branches: [veyra-main]
 
 jobs:
   build:
@@ -20,34 +20,32 @@ jobs:
       with:
         submodules: recursive
 
+    - name: Setup Vulkan SDK
+      uses: humbletim/setup-vulkan-sdk@v1.2.1
+      with:
+        vulkan-query-version: 1.3.296.0
+        vulkan-components: Vulkan-Headers, Vulkan-Loader
+        vulkan-use-cache: true
+
+    - uses: TheMrMilchmann/setup-msvc-dev@v4.1.0
+      with:
+        arch: x64
+
     # No submodule cache: checkout already fetches submodules, and caching
     # luth/extern/source by .gitmodules hash clobbered vendored in-tree deps
     # (e.g. imguizmo) with stale copies, reverting committed fixes.
 
-    - name: Run premake
+    - name: Configure CMake
       shell: cmd
       run: |
-        cd scripts\setup
-        setup_windows.bat
-
-    - name: Setup MSBuild
-      uses: microsoft/setup-msbuild@v1
-
-    - name: Cache build intermediates
-      uses: actions/cache@v4
-      with:
-        path: bin-int
-        key: build-int-${{ matrix.config }}-${{ hashFiles('**/*.h', '**/*.cpp', '**/*.lua') }}
-        restore-keys: |
-          build-int-${{ matrix.config }}-
+        cmake --preset windows
 
     - name: Build ${{ matrix.config }} x64
-      run: >
-        msbuild Luth.sln
-        /p:Configuration=${{ matrix.config }}
-        /p:Platform=x64
-        /p:WindowsTargetPlatformVersion=10.0
-        /m
+      run: cmake --build build --config ${{ matrix.config }} --parallel
+
+    - name: Run smoke tests
+      if: matrix.config == 'Debug'
+      run: ctest --test-dir build -C ${{ matrix.config }} -L smoke --output-on-failure
 
     - name: Upload Release artifacts
       if: matrix.config == 'Release'
@@ -57,5 +55,5 @@ jobs:
         retention-days: 14
         path: |
           bin/windows-x86_64/Release/Runtime/Luthien.exe
-          bin/windows-x86_64/Release/Runtime/shaderc_shared.dll
+          bin/windows-x86_64/Release/Runtime/slang-*.dll
           bin/windows-x86_64/Release/Luth/Luth.lib

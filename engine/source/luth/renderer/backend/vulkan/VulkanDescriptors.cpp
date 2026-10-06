@@ -4,7 +4,7 @@
 #include "VulkanAllocator.h"
 #include "luth/core/diagnostics/Log.h"
 
-#include <vma/vk_mem_alloc.h>
+#include <vk_mem_alloc.h>
 
 namespace Luth
 {

@@ -8,9 +8,9 @@
 #include "luth/scene/Components.h"
 #include "luth/scene/systems/SystemRegistry.h"
 #include "luthien/widgets/Icons.h"
-#include "luth/resources/AssetManager.h"
-#include "luth/resources/AssetDatabase.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/AssetManager.h"
+#include "luth/assets/AssetDatabase.h"
+#include "luth/assets/FileSystem.h"
 #include "luth/renderer/resources/Model.h"
 
 #include <imgui.h>

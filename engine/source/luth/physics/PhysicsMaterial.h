@@ -1,7 +1,7 @@
 #pragma once
 
 #include "luth/core/types/LuthTypes.h"
-#include "luth/resources/Asset.h"
+#include "luth/assets/Asset.h"
 
 #include <nlohmann/json.hpp>
 

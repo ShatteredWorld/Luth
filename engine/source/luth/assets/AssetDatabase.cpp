@@ -1,10 +1,10 @@
 #include "luthpch.h"
-#include "luth/resources/AssetDatabase.h"
-#include "luth/resources/FileSystem.h"
-#include "luth/resources/MetaFile.h"
+#include "luth/assets/AssetDatabase.h"
+#include "luth/assets/FileSystem.h"
+#include "luth/assets/MetaFile.h"
 #include "luth/core/diagnostics/Log.h"
-#include "luth/resources/AssetManager.h"
-#include "luth/resources/importers/TextureResolver.h"
+#include "luth/assets/AssetManager.h"
+#include "luth/assets/importers/TextureResolver.h"
 #include "luth/jobs/JobSystem.h"
 #include <fstream>
 #include <nlohmann/json.hpp>

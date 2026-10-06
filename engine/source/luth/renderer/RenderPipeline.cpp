@@ -21,9 +21,9 @@
 #include "luth/renderer/lighting/IBLPrecompute.h"
 #include "luth/renderer/draw/DrawCommand.h"
 #include "luth/renderer/shader/ShaderLibrary.h"
-#include "luth/resources/AssetManager.h"
-#include "luth/resources/AssetDatabase.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/AssetManager.h"
+#include "luth/assets/AssetDatabase.h"
+#include "luth/assets/FileSystem.h"
 #include "luth/core/FrameData.h"
 #include "luth/core/types/LuthMath.h"
 #include "luth/core/time/Time.h"
@@ -31,7 +31,7 @@
 #include "luth/scene/Components.h"
 #include "luth/scene/Scene.h"
 
-#include <vma/vk_mem_alloc.h>
+#include <vk_mem_alloc.h>
 #include <backends/imgui_impl_vulkan.h>
 #include <imgui.h>
 #include <string>

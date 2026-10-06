@@ -11,10 +11,10 @@
 #include "luth/renderer/resources/Model.h"
 #include "luth/renderer/resources/Mesh.h"
 #include "luth/renderer/material/Material.h"
-#include "luth/resources/AssetManager.h"
+#include "luth/assets/AssetManager.h"
 #include "luth/renderer/lighting/EmissiveLight.h"
 
-#include <vma/vk_mem_alloc.h>
+#include <vk_mem_alloc.h>
 #include <cstring>
 
 namespace Luth

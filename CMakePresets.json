@@ -1,0 +1,104 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 30,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "defaults",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/",
+      "generator": "Ninja Multi-Config",
+      "cacheVariables": {
+        "LUTH_BUILD_TESTS": true,
+        "LUTH_BUILD_SAMPLES": true
+      }
+    },
+    {
+      "name": "windows",
+      "displayName": "Windows",
+      "inherits": "defaults",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux",
+      "inherits": "defaults",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "asan",
+      "hidden": true,
+      "cacheVariables": {
+        "LUTH_ENABLE_ASAN": true,
+        "CMAKE_CONFIGURATION_TYPES": "Debug"
+      }
+    },
+    {
+      "name": "windows-asan",
+      "displayName": "Windows ASan",
+      "inherits": ["windows", "asan"],
+      "binaryDir": "${sourceDir}/build/windows-asan"
+    },
+    {
+      "name": "linux-asan",
+      "displayName": "Linux ASan",
+      "inherits": ["linux", "asan"],
+      "binaryDir": "${sourceDir}/build/linux-asan"
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-debug", "configurePreset": "windows", "configuration": "Debug" },
+    { "name": "windows-release", "configurePreset": "windows", "configuration": "Release" },
+    { "name": "windows-dist", "configurePreset": "windows", "configuration": "Dist" },
+    { "name": "linux-debug", "configurePreset": "linux", "configuration": "Debug" },
+    { "name": "linux-release", "configurePreset": "linux", "configuration": "Release" },
+    { "name": "linux-dist", "configurePreset": "linux", "configuration": "Dist" },
+    { "name": "windows-asan", "configurePreset": "windows-asan", "configuration": "Debug" },
+    { "name": "linux-asan", "configurePreset": "linux-asan", "configuration": "Debug" }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-smoke",
+      "configurePreset": "windows",
+      "configuration": "Debug",
+      "filter": { "include": { "label": "smoke" } },
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "linux-smoke",
+      "configurePreset": "linux",
+      "configuration": "Debug",
+      "filter": { "include": { "label": "smoke" } },
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "windows-asan-smoke",
+      "configurePreset": "windows-asan",
+      "configuration": "Debug",
+      "filter": { "include": { "label": "smoke" } },
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "linux-asan-smoke",
+      "configurePreset": "linux-asan",
+      "configuration": "Debug",
+      "filter": { "include": { "label": "smoke" } },
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

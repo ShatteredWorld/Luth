@@ -2,8 +2,8 @@
 #include "luthien/widgets/AssetSlot.h"
 #include "luthien/widgets/Icons.h"
 #include "luthien/widgets/ThumbnailCache.h"
-#include "luth/resources/AssetDatabase.h"
-#include "luth/resources/AssetManager.h"
+#include "luth/assets/AssetDatabase.h"
+#include "luth/assets/AssetManager.h"
 
 #include <imgui.h>
 

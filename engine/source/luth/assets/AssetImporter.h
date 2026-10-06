@@ -1,6 +1,6 @@
 #pragma once
 
-#include "luth/resources/Asset.h"
+#include "luth/assets/Asset.h"
 #include <filesystem>
 #include <memory>
 

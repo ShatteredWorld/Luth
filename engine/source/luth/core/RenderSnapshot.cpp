@@ -9,7 +9,7 @@
 #include "luth/renderer/material/MaterialSystem.h"
 #include "luth/renderer/resources/BoneMatrixBuffer.h"
 #include "luth/renderer/resources/Model.h"
-#include "luth/resources/AssetManager.h"
+#include "luth/assets/AssetManager.h"
 #include "luth/scene/Components.h"
 #include "luth/scene/Scene.h"
 #include "luth/scene/systems/RenderingSystem.h"

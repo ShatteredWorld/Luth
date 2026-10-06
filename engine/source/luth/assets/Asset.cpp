@@ -1,6 +1,6 @@
 #include "luthpch.h"
-#include "luth/resources/Asset.h"
-#include "luth/resources/AssetDatabase.h"
+#include "luth/assets/Asset.h"
+#include "luth/assets/AssetDatabase.h"
 
 namespace Luth
 {

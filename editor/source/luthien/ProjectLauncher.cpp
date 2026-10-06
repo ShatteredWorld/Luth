@@ -4,7 +4,7 @@
 #include "luthien/EditorColors.h"
 #include "luth/core/ProjectFile.h"
 #include "luth/core/Version.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/FileSystem.h"
 #include "luth/platform/FileDialog.h"
 #include "luthien/widgets/Icons.h"
 #include "luthien/widgets/ImGuiUtils.h"

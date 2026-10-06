@@ -1,6 +1,6 @@
 #include "luthpch.h"
-#include "luth/resources/importers/TextureCompressor.h"
-#include "luth/resources/Image.h"
+#include "luth/assets/importers/TextureCompressor.h"
+#include "luth/assets/Image.h"
 #include "luth/core/diagnostics/Log.h"
 
 #include <bc7enc.h>

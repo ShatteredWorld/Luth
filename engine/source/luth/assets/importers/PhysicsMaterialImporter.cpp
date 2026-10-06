@@ -2,7 +2,7 @@
 
 #include "PhysicsMaterialImporter.h"
 
-#include "luth/resources/AssetSerializer.h"
+#include "luth/assets/AssetSerializer.h"
 
 #include <fstream>
 

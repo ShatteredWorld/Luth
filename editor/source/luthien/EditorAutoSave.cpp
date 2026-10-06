@@ -6,7 +6,7 @@
 #include "luth/events/EventBus.h"
 #include "luth/jobs/IOThread.h"
 #include "luth/jobs/MainThreadPump.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/FileSystem.h"
 #include "luth/scene/Scene.h"
 #include "luth/scene/SceneSerializer.h"
 

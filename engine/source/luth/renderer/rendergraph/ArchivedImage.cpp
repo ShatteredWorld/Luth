@@ -2,7 +2,7 @@
 #include "luth/renderer/rendergraph/ArchivedImage.h"
 #include "luth/renderer/backend/vulkan/VulkanAllocator.h"
 
-#include <vma/vk_mem_alloc.h>
+#include <vk_mem_alloc.h>
 #include <backends/imgui_impl_vulkan.h>
 
 namespace Luth::RG

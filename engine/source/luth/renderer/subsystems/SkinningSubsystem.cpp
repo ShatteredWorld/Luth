@@ -13,7 +13,7 @@
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/scene/systems/RenderingSystem.h"
 #include "luth/scene/systems/SystemRegistry.h"
-#include "luth/resources/AssetManager.h"
+#include "luth/assets/AssetManager.h"
 #include "luth/core/diagnostics/Log.h"
 #include "luth/core/RenderSnapshot.h"
 #include "luth/core/FrameData.h"

@@ -5,10 +5,10 @@
 #include "luthien/widgets/Widgets.h"
 #include "luthien/widgets/Icons.h"
 #include "luth/physics/PhysicsMaterial.h"
-#include "luth/resources/AssetDatabase.h"
-#include "luth/resources/AssetManager.h"
-#include "luth/resources/AssetSerializer.h"
-#include "luth/resources/importers/PhysicsMaterialImporter.h"
+#include "luth/assets/AssetDatabase.h"
+#include "luth/assets/AssetManager.h"
+#include "luth/assets/AssetSerializer.h"
+#include "luth/assets/importers/PhysicsMaterialImporter.h"
 #include "luth/core/time/Time.h"
 
 #include <fstream>

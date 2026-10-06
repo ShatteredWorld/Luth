@@ -9,9 +9,9 @@
 
 #include "luth/platform/Input.h"
 
-#include "luth/resources/FileSystem.h"
-#include "luth/resources/AssetManager.h"
-#include "luth/resources/AssetDatabase.h"
+#include "luth/assets/FileSystem.h"
+#include "luth/assets/AssetManager.h"
+#include "luth/assets/AssetDatabase.h"
 
 #include "luth/renderer/Renderer.h"
 #include "luth/renderer/resources/Buffer.h"

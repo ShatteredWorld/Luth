@@ -1,8 +1,8 @@
 #include "luthpch.h"
 #include "luth/renderer/shader/ShaderLibrary.h"
-#include "luth/resources/AssetDatabase.h"
-#include "luth/resources/AssetManager.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/AssetDatabase.h"
+#include "luth/assets/AssetManager.h"
+#include "luth/assets/FileSystem.h"
 #include "luth/core/diagnostics/Log.h"
 
 namespace Luth

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "luth/resources/AssetImporter.h"
+#include "luth/assets/AssetImporter.h"
 #include <nlohmann/json.hpp>
 
 namespace Luth

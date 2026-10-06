@@ -1,7 +1,7 @@
 #pragma once
 
 #include "luth/core/UUID.h"
-#include "luth/resources/Asset.h"
+#include "luth/assets/Asset.h"
 #include <string>
 #include <unordered_map>
 #include <memory>

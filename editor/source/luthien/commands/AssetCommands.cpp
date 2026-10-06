@@ -6,7 +6,7 @@
 #include "luth/renderer/material/Material.h"
 #include "luth/renderer/material/MaterialGraphCodegen.h"
 #include "luth/renderer/resources/Model.h"
-#include "luth/resources/AssetManager.h"
+#include "luth/assets/AssetManager.h"
 
 namespace Luth
 {

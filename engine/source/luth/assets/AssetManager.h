@@ -1,8 +1,8 @@
 #pragma once
 
 #include "luth/core/UUID.h"
-#include "luth/resources/Asset.h"
-#include "luth/resources/AssetImporter.h"
+#include "luth/assets/Asset.h"
+#include "luth/assets/AssetImporter.h"
 #include "luth/jobs/JobSystem.h"
 #include "luth/core/time/Time.h"
 

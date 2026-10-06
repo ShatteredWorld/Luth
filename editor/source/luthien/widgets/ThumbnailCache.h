@@ -2,7 +2,7 @@
 
 #include "luth/core/types/LuthTypes.h"
 #include "luth/core/UUID.h"
-#include "luth/resources/Asset.h"
+#include "luth/assets/Asset.h"
 
 #include <imgui.h>
 

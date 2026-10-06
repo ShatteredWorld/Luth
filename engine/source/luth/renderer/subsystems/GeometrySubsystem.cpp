@@ -22,7 +22,7 @@
 #include "luth/core/RenderSnapshot.h"
 #include "luth/jobs/JobSystem.h"
 #include "luth/memory/GPUTaggedPageAllocator.h"
-#include "luth/resources/AssetManager.h"
+#include "luth/assets/AssetManager.h"
 
 namespace Luth
 {

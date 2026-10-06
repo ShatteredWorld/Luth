@@ -1,10 +1,10 @@
 #pragma once
 
 #include "luth/core/types/LuthTypes.h"
-#include "luth/resources/Asset.h"
+#include "luth/assets/Asset.h"
 #include "luth/renderer/resources/Buffer.h"
-#include "luth/resources/importers/MaterialImporter.h"
-#include "luth/resources/importers/ShaderImporter.h"
+#include "luth/assets/importers/MaterialImporter.h"
+#include "luth/assets/importers/ShaderImporter.h"
 
 #include <vector>
 #include <filesystem>

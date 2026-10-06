@@ -1,6 +1,6 @@
 #pragma once
 
-#include "luth/resources/AssetImporter.h"
+#include "luth/assets/AssetImporter.h"
 #include "luth/renderer/resources/AnimationClip.h"
 
 namespace Luth

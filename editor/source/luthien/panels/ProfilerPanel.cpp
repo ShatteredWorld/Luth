@@ -10,7 +10,7 @@
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/scene/systems/SystemRegistry.h"
 #include "luth/scene/systems/RenderingSystem.h"
-#include "luth/resources/AssetManager.h"
+#include "luth/assets/AssetManager.h"
 #include "luthien/widgets/Icons.h"
 #include "luthien/Editor.h"
 #include "luthien/widgets/Widgets.h"

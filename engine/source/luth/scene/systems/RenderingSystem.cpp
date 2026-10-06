@@ -6,7 +6,7 @@
 #include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/Renderer.h"
 #include "luth/renderer/backend/vulkan/VulkanBackend.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/FileSystem.h"
 #include "luth/scene/Scene.h"
 #include "luth/scene/components/Transform.h"
 #include "luth/core/diagnostics/Profiler.h"

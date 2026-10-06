@@ -8,10 +8,10 @@
 #include "luth/memory/MemoryMacros.h"
 #include "luth/renderer/material/Material.h"
 #include "luth/renderer/resources/Model.h"
-#include "luth/resources/AssetDatabase.h"
-#include "luth/resources/AssetManager.h"
-#include "luth/resources/FileSystem.h"
-#include "luth/resources/Image.h"
+#include "luth/assets/AssetDatabase.h"
+#include "luth/assets/AssetManager.h"
+#include "luth/assets/FileSystem.h"
+#include "luth/assets/Image.h"
 
 #include "luthien/widgets/ThumbnailPreviewScene.h"
 

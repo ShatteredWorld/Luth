@@ -13,7 +13,7 @@
 #include "luthien/viewport/ViewportOverlays.h"
 #include "luthien/panels/FrameDebuggerPanel.h"
 #include "luth/platform/FileDialog.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/FileSystem.h"
 #include "luth/scene/Components.h"
 #include "luth/scene/Scene.h"
 #include "luth/scene/systems/PickingSystem.h"

@@ -1,5 +1,5 @@
 #include "luthpch.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/FileSystem.h"
 
 #include <regex>
 

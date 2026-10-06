@@ -10,8 +10,8 @@
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
 #include "luth/renderer/backend/vulkan/VulkanTexture.h"
 #include "luth/renderer/resources/Texture.h"
-#include "luth/resources/AssetDatabase.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/AssetDatabase.h"
+#include "luth/assets/FileSystem.h"
 
 #include "luthien/Editor.h"
 #include "luthien/EditorSettings.h"

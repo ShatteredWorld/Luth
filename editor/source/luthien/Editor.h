@@ -15,7 +15,7 @@
 #include <unordered_map>
 #include <vulkan/vulkan.h>
 #include <imgui.h>
-#include <imgui/imgui_internal.h>
+#include <imgui_internal.h>
 
 struct ImGuiContext;
 

@@ -10,7 +10,7 @@
 #include "luth/jobs/JobSystem.h"
 #include "luth/memory/GPUTaggedPageAllocator.h"
 #include "luth/renderer/material/MaterialLayoutGuard.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/FileSystem.h"
 
 namespace Luth
 {

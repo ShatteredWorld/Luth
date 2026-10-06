@@ -1,7 +1,7 @@
 #include "luthpch.h"
 #include "SlangCompiler.h"
 #include "luth/core/diagnostics/Log.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/FileSystem.h"
 
 #include <slang/slang.h>
 #include <slang/slang-com-ptr.h>

@@ -1,5 +1,5 @@
 #include "luthpch.h"
-#include "luth/resources/Image.h"
+#include "luth/assets/Image.h"
 #include "luth/core/diagnostics/Log.h"
 
 #define STB_IMAGE_IMPLEMENTATION

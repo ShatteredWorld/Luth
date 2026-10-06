@@ -1,6 +1,6 @@
 #include "luthpch.h"
 #include "AnimationClipImporter.h"
-#include "luth/resources/AssetSerializer.h"
+#include "luth/assets/AssetSerializer.h"
 
 namespace Luth
 {

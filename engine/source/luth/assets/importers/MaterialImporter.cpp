@@ -1,6 +1,6 @@
 #include "luthpch.h"
 #include "MaterialImporter.h"
-#include "luth/resources/AssetSerializer.h"
+#include "luth/assets/AssetSerializer.h"
 #include <fstream>
 
 namespace Luth

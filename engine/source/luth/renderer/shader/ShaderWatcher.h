@@ -1,6 +1,6 @@
 #pragma once
 
-#include "luth/resources/FileWatcher.h"
+#include "luth/assets/FileWatcher.h"
 
 #include <filesystem>
 #include <mutex>

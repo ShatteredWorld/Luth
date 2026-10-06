@@ -1,8 +1,8 @@
 #pragma once
 
 #include "luth/core/UUID.h"
-#include "luth/resources/Asset.h"
-#include "luth/resources/FileWatcher.h"
+#include "luth/assets/Asset.h"
+#include "luth/assets/FileWatcher.h"
 #include <filesystem>
 #include <functional>
 #include <memory>

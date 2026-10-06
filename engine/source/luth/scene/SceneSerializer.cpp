@@ -3,7 +3,7 @@
 #include "luth/scene/Scene.h"
 #include "luth/scene/Entity.h"
 #include "luth/scene/Components.h"
-#include "luth/resources/AssetManager.h"
+#include "luth/assets/AssetManager.h"
 #include "luth/renderer/resources/Model.h"
 
 #include <nlohmann/json.hpp>

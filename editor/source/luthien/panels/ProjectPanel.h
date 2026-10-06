@@ -1,7 +1,7 @@
 #pragma once
 
 #include "luthien/Editor.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/FileSystem.h"
 #include "luth/core/UUID.h"
 
 #include <memory>

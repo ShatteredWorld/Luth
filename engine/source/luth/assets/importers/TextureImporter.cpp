@@ -1,9 +1,9 @@
 #include "luthpch.h"
 #include "TextureImporter.h"
-#include "luth/resources/AssetSerializer.h"
-#include "luth/resources/Image.h"
-#include "luth/resources/MetaFile.h"
-#include "luth/resources/importers/TextureCompressor.h"
+#include "luth/assets/AssetSerializer.h"
+#include "luth/assets/Image.h"
+#include "luth/assets/MetaFile.h"
+#include "luth/assets/importers/TextureCompressor.h"
 
 #include <algorithm>
 

@@ -6,10 +6,10 @@
 #include "luth/physics/JoltMath.h"
 #include "luth/scene/components/Physics.h"
 #include "luth/renderer/resources/Model.h"
-#include "luth/resources/AssetDatabase.h"
-#include "luth/resources/AssetManager.h"
-#include "luth/resources/MetaFile.h"
-#include "luth/resources/importers/ModelImporter.h"
+#include "luth/assets/AssetDatabase.h"
+#include "luth/assets/AssetManager.h"
+#include "luth/assets/MetaFile.h"
+#include "luth/assets/importers/ModelImporter.h"
 #include "luth/core/diagnostics/Log.h"
 
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>

@@ -12,7 +12,7 @@
 #include "luth/renderer/backend/vulkan/GPUTimerPool.h"
 #include "luth/renderer/Renderer.h"
 #include "luth/renderer/backend/vulkan/RenderPassJob.h"
-#include <vma/vk_mem_alloc.h>
+#include <vk_mem_alloc.h>
 #include <fstream>
 #include <cstdlib>
 

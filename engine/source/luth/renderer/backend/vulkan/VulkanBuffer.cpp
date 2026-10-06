@@ -5,7 +5,7 @@
 #include "UploadContext.h"
 
 // VMA enums used here
-#include <vma/vk_mem_alloc.h>
+#include <vk_mem_alloc.h>
 
 namespace Luth
 {

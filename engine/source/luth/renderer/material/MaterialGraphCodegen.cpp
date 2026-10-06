@@ -4,7 +4,7 @@
 #include "luth/renderer/shader/SlangCompiler.h"
 #include "luth/renderer/shader/Shader.h"
 #include "luth/renderer/shader/ShaderLibrary.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/FileSystem.h"
 #include "luth/core/diagnostics/Log.h"
 #include "luth/jobs/MainThreadPump.h"
 

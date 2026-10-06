@@ -1,7 +1,7 @@
 #pragma once
 
 #include "luth/core/UUID.h"
-#include "luth/resources/Image.h"
+#include "luth/assets/Image.h"
 
 #include <imgui.h>
 

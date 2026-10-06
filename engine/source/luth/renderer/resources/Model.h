@@ -5,7 +5,7 @@
 #include "luth/renderer/resources/Mesh.h"
 #include "luth/renderer/resources/Skeleton.h"
 #include "luth/renderer/resources/AnimationClip.h"
-#include "luth/resources/Asset.h"
+#include "luth/assets/Asset.h"
 
 #include <string>
 #include <vector>

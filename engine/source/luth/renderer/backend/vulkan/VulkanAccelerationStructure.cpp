@@ -8,7 +8,7 @@
 #include "luth/core/diagnostics/Log.h"
 #include "luth/jobs/SpinLock.h"
 
-#include <vma/vk_mem_alloc.h>
+#include <vk_mem_alloc.h>
 #include <algorithm>
 #include <vector>
 

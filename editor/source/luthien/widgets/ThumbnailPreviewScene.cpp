@@ -19,10 +19,10 @@
 #include "luth/renderer/resources/Texture.h"
 #include "luth/renderer/shader/ShaderLibrary.h"
 #include "luth/renderer/shader/Shader.h"
-#include "luth/resources/AssetManager.h"
+#include "luth/assets/AssetManager.h"
 
 #include <backends/imgui_impl_vulkan.h>
-#include <vma/vk_mem_alloc.h>
+#include <vk_mem_alloc.h>
 
 #include <array>
 #include <cmath>

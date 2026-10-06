@@ -18,13 +18,13 @@
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/scene/systems/RenderingSystem.h"
 #include "luth/scene/systems/SystemRegistry.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/FileSystem.h"
 #include "luth/core/diagnostics/Log.h"
 #include "luth/core/BuildConfig.h"
 #include "luth/core/FrameData.h"
 #include "luth/core/RenderSnapshot.h"
 
-#include <vma/vk_mem_alloc.h>
+#include <vk_mem_alloc.h>
 
 namespace Luth
 {

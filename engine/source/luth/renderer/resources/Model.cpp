@@ -4,7 +4,7 @@
 #include "luth/core/diagnostics/Log.h"
 #include "luth/renderer/backend/vulkan/VulkanBuffer.h"
 #include "luth/renderer/backend/vulkan/VulkanAccelerationStructure.h"
-#include "luth/resources/AssetManager.h"
+#include "luth/assets/AssetManager.h"
 
 namespace Luth
 {

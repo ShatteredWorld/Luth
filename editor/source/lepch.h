@@ -5,5 +5,5 @@
 
 // Editor-specific heavy includes used across most panels/inspectors
 #include <imgui.h>
-#include <imgui/imgui_internal.h>
+#include <imgui_internal.h>
 #include <vulkan/vulkan.h>

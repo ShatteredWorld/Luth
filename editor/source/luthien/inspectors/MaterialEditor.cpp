@@ -10,16 +10,16 @@
 #include "luth/renderer/material/MaterialGraphCodegen.h"
 #include "luth/renderer/resources/Texture.h"
 #include "luth/renderer/shader/ShaderLibrary.h"
-#include "luth/resources/AssetDatabase.h"
-#include "luth/resources/AssetManager.h"
-#include "luth/resources/AssetSerializer.h"
-#include "luth/resources/importers/MaterialImporter.h"
+#include "luth/assets/AssetDatabase.h"
+#include "luth/assets/AssetManager.h"
+#include "luth/assets/AssetSerializer.h"
+#include "luth/assets/importers/MaterialImporter.h"
 #include "luth/core/time/Time.h"
 #include "luth/jobs/IOThread.h"
 #include "luthien/commands/Commands.h"
 #include "luthien/CommandHistory.h"
 
-#include <imgui/imgui_internal.h>
+#include <imgui_internal.h>
 
 #include <algorithm>
 

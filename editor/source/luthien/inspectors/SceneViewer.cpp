@@ -2,7 +2,7 @@
 #include "luthien/inspectors/SceneViewer.h"
 #include "luthien/Editor.h"
 #include "luthien/widgets/Widgets.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/FileSystem.h"
 #include <nlohmann/json.hpp>
 
 namespace Luth

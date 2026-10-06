@@ -3,7 +3,7 @@
 
 #include <doctest/doctest.h>
 
-#include "luth/resources/importers/TextureCompressor.h"
+#include "luth/assets/importers/TextureCompressor.h"
 #include "luth/renderer/resources/Texture.h"
 
 #include <vector>

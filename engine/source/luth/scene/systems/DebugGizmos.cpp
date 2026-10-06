@@ -6,7 +6,7 @@
 #include "luth/core/diagnostics/Profiler.h"
 #include "luth/renderer/CameraParams.h"
 #include "luth/renderer/resources/Model.h"
-#include "luth/resources/AssetManager.h"
+#include "luth/assets/AssetManager.h"
 #include "luth/scene/Components.h"
 #include "luth/scene/Entity.h"
 #include "luth/scene/Scene.h"

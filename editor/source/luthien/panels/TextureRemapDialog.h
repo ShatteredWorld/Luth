@@ -1,6 +1,6 @@
 #pragma once
 
-#include "luth/resources/importers/ImportReport.h"
+#include "luth/assets/importers/ImportReport.h"
 
 #include <filesystem>
 #include <string>

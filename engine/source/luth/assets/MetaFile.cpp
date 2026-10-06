@@ -1,5 +1,5 @@
 #include "luthpch.h"
-#include "luth/resources/MetaFile.h"
+#include "luth/assets/MetaFile.h"
 
 namespace Luth
 {

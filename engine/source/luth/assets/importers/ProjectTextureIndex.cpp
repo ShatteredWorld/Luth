@@ -1,7 +1,7 @@
 #include "luthpch.h"
-#include "luth/resources/importers/ProjectTextureIndex.h"
-#include "luth/resources/AssetDatabase.h"
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/importers/ProjectTextureIndex.h"
+#include "luth/assets/AssetDatabase.h"
+#include "luth/assets/FileSystem.h"
 
 #include <algorithm>
 #include <cctype>

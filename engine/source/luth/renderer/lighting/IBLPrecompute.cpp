@@ -5,10 +5,10 @@
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
 #include "luth/renderer/backend/vulkan/VulkanAllocator.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
-#include "luth/resources/FileSystem.h"
-#include "luth/resources/Image.h"
+#include "luth/assets/FileSystem.h"
+#include "luth/assets/Image.h"
 
-#include <vma/vk_mem_alloc.h>
+#include <vk_mem_alloc.h>
 
 namespace Luth
 {

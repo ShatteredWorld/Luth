@@ -5,7 +5,7 @@
 #include "luthien/commands/Commands.h"
 #include "luthien/CommandHistory.h"
 #include "luth/scene/Components.h"
-#include "luth/resources/AssetManager.h"
+#include "luth/assets/AssetManager.h"
 #include "luth/renderer/resources/Model.h"
 
 #include <nlohmann/json.hpp>

@@ -1,11 +1,11 @@
 #include "luthpch.h"
 #include "AssetSerializer.h"
-#include "luth/resources/importers/TextureImporter.h"
-#include "luth/resources/importers/ModelImporter.h"
-#include "luth/resources/importers/MaterialImporter.h"
-#include "luth/resources/importers/PhysicsMaterialImporter.h"
-#include "luth/resources/importers/ShaderImporter.h"
-#include "luth/resources/importers/AnimationClipImporter.h"
+#include "luth/assets/importers/TextureImporter.h"
+#include "luth/assets/importers/ModelImporter.h"
+#include "luth/assets/importers/MaterialImporter.h"
+#include "luth/assets/importers/PhysicsMaterialImporter.h"
+#include "luth/assets/importers/ShaderImporter.h"
+#include "luth/assets/importers/AnimationClipImporter.h"
 #include <fstream>
 
 namespace Luth

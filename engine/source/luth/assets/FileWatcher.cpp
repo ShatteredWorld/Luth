@@ -1,5 +1,5 @@
 #include "luthpch.h"
-#include "luth/resources/FileWatcher.h"
+#include "luth/assets/FileWatcher.h"
 
 #include <algorithm>
 

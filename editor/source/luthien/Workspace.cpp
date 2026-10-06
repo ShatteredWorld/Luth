@@ -1,7 +1,7 @@
 #include "lepch.h"
 #include "luthien/Workspace.h"
 
-#include "luth/resources/FileSystem.h"
+#include "luth/assets/FileSystem.h"
 
 #include <nlohmann/json.hpp>
 

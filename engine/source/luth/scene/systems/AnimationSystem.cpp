@@ -7,7 +7,7 @@
 #include "luth/core/time/Time.h"
 #include "luth/renderer/resources/BoneMatrixBuffer.h"
 #include "luth/renderer/resources/Model.h"
-#include "luth/resources/AssetManager.h"
+#include "luth/assets/AssetManager.h"
 
 
 namespace Luth

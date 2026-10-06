@@ -3,7 +3,7 @@
 #include "luthien/EditorColors.h"
 
 #include <imgui.h>
-#include <imgui/imgui_internal.h>
+#include <imgui_internal.h>
 
 
 namespace Luth::UI

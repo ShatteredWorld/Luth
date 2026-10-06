@@ -1,7 +1,7 @@
 #pragma once
 
 #include "luth/core/UUID.h"
-#include "luth/resources/Asset.h"
+#include "luth/assets/Asset.h"
 
 namespace Luth::UI
 {

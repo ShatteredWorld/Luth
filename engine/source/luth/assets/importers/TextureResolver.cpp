@@ -1,6 +1,6 @@
 #include "luthpch.h"
-#include "luth/resources/importers/TextureResolver.h"
-#include "luth/resources/importers/ProjectTextureIndex.h"
+#include "luth/assets/importers/TextureResolver.h"
+#include "luth/assets/importers/ProjectTextureIndex.h"
 
 #include <algorithm>
 #include <cctype>
