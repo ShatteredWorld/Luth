@@ -8,6 +8,7 @@
 #include "luth/renderer/features/CsmFeature.h"
 #include "luth/renderer/features/ClusteredLightingFeature.h"
 #include "luth/renderer/features/FogComputeFeature.h"
+#include "luth/renderer/features/FogCompositeFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -178,6 +179,14 @@ namespace Luth
         auto fogCompiled = RenderPipelineCompiler{}.Compile(std::move(fogDefinition), {}, fogInputs);
         if (!fogCompiled.ReplaceIfValid(m_FogComputeComposition))
             throw std::runtime_error("Fog compute feature definition failed semantic validation");
+        RenderPipelineDefinition fogCompositeDefinition;
+        fogCompositeDefinition.AddFeature<FogCompositeFeature>(m_Volumetric, &m_System.GetFrameDebugger());
+        PipelineInputContract fogCompositeInputs;
+        fogCompositeInputs.resources = {{RenderResources::SkyHDR}, {RenderResources::SurfaceDepth},
+            {FogCompositeResources::Bindings}, {RenderResources::ResolvedFog, ResourceOutputPresence::Optional}};
+        auto fogCompositeCompiled = RenderPipelineCompiler{}.Compile(std::move(fogCompositeDefinition), {}, fogCompositeInputs);
+        if (!fogCompositeCompiled.ReplaceIfValid(m_FogCompositeComposition))
+            throw std::runtime_error("Fog composite feature definition failed semantic validation");
         RenderPipelineDefinition skyDefinition;
         skyDefinition.AddFeature<SkyFeature>(m_Lighting, &m_System.GetFrameDebugger());
         PipelineInputContract skyInputs;
@@ -305,6 +314,7 @@ namespace Luth
         m_CsmComposition.reset();
         m_ClusterComposition.reset();
         m_FogComputeComposition.reset();
+        m_FogCompositeComposition.reset();
         m_SkyComposition.reset();
         m_ForwardComposition.reset();
         m_Skinning.Shutdown();
@@ -626,7 +636,6 @@ namespace Luth
         const RG::ResourceHandle volResolvedHandle = fogResolved.handle;
         if (volResolvedHandle.IsValid())
         {
-            m_Volumetric.WriteCompositePerFrame(*m_CurrentViewResources, *view.targets, fogFrameAbs);
             m_Volumetric.WriteVizPerFrame(*m_CurrentViewResources, fogFrameAbs);
         }
 
@@ -842,12 +851,29 @@ namespace Luth
                     LH_LOG(Renderer, error, "Sky composition: {}", diagnostic.message);
                 return false;
             }
-            const RG::ResourceHandle skyboxColor = skyOutput.handle;
             // Volumetric composite: blends fog into sceneColor (alpha-blend) BEFORE bloom so bright
             // in-scattered fog can bloom + the grid overlays unfogged lines. Off -> uses skyboxColor unchanged.
-            RG::ResourceHandle fogColor = (volResolvedHandle.IsValid() && m_CurrentViewResources)
-                                          ? m_Volumetric.AddCompositePass(rg, skyboxColor, surfaceDepth.handle, volResolvedHandle)
-                                          : skyboxColor;
+            const auto fogCompositeNative = m_Volumetric.PrepareCompositeBindings(*m_CurrentViewResources->fog,
+                fogFrameAbs, view.camera, m_CurrentViewResources->globalDescriptorSet[skySlot], volResolvedHandle.IsValid());
+            const FogCompositeBindingRef fogCompositeBinding{&fogCompositeNative};
+            const std::array fogCompositeResources{RenderInputBinding::Present(RenderResources::SkyHDR, skyOutput),
+                RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
+                RenderInputBinding::Present(FogCompositeResources::Bindings, fogCompositeBinding),
+                fogResolved.handle.IsValid() ? RenderInputBinding::Present(RenderResources::ResolvedFog, fogResolved)
+                    : RenderInputBinding::Absent(RenderResources::ResolvedFog)};
+            FrameRenderInputs fogCompositeFrame;
+            fogCompositeFrame.renderFrameIndex = skyFrame.renderFrameIndex; fogCompositeFrame.resources = fogCompositeResources;
+            GraphTextureRef foggedOutput;
+            const std::array fogCompositeExports{RenderOutputBinding::Capture(RenderResources::FoggedHDR, foggedOutput)};
+            const auto fogCompositeBuild = m_FogCompositeComposition->Build(rg, fogCompositeFrame, skyView,
+                s.GetFrameAllocator(), fogCompositeExports);
+            if (!fogCompositeBuild.success)
+            {
+                for (const auto& diagnostic : fogCompositeBuild.diagnostics)
+                    LH_LOG(Renderer, error, "Fog composite composition: {}", diagnostic.message);
+                return false;
+            }
+            const RG::ResourceHandle fogColor = foggedOutput.handle;
             // Snapshot the pre-transparent scene (opaque + fog) into the per-view refraction backdrop so glass
             // can sample the refracted background. RG orders the copy after the composite (reads fogColor as
             // TransferSrc) and before the transparent pass's Set 6 b3 sample (declared Read there). Skipped

@@ -53,6 +53,8 @@ add_library(Luth STATIC
     source/luth/renderer/features/ClusteredLightingFeature.cpp
     source/luth/renderer/features/SkyFeature.cpp
     source/luth/renderer/features/ForwardOpaqueFeature.cpp
+    source/luth/renderer/features/FogCompositeFeature.cpp
+    source/luth/renderer/subsystems/VolumetricComposite.cpp
     source/luth/renderer/features/FogComputeFeature.cpp
     source/luth/renderer/subsystems/VolumetricCompute.cpp
     source/luth/renderer/features/FogViewState.cpp

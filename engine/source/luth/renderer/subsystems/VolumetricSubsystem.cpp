@@ -1102,19 +1102,19 @@ namespace Luth
         vkUpdateDescriptorSets(device, w, writes, 0, nullptr);
     }
 
-    void VolumetricSubsystem::WriteCompositePerFrame(ViewResources& vr, FrameTargets& /*targets*/, u32 frameAbs)
+    void VolumetricSubsystem::WriteCompositePerFrame(FogViewState& vr, u32 frameAbs)
     {
         LH_PROFILE_FUNCTION();
         if (m_CompositeDescLayout == VK_NULL_HANDLE) return;
-        if (!vr.fog || !vr.fog->volInScatterHistA || !vr.fog->volInScatterHistB) return;
+        if (!vr.volInScatterHistA || !vr.volInScatterHistB) return;
 
         const u32 slot    = frameAbs % MAX_FRAMES_IN_FLIGHT;
         const bool parity = (frameAbs & 1u) != 0u;
-        if (vr.fog->volCompositeDescSet[slot] == VK_NULL_HANDLE) return;
+        if (vr.volCompositeDescSet[slot] == VK_NULL_HANDLE) return;
 
         // Sample the resolve pass's curr-frame output (same parity rule as resolve's b2 write).
         auto vkScat = std::static_pointer_cast<VKTexture>(
-            parity ? vr.fog->volInScatterHistA : vr.fog->volInScatterHistB);
+            parity ? vr.volInScatterHistA : vr.volInScatterHistB);
 
         VkDescriptorImageInfo scatInfo{};
         scatInfo.imageView   = vkScat->GetImageView();
@@ -1122,87 +1122,12 @@ namespace Luth
         scatInfo.sampler     = m_Sampler;
 
         VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        write.dstSet          = vr.fog->volCompositeDescSet[slot];
+        write.dstSet          = vr.volCompositeDescSet[slot];
         write.dstBinding      = 1;
         write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         write.descriptorCount = 1;
         write.pImageInfo      = &scatInfo;
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 1, &write, 0, nullptr);
-    }
-
-    RG::ResourceHandle VolumetricSubsystem::AddCompositePass(RG::RenderGraph& rg,
-                                                              RG::ResourceHandle sceneColor,
-                                                              RG::ResourceHandle sceneDepth,
-                                                              RG::ResourceHandle resolvedInScatter)
-    {
-        LH_PROFILE_FUNCTION();
-        if (!m_CompositePipeline) return sceneColor;
-
-        struct CompositeData {
-            RG::ResourceHandle color;
-            RG::ResourceHandle depth;
-            RG::ResourceHandle inScatter;
-        };
-        RG::ResourceHandle outputHandle;
-
-        rg.AddPass<CompositeData>("VolumetricComposite",
-            [&, sceneColor, sceneDepth, resolvedInScatter](CompositeData& data, RG::RenderPassBuilder& builder)
-            {
-                data.color = builder.Write(sceneColor,
-                    VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
-                data.depth = builder.Read(sceneDepth);
-                // Sampler-binding 1 of the composite descriptor; declaring the read makes RG emit
-                // the GENERAL -> SHADER_READ_ONLY transition after resolve's storage write.
-                if (resolvedInScatter.IsValid())
-                    data.inScatter = builder.Read(resolvedInScatter);
-                outputHandle = data.color;
-            },
-            [this](CompositeData& /*data*/, RG::RenderPassContext& ctx)
-            {
-                auto& sys = m_Pipeline->GetSystem();
-                const auto* view = m_Pipeline->GetCurrentView();
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "VolumetricComposite",
-                    "SceneColor", false,
-                    { "volumetric_composite", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, false });
-
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                if (!m_CompositePipeline || vr->fog->volCompositeDescSet[slot] == VK_NULL_HANDLE)
-                {
-                    sys.GetFrameDebugger().EndCapturePass();
-                    return;
-                }
-
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                m_CompositePipeline->Bind(cmd);
-
-                VkDescriptorSet sets[2] = {
-                    vr->globalDescriptorSet[slot],
-                    vr->fog->volCompositeDescSet[slot],
-                };
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_CompositePipeline->GetLayout(), 0, 2, sets, 0, nullptr);
-
-                Mat4 invView = Math::Inverse(view->camera.view);
-                vkCmdPushConstants(cmd, m_CompositePipeline->GetLayout(),
-                    VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Mat4), &invView);
-
-                u32 w = view->targets->GetSceneColor()->GetWidth();
-                u32 h = view->targets->GetSceneColor()->GetHeight();
-                VkViewport vp{}; vp.width = (float)w; vp.height = (float)h; vp.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &vp);
-                VkRect2D sc{}; sc.extent = { w, h };
-                vkCmdSetScissor(cmd, 0, 1, &sc);
-                vkCmdDraw(cmd, 3, 1, 0, 0);
-
-                ObjectPushConstants dummyPC{};
-                sys.GetFrameDebugger().CaptureDrawCall("VolumetricComposite", "FullscreenTriangle",
-                    "VolumetricComposite", 0, 0, dummyPC,
-                    { "volumetric_composite", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, false });
-                sys.GetFrameDebugger().EndCapturePass();
-            });
-        return outputHandle;
     }
 
     bool VolumetricSubsystem::IsRtShadowsEnabled() const

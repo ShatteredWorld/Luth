@@ -7,6 +7,7 @@
 #include "luth/renderer/resources/Texture.h"
 #include "luth/renderer/features/FogViewState.h"
 #include "luth/renderer/features/FogComputeBindings.h"
+#include "luth/renderer/features/FogCompositeBindings.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 #include "luth/renderer/backend/vulkan/VulkanPipeline.h"
 
@@ -109,7 +110,7 @@ namespace Luth
         void WriteCompositeView(FogViewState& vr, FrameTargets& targets);
 
         // Per-frame rewrite of composite b1: samples this frame's resolved history atlas.
-        void WriteCompositePerFrame(ViewResources& vr, FrameTargets& targets, u32 frameAbs);
+        void WriteCompositePerFrame(FogViewState& vr, u32 frameAbs);
 
         // Stable per-view write of the viz descriptor: b0 (sceneDepth), b1 (volDensity) are stable.
         // b2 (resolved in-scatter sampler) parity-rewrites in WriteVizPerFrame.
@@ -125,7 +126,10 @@ namespace Luth
         // Graphics pass: blends fog-modulated radiance back into sceneColor via standard alpha blend.
         RG::ResourceHandle AddCompositePass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor,
                                             RG::ResourceHandle sceneDepth,
-                                            RG::ResourceHandle resolvedInScatter);
+                                            RG::ResourceHandle resolvedInScatter, u32 width, u32 height,
+                                            const FogCompositeBindings&, FrameDebugger*);
+        FogCompositeBindings PrepareCompositeBindings(FogViewState&, u32 frameAbs,
+            const CameraParams&, VkDescriptorSet global, bool enabled);
 
         VkSampler                   GetSampler()              const { return m_Sampler; }
         const Memory::GPUSubRegion& GetLastFogVolumeRegion()  const { return m_LastFogVolumeRegion; }
