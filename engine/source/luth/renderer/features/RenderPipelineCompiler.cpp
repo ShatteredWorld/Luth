@@ -350,9 +350,11 @@ namespace Luth
     }
 
     PipelineBuildResult CompiledRenderPipeline::Build(RG::RenderGraph& graph,
-        const FrameRenderInputs& frame, const ViewRenderInputs& view, Memory::LinearAllocator& scratch)
+        const FrameRenderInputs& frame, const ViewRenderInputs& view, Memory::LinearAllocator& scratch,
+        std::span<const RenderOutputBinding> outputs)
     {
         PipelineBuildResult result;
+        for (const auto& output : outputs) output.m_Copy(output.m_Destination, nullptr);
         FeatureInstanceId current = InvalidFeatureInstance;
         auto fail = [&](PipelineDiagnosticCode code, std::string message, ResourceKeyRef key = {}, const RenderCapabilityIdentity* capability = nullptr) {
             result.diagnostics.push_back({code, current, InvalidFeatureInstance, key, capability, {}, std::move(message)});
@@ -360,6 +362,7 @@ namespace Luth
         try
         {
             RenderBlackboard board(m_Layout, scratch);
+            for (const auto& output : outputs) (void)m_Layout.Find(output.m_Key);
             for (const auto bindings : {frame.resources, view.resources})
                 for (const auto& binding : bindings)
                 {
@@ -467,6 +470,8 @@ namespace Luth
                     else if (seenAsync) seenGraphicsB = true;
                 }
             }
+            for (const auto& output : outputs)
+                output.m_Copy(output.m_Destination, board.TryGetBorrowed(output.m_Key));
             result.success = true;
         }
         catch (const BlackboardError& error)

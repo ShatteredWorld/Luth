@@ -23,16 +23,16 @@ namespace Luth
     // Per-view pool: cycled sets allocate MAX_FRAMES_IN_FLIGHT instances each. Capacity bumped on
     // every subsystem addition; silent vkAllocateDescriptorSets failure on overflow returns
     // VK_NULL_HANDLE handles and skips the draw with no log. Bump generously; pool memory is cheap.
-    static constexpr u32 k_ViewPoolMaxSets              = 205;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale + bloom pyramid sets
-    static constexpr u32 k_ViewPoolUniformBufferCount   = 48;
-    static constexpr u32 k_ViewPoolStorageImageCount    = 248;  // + DiSpecular SVGF + restir Set 2 b8 + GI upscale b3 + DI upscale x2 + refl upscale b3 + bloom pyramid mips
+    static constexpr u32 k_ViewPoolMaxSets              = 205 - MAX_FRAMES_IN_FLIGHT - 2;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale + bloom pyramid sets
+    static constexpr u32 k_ViewPoolUniformBufferCount   = 48 - MAX_FRAMES_IN_FLIGHT;
+    static constexpr u32 k_ViewPoolStorageImageCount    = 248 - MAX_FRAMES_IN_FLIGHT - 2;  // + DiSpecular SVGF + restir Set 2 b8 + GI upscale b3 + DI upscale x2 + refl upscale b3 + bloom pyramid mips
     static constexpr u32 k_ViewPoolStorageBufferCount   = 126;  // + Transparency b2 OIT nodes x3
-    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels + Transparency b3 refraction backdrop x3
+    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - MAX_FRAMES_IN_FLIGHT - 3;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels + Transparency b3 refraction backdrop x3
     static constexpr u32 k_ViewPoolAccelStructCount     = 8;   // Set 0 binding 6 (TLAS) cycled per frame
 
     namespace {
         // Build the per-view Set 0 write context from RP-side state.
-        // invariant: GTAO textures must already exist (RecreateViewTextures runs before).
+        // GTAO state is prepared independently before writing the compatibility global set.
         GlobalViewWriteContext MakeGlobalCtx(const RenderPipeline& rp, const ViewResources& vr)
         {
             const auto& lighting = rp.GetLighting();
@@ -46,9 +46,8 @@ namespace Luth
                 ctx.prefilteredView = std::static_pointer_cast<VKTexture>(lighting.GetPrefilteredMap())->GetImageView();
                 ctx.brdfView        = std::static_pointer_cast<VKTexture>(lighting.GetBRDFLut())->GetImageView();
             }
-            ctx.gtaoFinalView = vr.gtaoFinal
-                ? std::static_pointer_cast<VKTexture>(vr.gtaoFinal)->GetImageView()
-                : VK_NULL_HANDLE;
+            const auto* gtao = rp.GetGtaoViewState({vr.id});
+            ctx.gtaoFinalView = gtao ? gtao->finalBinding.view : VK_NULL_HANDLE;
             return ctx;
         }
     }
@@ -65,6 +64,7 @@ namespace Luth
 
         const u32 newW = targets.GetSceneColor()->GetWidth();
         const u32 newH = targets.GetSceneColor()->GetHeight();
+        m_GTAO.EnsureView(m_GtaoStates, id, newW, newH, *targets.GetSceneDepth());
 
         if (inserted || vr.descPool == VK_NULL_HANDLE)
         {
@@ -89,7 +89,6 @@ namespace Luth
             m_PostProcess.WriteView(vr, targets);
             m_PostProcess.WriteBloomView(vr);
             m_PostProcess.WriteTaaResolveView(vr, targets);
-            m_GTAO.WriteView(vr, targets);
             m_EditorOverlays.WriteOutlineView(vr, targets);
             m_EditorOverlays.WriteGridView(vr, targets);
             // sceneDepth + atlases are per-view + recreated on resize/quality change, so re-bind
@@ -126,7 +125,9 @@ namespace Luth
 
     void RenderPipeline::ReleaseViewResources(FrameTargets& targets)
     {
-        auto it = m_ViewResources.find(m_System.GetViews().Find(&targets).value);
+        const auto id = m_System.GetViews().Find(&targets);
+        if (m_GtaoPipeline) m_GtaoPipeline->ReleaseView(id);
+        auto it = m_ViewResources.find(id.value);
         if (it == m_ViewResources.end()) return;
         DestroyViewResources(it->second);
         if (m_CurrentViewResources == &it->second) m_CurrentViewResources = nullptr;
@@ -233,9 +234,6 @@ namespace Luth
             allocSingle(bloomLayout, vr.bloomUpDescSet[i], tag);
         }
         allocCycled(ppLayout,                            vr.compositeDescSet,      "View.Composite");
-        allocSingle(m_GTAO.GetPrefilterLayout(),         vr.gtaoPrefilterDescSet, "View.GTAOPrefilter");
-        allocCycled(m_GTAO.GetMainLayout(),              vr.gtaoMainDescSet,      "View.GTAOMain");
-        allocSingle(m_GTAO.GetDenoiseLayout(),           vr.gtaoDenoiseDescSet,   "View.GTAODenoise");
         allocSingle(m_EditorOverlays.GetOutlineLayout(), vr.outlineDescSet,       "View.Outline");
         allocCycled(m_EditorOverlays.GetGridLayout(),    vr.gridDescSet,          "View.Grid");
         allocSingle(m_PostProcess.GetSlimVizDescSetLayout(), vr.slimVizDescSet,   "View.SlimViz");
@@ -270,7 +268,6 @@ namespace Luth
         m_PostProcess.WriteView(vr, targets);
         m_PostProcess.WriteBloomView(vr);
         m_PostProcess.WriteTaaResolveView(vr, targets);
-        m_GTAO.WriteView(vr, targets);
         m_EditorOverlays.WriteOutlineView(vr, targets);
         m_EditorOverlays.WriteGridView(vr, targets);
         m_Lighting.WriteShadowView(vr);
@@ -295,7 +292,7 @@ namespace Luth
         m_DenoiseGi->WriteView(vr, targets);
         m_DenoiseRefl->WriteView(vr, targets);
         m_DenoiseDiSpec->WriteView(vr, targets);
-        // Global writes last; reads vr.gtaoFinal view that GTAO writes set up.
+        // Global writes borrow the final AO binding from the independent GTAO state.
         m_Global.WriteView(vr, MakeGlobalCtx(*this, vr));
     }
 
@@ -534,17 +531,6 @@ namespace Luth
         vr.oitNodes = Memory::GPUTaggedPageAllocator::Get().AllocateLargeTaggedDeviceLocal(
             vr.oitNodesTag, 16ull + static_cast<u64>(fullW) * static_cast<u64>(fullH) * oitBudget * 16ull, 16);
 
-        auto makeStorage = [&](TextureFormat fmt) {
-            return std::make_shared<VKTexture>(
-                halfW, halfH, fmt,
-                /*arrayLayers*/ 1, /*createFlags*/ 0u, /*mipLevels*/ 1,
-                VK_IMAGE_USAGE_STORAGE_BIT);
-        };
-        vr.gtaoLinearDepth = makeStorage(TextureFormat::R32_Float);
-        vr.gtaoRawAO       = makeStorage(TextureFormat::R8);
-        vr.gtaoEdges       = makeStorage(TextureFormat::R8);
-        vr.gtaoFinal       = makeStorage(TextureFormat::R8);
-
         // Volumetric fog atlas dims from current quality preset (Low / Medium / High). View-aligned
         // but dimensions are independent of viewport pixels; they don't scale with halfW/halfH.
         // Cached on vr so EnsureViewResources can detect runtime quality changes.
@@ -671,10 +657,6 @@ namespace Luth
     {
         // Pool destruction frees every descriptor set allocated from it.
         for (auto& mip : vr.bloomMip) mip.reset();
-        vr.gtaoLinearDepth.reset();
-        vr.gtaoRawAO.reset();
-        vr.gtaoEdges.reset();
-        vr.gtaoFinal.reset();
         vr.volDensity.reset();
         vr.volInScatter.reset();
         vr.volInScatterHistA.reset();

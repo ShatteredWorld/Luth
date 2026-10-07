@@ -44,6 +44,8 @@ add_library(Luth STATIC
     source/luth/renderer/ViewResources.cpp
 
     source/luth/renderer/features/RenderBlackboard.cpp
+    source/luth/renderer/features/GTAOFeature.cpp
+    source/luth/renderer/features/GtaoViewState.cpp
     source/luth/renderer/features/RenderPipelineCompiler.cpp
 
     source/luth/renderer/backend/vulkan/AftermathCrashTracker.cpp

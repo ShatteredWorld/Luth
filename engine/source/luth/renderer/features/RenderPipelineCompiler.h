@@ -32,7 +32,8 @@ namespace Luth
     {
     public:
         PipelineBuildResult Build(RG::RenderGraph&, const FrameRenderInputs&,
-            const ViewRenderInputs&, Memory::LinearAllocator&);
+            const ViewRenderInputs&, Memory::LinearAllocator&,
+            std::span<const RenderOutputBinding> outputs = {});
         void ReleaseView(RenderViewId);
         std::span<const FeatureInstanceId> FeatureOrder() const { return m_Order; }
         const ResourceSlotLayout& ResourceSlots() const { return m_Layout; }

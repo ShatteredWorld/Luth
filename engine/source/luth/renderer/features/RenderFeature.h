@@ -72,11 +72,38 @@ namespace Luth
         static RenderInputBinding Present(RenderResourceKey<T>, const T&&) = delete;
         template<class T>
         static RenderInputBinding Absent(RenderResourceKey<T> key) { return {key, nullptr}; }
+        template<class T>
+        const T* TryGet(RenderResourceKey<T> key) const
+        {
+            const ResourceKeyRef requested{key};
+            return m_Key.identity == requested.identity && m_Key.type == requested.type
+                ? static_cast<const T*>(m_Value) : nullptr;
+        }
     private:
         friend class CompiledRenderPipeline;
         RenderInputBinding(ResourceKeyRef key, const void* value) : m_Key(key), m_Value(value) {}
         ResourceKeyRef m_Key;
         const void* m_Value;
+    };
+    // Graph-local exports for compatibility consumers. Destinations live through Build;
+    // absence/failure resets them, and exports never retain a previous graph's handles.
+    class RenderOutputBinding
+    {
+    public:
+        template<class T>
+        static RenderOutputBinding Capture(RenderResourceKey<T> key, T& destination)
+        {
+            return {key, &destination, [](void* dst, const void* src) {
+                *static_cast<T*>(dst) = src ? *static_cast<const T*>(src) : T{};
+            }};
+        }
+    private:
+        friend class CompiledRenderPipeline;
+        RenderOutputBinding(ResourceKeyRef key, void* destination, void (*copy)(void*, const void*))
+            : m_Key(key), m_Destination(destination), m_Copy(copy) {}
+        ResourceKeyRef m_Key;
+        void* m_Destination;
+        void (*m_Copy)(void*, const void*);
     };
     struct PipelineInputContract
     {

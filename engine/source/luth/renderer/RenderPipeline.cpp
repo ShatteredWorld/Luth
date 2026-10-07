@@ -1,5 +1,6 @@
 #include "luthpch.h"
 #include "luth/renderer/RenderPipeline.h"
+#include "luth/renderer/features/GTAOFeature.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
 #include "luth/renderer/debug/FrameDebuggerContext.h"
 #include "luth/scene/systems/RenderingSystem.h"
@@ -98,7 +99,14 @@ namespace Luth
         m_EditorOverlays.BuildPipelines(geoLayouts);
         m_DebugDraw.BuildPipelines();
 
-        m_GTAO.Init(*this);
+        m_GTAO.Init();
+        RenderPipelineDefinition gtaoDefinition;
+        gtaoDefinition.AddFeature<GTAOFeature>(m_GTAO, m_GtaoStates, &m_System.GetFrameDebugger());
+        PipelineInputContract gtaoInputs;
+        gtaoInputs.resources = {{RenderResources::SurfaceDepth}, {GtaoResources::Parameters}};
+        auto gtaoCompiled = RenderPipelineCompiler{}.Compile(std::move(gtaoDefinition), {}, gtaoInputs);
+        if (!gtaoCompiled.ReplaceIfValid(m_GtaoPipeline))
+            throw std::runtime_error("GTAO feature definition failed semantic validation");
         m_Volumetric.Init(*this);
         m_Rt.Init(*this);
         m_Restir.Init(*this);
@@ -201,6 +209,8 @@ namespace Luth
         for (auto& [targets, vr] : m_ViewResources)
             DestroyViewResources(vr);
         m_ViewResources.clear();
+        m_GtaoPipeline.reset();
+        m_GtaoStates.ReleaseAll([] { Renderer::WaitForGPU(); });
 
         m_Debugger->Shutdown();
         m_System.GetFrameDebugger().Shutdown(device);
@@ -484,16 +494,36 @@ namespace Luth
         if (denoisedReflHandle.IsValid() && m_System.GetReflectionsSettings().halfResolution)
             denoisedReflHandle = m_Reflections.AddUpscalePass(rg, denoisedReflHandle, prepassDepth, slimGB.normal);
 
-        // GTAO chain: skipped in PT (pbr.frag doesn't run) and when disabled. When skipped, gtaoFinal keeps
-        // its VKTexture-ctor SHADER_READ_ONLY layout, so pbr's Set 0 b4 sampler binding stays valid; the
-        // gtao.enabled UBO flag zeroes the modulation, so the stale content is ignored. ~0.3-1 ms at 1080p.
-        RG::ResourceHandle gtaoFinalAO{};
-        if (!ptEnabled && m_System.GetPostProcessSettings().gtao.enabled)
+        // Legacy depth/geometry bridge shares graph-local references with the compiled
+        // feature. Disabled/PT frames publish absent AO and register no GTAO passes.
+        const GraphTextureRef surfaceDepth{prepassDepth, {view.targets->GetSceneDepth().get()}};
+        const auto* preparedGtao = GetGtaoViewState(view.id);
+        const GtaoFrameParameters gtaoParams{
+            preparedGtao && preparedGtao->uniformEnabled, !ptEnabled,
+            static_cast<u32>(Renderer::GetFrameData()->GetFrameIndex())};
+        const std::array gtaoBindings{
+            RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
+            RenderInputBinding::Present(GtaoResources::Parameters, gtaoParams)};
+        FrameRenderInputs featureFrame;
+        featureFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+        ViewRenderInputs featureView;
+        featureView.id = view.id;
+        featureView.resourceGeneration = m_CurrentViewResources->generation;
+        featureView.width = m_CurrentViewResources->width;
+        featureView.height = m_CurrentViewResources->height;
+        featureView.camera = &view.camera;
+        featureView.resources = gtaoBindings;
+        GraphTextureRef aoOutput;
+        const std::array gtaoOutputs{RenderOutputBinding::Capture(RenderResources::AmbientOcclusion, aoOutput)};
+        const auto gtaoBuild = m_GtaoPipeline->Build(rg, featureFrame, featureView,
+            m_System.GetFrameAllocator(), gtaoOutputs);
+        if (!gtaoBuild.success)
         {
-            RG::ResourceHandle gtaoLinearDepth = m_GTAO.AddPrefilterPass(rg, prepassDepth);
-            RG::ResourceHandle gtaoRawAO       = m_GTAO.AddMainPass(rg, gtaoLinearDepth);
-            gtaoFinalAO                        = m_GTAO.AddDenoisePass(rg, gtaoRawAO, gtaoLinearDepth);
+            for (const auto& diagnostic : gtaoBuild.diagnostics)
+                LH_LOG(Renderer, error, "GTAO composition: {}", diagnostic.message);
+            return false; // Never compile/record a graph with invalid contracts.
         }
+        const RG::ResourceHandle gtaoFinalAO = aoOutput.handle;
 
         // Real-time lit chain (geometry -> skybox -> fog composite -> transparent -> TAA). Skipped in PT; the
         // megakernel output drives the post chain via hdrForPost below. geoOutput/maskOutput/taaColor hoisted
@@ -801,7 +831,8 @@ namespace Luth
             cf.capturedIrradiance     = m_Lighting.GetIrradianceMap();
             cf.capturedPrefiltered    = m_Lighting.GetPrefilteredMap();
             cf.capturedBRDF           = m_Lighting.GetBRDFLut();
-            cf.capturedGTAOFinal      = m_CurrentViewResources ? m_CurrentViewResources->gtaoFinal : nullptr;
+            const auto* gtaoState = GetGtaoViewState(view.id);
+            cf.capturedGTAOFinal      = gtaoState ? gtaoState->finalAO : nullptr;
             cf.capturedIblIntensity   = view.camera.iblIntensity;
             cf.capturedSkyboxIntensity = view.camera.skyboxIntensity;
             // Resolve descendants once at capture; replay reads this without touching m_CurrentView (stack-allocated, dangles in Frozen).
@@ -1041,7 +1072,16 @@ namespace Luth
     }
 
     void RenderPipeline::UpdatePostProcessUBO() { m_PostProcess.UpdateUBO(); }
-    void RenderPipeline::UpdateGTAOUBO()        { m_GTAO.UpdateUBO(); }
+    void RenderPipeline::UpdateGTAOUBO()
+    {
+        if (!m_CurrentViewResources) return;
+        auto* state = m_GtaoStates.Find({m_CurrentViewResources->id});
+        if (!state) return;
+        auto settings = m_System.GetPostProcessSettings().gtao;
+        settings.enabled = settings.enabled && m_GTAO.IsReady();
+        m_GTAO.UpdateUBO(**state, m_CurrentViewResources->globalDescriptorSet, settings,
+            Renderer::GetFrameData()->GetRenderFrameIndex());
+    }
 
     void RenderPipeline::ReloadSkybox(const fs::path& hdrPath)
     {
@@ -1068,9 +1108,8 @@ namespace Luth
         }
         for (auto& [targets, vr] : m_ViewResources)
         {
-            ctx.gtaoFinalView = vr.gtaoFinal
-                ? std::static_pointer_cast<VKTexture>(vr.gtaoFinal)->GetImageView()
-                : VK_NULL_HANDLE;
+            const auto* gtao = GetGtaoViewState({vr.id});
+            ctx.gtaoFinalView = gtao ? gtao->finalBinding.view : VK_NULL_HANDLE;
             m_Global.WriteView(vr, ctx);
         }
     }

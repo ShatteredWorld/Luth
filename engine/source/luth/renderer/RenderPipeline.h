@@ -4,6 +4,7 @@
 #include "luth/core/UUID.h"
 #include "luth/renderer/CameraParams.h"
 #include "luth/renderer/features/RenderViewState.h"
+#include "luth/renderer/features/RenderPipelineCompiler.h"
 #include "luth/renderer/QueueRecorders.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/rendergraph/RenderGraphSnapshot.h"
@@ -102,11 +103,6 @@ namespace Luth
         static constexpr u32 kBloomMipCount = 6;
         std::array<std::shared_ptr<Texture>, kBloomMipCount> bloomMip{};
 
-        // GTAO half-res storage textures.
-        std::shared_ptr<Texture> gtaoLinearDepth;
-        std::shared_ptr<Texture> gtaoRawAO;
-        std::shared_ptr<Texture> gtaoEdges;
-        std::shared_ptr<Texture> gtaoFinal;
 
         // Volumetric fog atlases (RGBA16F). View-frustum-aligned; persistent across frames so the
         // resolve pass can reproject + blend with prev frame's resolved output. Allocated via the
@@ -132,10 +128,6 @@ namespace Luth
         std::array<VkDescriptorSet, kBloomMipCount - 1>     bloomUpDescSet{};
         std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT>   compositeDescSet{};
 
-        // GTAO compute passes.
-        VkDescriptorSet gtaoPrefilterDescSet = VK_NULL_HANDLE;
-        std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT> gtaoMainDescSet{};
-        VkDescriptorSet gtaoDenoiseDescSet   = VK_NULL_HANDLE;
 
         // Editor overlays: allocated for every view, bound only by the scene view
         // (game view's subgraph skips both passes via flags).
@@ -482,6 +474,11 @@ namespace Luth
         const GeometrySubsystem& GetGeometry() const { return m_Geometry; }
         GTAOSubsystem&           GetGTAO()         { return m_GTAO; }
         const GTAOSubsystem&     GetGTAO()   const { return m_GTAO; }
+        const GtaoViewState* GetGtaoViewState(RenderViewId id) const
+        {
+            const auto* state = m_GtaoStates.Find(id);
+            return state ? state->get() : nullptr;
+        }
         VolumetricSubsystem&         GetVolumetric()        { return m_Volumetric; }
         const VolumetricSubsystem&   GetVolumetric()  const { return m_Volumetric; }
         TransparencySubsystem&       GetTransparency()       { return m_Transparency; }
@@ -541,6 +538,8 @@ namespace Luth
         LightingSubsystem       m_Lighting;
         GeometrySubsystem       m_Geometry;
         GTAOSubsystem           m_GTAO;
+        GtaoViewStateStore       m_GtaoStates;
+        std::unique_ptr<CompiledRenderPipeline> m_GtaoPipeline;
         VolumetricSubsystem     m_Volumetric;
         TransparencySubsystem   m_Transparency;
         PostProcessSubsystem    m_PostProcess;

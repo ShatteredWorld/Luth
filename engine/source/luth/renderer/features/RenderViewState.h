@@ -99,6 +99,11 @@ namespace Luth
             auto it = m_States.find(id.value);
             return it == m_States.end() ? nullptr : &it->second->state;
         }
+        const State* Find(RenderViewId id) const
+        {
+            auto it = m_States.find(id.value);
+            return it == m_States.end() ? nullptr : &it->second->state;
+        }
         template<class SafePoint>
         void Release(RenderViewId id, SafePoint&& safePoint)
         {
