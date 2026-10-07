@@ -5,6 +5,7 @@
 #include "luth/renderer/features/VisibilityFeature.h"
 #include "luth/renderer/features/DepthPrepassFeature.h"
 #include "luth/renderer/features/SlimGBufferFeature.h"
+#include "luth/renderer/features/CsmFeature.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
 #include "luth/renderer/debug/FrameDebuggerContext.h"
 #include "luth/scene/systems/RenderingSystem.h"
@@ -144,6 +145,15 @@ namespace Luth
         if (!depthCompiled.ReplaceIfValid(m_SurfacePreparationComposition))
             throw std::runtime_error("Surface preparation feature definition failed semantic validation");
 
+        RenderPipelineDefinition csmDefinition;
+        csmDefinition.AddFeature<CsmFeature>(m_Lighting, &m_System.GetFrameDebugger());
+        PipelineInputContract csmInputs;
+        csmInputs.resources = {{CsmResources::Parameters}, {CsmResources::Bindings},
+            {RenderResources::CascadeVisibleDraws, ResourceOutputPresence::Optional}};
+        csmInputs.capabilities = {&DeformationResources::DeformedGeometry};
+        auto csmCompiled = RenderPipelineCompiler{}.Compile(std::move(csmDefinition), {}, csmInputs);
+        if (!csmCompiled.ReplaceIfValid(m_CsmComposition))
+            throw std::runtime_error("CSM feature definition failed semantic validation");
         // Shader hot-reload callback: pulls fresh SPIR-V into the cached blob and rebuilds pipelines that use it.
         // Fires after ShaderLibrary::Reload has already recompiled and re-reflected the single-stage shader.
         // Library keys are the shader filename (e.g. "pbr_vert.slang", "gtao_main.slang").
@@ -243,6 +253,7 @@ namespace Luth
         m_Transparency.Shutdown();
         m_GeometryPreparationPipeline.reset();
         m_SurfacePreparationComposition.reset();
+        m_CsmComposition.reset();
         m_Skinning.Shutdown();
         m_DenoiseDiSpec->Shutdown();
         m_DenoiseRefl->Shutdown();
@@ -371,15 +382,6 @@ namespace Luth
         {
             hIndirectBuf = cameraVisible.indirect.handle;
 
-            // Shadow pass renders cascade depth: needed for CSM mode AND for volumetric god-rays
-            // in either shadow mode (volumetric scatter samples shadowMap at Set 1 b5).
-            const bool runCsmShadowPasses = visibilityParams.cullCascades;
-            if (runCsmShadowPasses)
-            {
-                for (u32 i = 0; i < k_ShadowCascadeCount; ++i)
-                    shadowHandles[i] = m_Lighting.AddShadowPass(rg, cascadeVisible.cascades[i].indirect.handle, i);
-            }
-
             // Z-prepass produces SceneDepth before forward shading. The render graph can schedule it in parallel with the shadow cascades.
             const u32 depthSlot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
             const std::array<VkDescriptorSet, 6> depthSets{
@@ -387,6 +389,33 @@ namespace Luth
                 VulkanContext::Get().GetBindlessSet().GetSet(), MaterialSystem::GetDescriptorSet(depthSlot),
                 m_Lighting.GetLightDescSet(depthSlot), BoneMatrixBuffer::GetDescriptorSet(depthSlot),
                 m_Geometry.GetObjectSSBODescSet(depthSlot)};
+            // CSM is also required by volumetric scatter in either shadow mode.
+            const CsmParameters csmParams{visibilityParams.cullCascades};
+            const auto csmNative = m_Lighting.PrepareCsmBindings(depthSets,
+                view.captureRequested && s.GetFrameDebugger().state == DebuggerState::CaptureRequested);
+            const CsmBindingRef csmNativeRef{&csmNative};
+            const std::array csmResources{RenderInputBinding::Present(CsmResources::Parameters, csmParams),
+                RenderInputBinding::Present(CsmResources::Bindings, csmNativeRef),
+                csmParams.enabled ? RenderInputBinding::Present(RenderResources::CascadeVisibleDraws, cascadeVisible)
+                    : RenderInputBinding::Absent(RenderResources::CascadeVisibleDraws)};
+            const std::array csmCapabilities{&DeformationResources::DeformedGeometry};
+            FrameRenderInputs csmFrame;
+            csmFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            csmFrame.draws = &s.GetDrawList(); csmFrame.snapshot = &s.GetActiveSnapshot();
+            csmFrame.resources = csmResources; csmFrame.capabilities = csmCapabilities;
+            ViewRenderInputs csmView;
+            csmView.id = view.id;
+            ShadowCascadeRefs csmOutput;
+            const std::array csmExports{RenderOutputBinding::Capture(RenderResources::ShadowCascades, csmOutput)};
+            const auto csmBuild = m_CsmComposition->Build(rg, csmFrame, csmView, s.GetFrameAllocator(), csmExports);
+            if (!csmBuild.success)
+            {
+                for (const auto& diagnostic : csmBuild.diagnostics)
+                    LH_LOG(Renderer, error, "CSM composition: {}", diagnostic.message);
+                return false;
+            }
+            for (u32 i = 0; i < k_ShadowCascadeCount; ++i)
+                shadowHandles[i] = csmOutput.cascades[i].handle;
             const auto depthNative = m_Geometry.PrepareDepthPrepassBindings(depthSets,
                 view.captureRequested && s.GetFrameDebugger().state == DebuggerState::CaptureRequested);
             const auto slimNative = m_Geometry.PrepareSlimGBufferBindings(depthSets,

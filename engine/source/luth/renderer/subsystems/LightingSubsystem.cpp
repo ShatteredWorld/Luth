@@ -788,169 +788,146 @@ namespace Luth
     }
 
     // ---- Render-graph passes ----
-    RG::ResourceHandle LightingSubsystem::AddShadowPass(
-        RG::RenderGraph& rg, RG::BufferHandle indirectBufferHandle, u32 cascadeIndex)
+    CsmBindings LightingSubsystem::PrepareCsmBindings(const std::array<VkDescriptorSet, 6>& sets, bool captureDraws) const
     {
-        LH_PROFILE_FUNCTION();
-        struct ShadowPassData {
-            RG::ResourceHandle shadowTex;
-            RG::BufferHandle   indirectBuf;
-            u32                cascadeIndex;
-        };
-
-        RG::ResourceHandle shadowHandle;
-        const std::string passName = "ShadowPass.C" + std::to_string(cascadeIndex);
-        const std::string resName  = "ShadowMap.C" + std::to_string(cascadeIndex);
-
-        rg.AddPass<ShadowPassData>(passName,
-            [&](ShadowPassData& data, RG::RenderPassBuilder& builder)
-            {
-                data.cascadeIndex = cascadeIndex;
-
-                auto vkShadowTex = std::static_pointer_cast<VKTexture>(m_ShadowMap);
-
-                RG::TextureDesc desc;
-                desc.name   = resName;
-                desc.width  = k_ShadowResolution;
-                desc.height = k_ShadowResolution;
-                desc.format = RG::TextureFormat::D32_Float;
-
-                // Per-layer view targets cascade `i` only. Barriers carry baseArrayLayer=cascadeIndex, layerCount=1.
-                data.shadowTex = rg.ImportResource(desc,
-                    (void*)vkShadowTex->GetImage(),
-                    (void*)m_ShadowLayerViews[cascadeIndex],
-                    RG::ResourceState::Undefined,
-                    /*baseArrayLayer*/ cascadeIndex,
-                    /*layerCount*/     1);
-
-                VkClearValue depthClear{};
-                depthClear.depthStencil = { 1.0f, 0 };
-                data.shadowTex = builder.WriteDepth(data.shadowTex,
-                    VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, depthClear);
-
-                data.indirectBuf = builder.ReadIndirectBuffer(indirectBufferHandle);
-
-                shadowHandle = data.shadowTex;
-            },
-            [this, passName, resName](ShadowPassData& data, RG::RenderPassContext& ctx)
-            {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                auto& sys = m_Pipeline->GetSystem();
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, passName, resName, true,
-                    { "shadowDepth", 0, VK_CULL_MODE_FRONT_BIT, VK_POLYGON_MODE_FILL, false, true, true, false });
-
-                if (!m_ShadowPipeline) { LH_LOG(Renderer, error, "Shadow pipeline is null!"); sys.GetFrameDebugger().EndCapturePass(); return; }
-
-                // Bind all 6 descriptor sets (Set 5 = GPUObjectData SSBO, owned by Geometry).
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                VkDescriptorSet bindlessSet = VulkanContext::Get().GetBindlessSet().GetSet();
-                VkDescriptorSet sets[] = {
-                    m_Pipeline->GetCurrentViewResources()->globalDescriptorSet[slot],
-                    bindlessSet,
-                    MaterialSystem::GetDescriptorSet(slot),
-                    m_Pipeline->GetCurrentViewResources()->lightDescSet[slot],
-                    BoneMatrixBuffer::GetDescriptorSet(slot),
-                    m_Pipeline->GetGeometry().GetObjectSSBODescSet(slot)
-                };
-
-                m_ShadowPipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_ShadowPipeline->GetLayout(), 0, 6, sets, 0, nullptr);
-
-                const u32 cascadeIdxVal = data.cascadeIndex;
-                vkCmdPushConstants(cmd, m_ShadowPipeline->GetLayout(),
-                    VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(u32), &cascadeIdxVal);
-
-                VkViewport viewport{};
-                viewport.width    = (float)k_ShadowResolution;
-                viewport.height   = (float)k_ShadowResolution;
-                viewport.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-                VkRect2D scissor{};
-                scissor.extent = { k_ShadowResolution, k_ShadowResolution };
-                vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-                bool currentSkinned = false;
-
-                auto DrawBatch = [&](const std::vector<DrawCommand>& draws)
-                {
-                    for (const auto& dc : draws)
-                    {
-                        auto mesh = dc.model->GetMesh(dc.meshIndex);
-                        auto vb = std::static_pointer_cast<VKVertexBuffer>(mesh->GetVertexBuffer());
-                        auto ib = std::static_pointer_cast<VKIndexBuffer>(mesh->GetIndexBuffer());
-                        if (!vb || !ib) continue;
-                        // Deformed draws need the empty-input pipeline; skip if absent (static binds no VB).
-                        if (dc.isDeformed && !m_ShadowSkinnedPipeline) continue;
-
-                        if (dc.isDeformed != currentSkinned)
-                        {
-                            currentSkinned = dc.isDeformed;
-                            if (currentSkinned && m_ShadowSkinnedPipeline)
-                            {
-                                m_ShadowSkinnedPipeline->Bind(cmd);
-                                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    m_ShadowSkinnedPipeline->GetLayout(), 0, 6, sets, 0, nullptr);
-                                vkCmdPushConstants(cmd, m_ShadowSkinnedPipeline->GetLayout(),
-                                    VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(u32), &cascadeIdxVal);
-                            }
-                            else
-                            {
-                                m_ShadowPipeline->Bind(cmd);
-                                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    m_ShadowPipeline->GetLayout(), 0, 6, sets, 0, nullptr);
-                                vkCmdPushConstants(cmd, m_ShadowPipeline->GetLayout(),
-                                    VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(u32), &cascadeIdxVal);
-                            }
-                        }
-
-                        // Deformable draws bind no VB; the VS fetches the deformed buffer by gl_VertexIndex.
-                        if (!dc.isDeformed)
-                        {
-                            VkBuffer vbuf[] = { vb->GetVulkanBuffer() };
-                            VkDeviceSize offsets[] = { 0 };
-                            vkCmdBindVertexBuffers(cmd, 0, 1, vbuf, offsets);
-                        }
-                        vkCmdBindIndexBuffer(cmd, ib->GetVulkanBuffer(), 0, VK_INDEX_TYPE_UINT32);
-
-                        // Per-view region layout: [camera | C0 | C1 | C2 | C3]. View N starts at
-                        // region (N * k_IndirectRegionsPerView); cascade i lives at offset (i+1).
-                        const u32 viewBaseRegion = m_Pipeline->GetCurrentView()->viewIndex * RenderPipeline::k_IndirectRegionsPerView;
-                        const u32 cmdIndex = (viewBaseRegion + data.cascadeIndex + 1) * RenderPipeline::k_IndirectRegionStride + dc.gpuObjectIndex;
-                        const auto& indirectRegion = m_Pipeline->GetGeometry().GetIndirectRegion();
-                        VkDeviceSize indirectOffset = indirectRegion.offset + cmdIndex * sizeof(VkDrawIndexedIndirectCommand);
-                        vkCmdDrawIndexedIndirect(cmd, indirectRegion.buffer, indirectOffset, 1,
-                            sizeof(VkDrawIndexedIndirectCommand));
-
-                        if (sys.GetFrameDebugger().state == DebuggerState::CaptureRequested)
-                        {
-                            std::string entName = "Entity";
-                            const auto& tags = sys.GetActiveSnapshot().tagsByEntity;
-                            u32 idx = entt::to_entity(dc.entity);
-                            if (idx < tags.size() && tags[idx])
-                                entName = tags[idx];
-                            sys.GetFrameDebugger().CaptureIndirectDraw(passName,
-                                dc.model->GetName() + "[" + std::to_string(dc.meshIndex) + "]",
-                                entName, dc.entityIndex, ib->GetCount(), dc.gpuObjectIndex, indirectOffset,
-                                { "shadowDepth", 0, static_cast<u32>(VK_CULL_MODE_FRONT_BIT),
-                                  VK_POLYGON_MODE_FILL, dc.isSkinned, true, true, false });
-                        }
-                    }
-                };
-
-                // Transparent casts no shadows; matches its TLAS exclusion (RT-excluded tier).
-                DrawBatch(sys.GetDrawList().opaque);
-                DrawBatch(sys.GetDrawList().cutout);
-
-                sys.GetFrameDebugger().EndCapturePass();
-            }
-        );
-
-        return shadowHandle;
+        CsmBindings result;
+        result.rigid = m_ShadowPipeline ? m_ShadowPipeline->GetHandle() : VK_NULL_HANDLE;
+        result.deformed = m_ShadowSkinnedPipeline ? m_ShadowSkinnedPipeline->GetHandle() : VK_NULL_HANDLE;
+        result.rigidLayout = m_ShadowPipeline ? m_ShadowPipeline->GetLayout() : VK_NULL_HANDLE;
+        result.deformedLayout = m_ShadowSkinnedPipeline ? m_ShadowSkinnedPipeline->GetLayout() : VK_NULL_HANDLE;
+        result.sets = sets;
+        result.texture = m_ShadowMap.get();
+        result.image = m_ShadowMap ? static_cast<const VKTexture&>(*m_ShadowMap).GetImage() : VK_NULL_HANDLE;
+        std::copy(std::begin(m_ShadowLayerViews), std::end(m_ShadowLayerViews), result.layers.begin());
+        result.captureDraws = captureDraws;
+        return result;
     }
 
+    GraphTextureRef LightingSubsystem::ImportShadowTarget(RG::RenderGraph& graph, const CsmBindings& bindings, u32 cascadeIndex)
+    {
+        RG::TextureDesc desc;
+        desc.name = "ShadowMap.C" + std::to_string(cascadeIndex);
+        desc.width = desc.height = k_ShadowResolution;
+        desc.format = RG::TextureFormat::D32_Float;
+        return {graph.ImportResource(desc, (void*)bindings.image, (void*)bindings.layers[cascadeIndex],
+            RG::ResourceState::Undefined, cascadeIndex, 1), {bindings.texture, 0, 1, cascadeIndex, 1}};
+    }
+    RG::ResourceHandle LightingSubsystem::AddShadowPass(RG::RenderGraph& rg, RG::ResourceHandle targetDepth,
+        const VisibleDrawRange& visible, const CsmBindings& bindings, u32 cascadeIndex,
+        const DrawList& draws, const RenderSnapshot& snapshot, FrameDebugger* debugger)
+    {
+        LH_PROFILE_FUNCTION();
+        struct DrawPacket
+        {
+            std::shared_ptr<Mesh> mesh; // Retain native buffers through recording.
+            VkBuffer vertex, index;
+            VkDeviceSize indirectOffset;
+            u32 entityIndex, indexCount, objectIndex;
+            bool deformed, skinned;
+            std::string meshName, entityName;
+        };
+        std::vector<DrawPacket> packets;
+        const bool capturing = debugger && bindings.captureDraws;
+        if (bindings.rigid)
+        {
+            if (!bindings.rigidLayout || std::any_of(bindings.sets.begin(), bindings.sets.end(),
+                [](VkDescriptorSet set) { return set == VK_NULL_HANDLE; }))
+                throw std::invalid_argument("ShadowPass: incomplete native bindings");
+            const auto prepareBucket = [&](const auto& bucket) { for (const auto& dc : bucket)
+            {
+                if (!dc.model) continue;
+                auto mesh = dc.model->GetMesh(dc.meshIndex);
+                if (!mesh) continue;
+                auto vb = std::static_pointer_cast<VKVertexBuffer>(mesh->GetVertexBuffer());
+                auto ib = std::static_pointer_cast<VKIndexBuffer>(mesh->GetIndexBuffer());
+                if (!vb || !ib || (dc.isDeformed && !bindings.deformed)) continue;
+                if (dc.isDeformed && !bindings.deformedLayout)
+                    throw std::invalid_argument("ShadowPass: missing deformed pipeline layout");
+                if (dc.gpuObjectIndex >= visible.maxDrawCount)
+                    throw std::invalid_argument("ShadowPass: draw outside cascade-visible range");
+                const VkDeviceSize offset = visible.indirect.binding.offset
+                    + (u64(visible.firstDraw) + dc.gpuObjectIndex) * sizeof(VkDrawIndexedIndirectCommand);
+                std::string meshName, entityName;
+                if (capturing)
+                {
+                    meshName = dc.model->GetName() + "[" + std::to_string(dc.meshIndex) + "]";
+                    entityName = "Entity";
+                    const auto entity = entt::to_entity(dc.entity);
+                    if (entity < snapshot.tagsByEntity.size() && snapshot.tagsByEntity[entity])
+                        entityName = snapshot.tagsByEntity[entity];
+                }
+                packets.push_back({mesh, vb->GetVulkanBuffer(), ib->GetVulkanBuffer(), offset,
+                    dc.entityIndex, ib->GetCount(), dc.gpuObjectIndex, dc.isDeformed, dc.isSkinned,
+                    std::move(meshName), std::move(entityName)});
+            } };
+            prepareBucket(draws.opaque);
+            prepareBucket(draws.cutout);
+        }
+        const VkBuffer indirectBuffer = visible.indirect.binding.slice->buffer;
+        struct ShadowPassData { RG::ResourceHandle depthTex; RG::BufferHandle indirectBuf; };
+        const std::string passName = "ShadowPass.C" + std::to_string(cascadeIndex);
+        const std::string resName = "ShadowMap.C" + std::to_string(cascadeIndex);
+        RG::ResourceHandle output;
+        rg.AddPass<ShadowPassData>(passName,
+            [&, targetDepth](ShadowPassData& data, RG::RenderPassBuilder& builder) {
+                VkClearValue clear{};
+                clear.depthStencil = {1.0f, 0};
+                data.depthTex = builder.WriteDepth(targetDepth,
+                    VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, clear);
+                data.indirectBuf = builder.ReadIndirectBuffer(visible.indirect.handle);
+                output = data.depthTex;
+            },
+            [bindings, packets = std::move(packets), indirectBuffer, cascadeIndex, passName, resName, debugger, capturing]
+            (ShadowPassData&, RG::RenderPassContext& ctx) {
+                const auto cmd = ctx.commandBuffer;
+                if (debugger) debugger->BeginCapturePass(ctx.passIndex, passName, resName, true,
+                    {"shadowDepth", 0, VK_CULL_MODE_FRONT_BIT, VK_POLYGON_MODE_FILL, false, true, true, false});
+                if (bindings.rigid)
+                {
+                    const auto bind = [&](bool deformed) {
+                        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            deformed ? bindings.deformed : bindings.rigid);
+                        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            deformed ? bindings.deformedLayout : bindings.rigidLayout,
+                            0, 6, bindings.sets.data(), 0, nullptr);
+                        vkCmdPushConstants(cmd, deformed ? bindings.deformedLayout : bindings.rigidLayout,
+                            VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(u32), &cascadeIndex);
+                    };
+                    bind(false);
+                    VkViewport viewport{};
+                    viewport.width = float(k_ShadowResolution); viewport.height = float(k_ShadowResolution); viewport.maxDepth = 1.0f;
+                    vkCmdSetViewport(cmd, 0, 1, &viewport);
+                    const VkRect2D scissor{{0, 0}, {k_ShadowResolution, k_ShadowResolution}};
+                    vkCmdSetScissor(cmd, 0, 1, &scissor);
+                    bool currentDeformed = false;
+                    // Preserve opaque/cutout ordering and exclude transparent casters.
+                    for (const auto& packet : packets)
+                    {
+                        if (packet.deformed != currentDeformed)
+                        {
+                            currentDeformed = packet.deformed;
+                            bind(currentDeformed);
+                        }
+                        if (!packet.deformed)
+                        {
+                            const VkDeviceSize offset = 0;
+                            vkCmdBindVertexBuffers(cmd, 0, 1, &packet.vertex, &offset);
+                        }
+                        vkCmdBindIndexBuffer(cmd, packet.index, 0, VK_INDEX_TYPE_UINT32);
+                        vkCmdDrawIndexedIndirect(cmd, indirectBuffer, packet.indirectOffset, 1,
+                            sizeof(VkDrawIndexedIndirectCommand));
+                        if (capturing)
+                            debugger->CaptureIndirectDraw(passName, packet.meshName, packet.entityName,
+                                packet.entityIndex, packet.indexCount, packet.objectIndex, packet.indirectOffset,
+                                {"shadowDepth", 0, static_cast<u32>(VK_CULL_MODE_FRONT_BIT),
+                                    VK_POLYGON_MODE_FILL, packet.skinned, true, true, false});
+                    }
+                }
+                else LH_LOG(Renderer, error, "ShadowPass pipeline is null!");
+                if (debugger) debugger->EndCapturePass();
+            });
+        return output;
+    }
     RG::ResourceHandle LightingSubsystem::AddSkyboxPass(
         RG::RenderGraph& rg, RG::ResourceHandle sceneColor, RG::ResourceHandle sceneDepth)
     {

@@ -49,6 +49,7 @@ add_library(Luth STATIC
     source/luth/renderer/features/VisibilityFeature.cpp
     source/luth/renderer/features/DepthPrepassFeature.cpp
     source/luth/renderer/features/SlimGBufferFeature.cpp
+    source/luth/renderer/features/CsmFeature.cpp
     source/luth/renderer/features/GtaoViewState.cpp
     source/luth/renderer/features/RenderPipelineCompiler.cpp
 

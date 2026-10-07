@@ -22,6 +22,7 @@ add_executable(LuthTests
     renderer/VisibilityFeature.cpp
     renderer/DepthPrepassFeature.cpp
     renderer/SlimGBufferFeature.cpp
+    renderer/CsmFeature.cpp
 )
 target_compile_features(LuthTests PRIVATE cxx_std_20)
 target_include_directories(LuthTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

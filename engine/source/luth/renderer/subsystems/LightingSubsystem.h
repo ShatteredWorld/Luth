@@ -1,4 +1,5 @@
 #pragma once
+#include "luth/renderer/features/RenderResource.h"
 
 #include "luth/core/types/LuthTypes.h"
 #include "luth/core/FrameData.h"
@@ -20,6 +21,19 @@
 namespace Luth
 {
     class RenderPipeline;
+    struct DrawList;
+    struct RenderSnapshot;
+    struct FrameDebugger;
+    struct CsmBindings
+    {
+        VkPipeline rigid = VK_NULL_HANDLE, deformed = VK_NULL_HANDLE;
+        VkPipelineLayout rigidLayout = VK_NULL_HANDLE, deformedLayout = VK_NULL_HANDLE;
+        std::array<VkDescriptorSet, 6> sets{};
+        const Texture* texture = nullptr;
+        VkImage image = VK_NULL_HANDLE;
+        std::array<VkImageView, k_ShadowCascadeCount> layers{};
+        bool captureDraws = false;
+    };
     namespace fs = std::filesystem;
 
     // Owns Set 3, shadow map, IBL maps, skybox VB + shadow/skybox pipelines.
@@ -40,7 +54,11 @@ namespace Luth
                               const std::vector<VkDescriptorSetLayout>& geoLayouts);
 
         // Render-graph contributions.
-        RG::ResourceHandle AddShadowPass(RG::RenderGraph& rg, RG::BufferHandle indirectBufferHandle, u32 cascadeIndex);
+        CsmBindings PrepareCsmBindings(const std::array<VkDescriptorSet, 6>& sets, bool captureDraws) const;
+        static GraphTextureRef ImportShadowTarget(RG::RenderGraph&, const CsmBindings&, u32 cascadeIndex);
+        static RG::ResourceHandle AddShadowPass(RG::RenderGraph&, RG::ResourceHandle target,
+            const VisibleDrawRange&, const CsmBindings&, u32 cascadeIndex,
+            const DrawList&, const RenderSnapshot&, FrameDebugger*);
         RG::ResourceHandle AddSkyboxPass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor, RG::ResourceHandle sceneDepth);
 
         // Forward+ cluster build. Returns BufferHandles + the underlying SubRegions so consumers can
