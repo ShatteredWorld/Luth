@@ -36,6 +36,15 @@ namespace Luth
     };
     namespace fs = std::filesystem;
 
+    struct SkyBindings
+    {
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkPipelineLayout layout = VK_NULL_HANDLE;
+        VkBuffer vertex = VK_NULL_HANDLE;
+        std::shared_ptr<VKVertexBuffer> retainedVertex;
+        std::array<VkDescriptorSet, 5> sets{};
+    };
+
     struct ClusterBuildConstants
     {
         Mat4 invProjection;
@@ -84,7 +93,9 @@ namespace Luth
         static RG::ResourceHandle AddShadowPass(RG::RenderGraph&, RG::ResourceHandle target,
             const VisibleDrawRange&, const CsmBindings&, u32 cascadeIndex,
             const DrawList&, const RenderSnapshot&, FrameDebugger*);
-        RG::ResourceHandle AddSkyboxPass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor, RG::ResourceHandle sceneDepth);
+        SkyBindings PrepareSkyBindings(const std::array<VkDescriptorSet, 5>& sets) const;
+        static RG::ResourceHandle AddSkyboxPass(RG::RenderGraph&, RG::ResourceHandle sceneColor,
+            RG::ResourceHandle sceneDepth, u32 width, u32 height, const SkyBindings&, FrameDebugger*);
 
         // Native cluster preparation freezes per-view bindings before graph recording.
         ClusterBindings PrepareClusterBindings(u64 renderFrameIndex, VkDescriptorSet buildSet,

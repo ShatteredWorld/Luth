@@ -7,6 +7,7 @@
 #include "luth/renderer/features/SlimGBufferFeature.h"
 #include "luth/renderer/features/CsmFeature.h"
 #include "luth/renderer/features/ClusteredLightingFeature.h"
+#include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
 #include "luth/renderer/debug/FrameDebuggerContext.h"
 #include "luth/scene/systems/RenderingSystem.h"
@@ -163,6 +164,13 @@ namespace Luth
         auto clusterCompiled = RenderPipelineCompiler{}.Compile(std::move(clusterDefinition), {}, clusterInputs);
         if (!clusterCompiled.ReplaceIfValid(m_ClusterComposition))
             throw std::runtime_error("Clustered lighting feature definition failed semantic validation");
+        RenderPipelineDefinition skyDefinition;
+        skyDefinition.AddFeature<SkyFeature>(m_Lighting, &m_System.GetFrameDebugger());
+        PipelineInputContract skyInputs;
+        skyInputs.resources = {{RenderResources::OpaqueHDR}, {RenderResources::LitDepth}, {SkyResources::Bindings}};
+        auto skyCompiled = RenderPipelineCompiler{}.Compile(std::move(skyDefinition), {}, skyInputs);
+        if (!skyCompiled.ReplaceIfValid(m_SkyComposition))
+            throw std::runtime_error("Sky feature definition failed semantic validation");
         // Shader hot-reload callback: pulls fresh SPIR-V into the cached blob and rebuilds pipelines that use it.
         // Fires after ShaderLibrary::Reload has already recompiled and re-reflected the single-stage shader.
         // Library keys are the shader filename (e.g. "pbr_vert.slang", "gtao_main.slang").
@@ -264,6 +272,7 @@ namespace Luth
         m_SurfacePreparationComposition.reset();
         m_CsmComposition.reset();
         m_ClusterComposition.reset();
+        m_SkyComposition.reset();
         m_Skinning.Shutdown();
         m_DenoiseDiSpec->Shutdown();
         m_DenoiseRefl->Shutdown();
@@ -700,7 +709,32 @@ namespace Luth
             maskOutput = view.drawSelectionOutline
                          ? m_EditorOverlays.AddSelectionMaskPass(rg)
                          : SelectionMaskOutput{};
-            RG::ResourceHandle skyboxColor = m_Lighting.AddSkyboxPass(rg, geoOutput.color, geoOutput.depth);
+            // The legacy opaque producer exports typed stages; sky reuses their imports.
+            const u32 skySlot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
+            const std::array<VkDescriptorSet, 5> skySets{m_CurrentViewResources->globalDescriptorSet[skySlot],
+                VulkanContext::Get().GetBindlessSet().GetSet(), MaterialSystem::GetDescriptorSet(skySlot),
+                m_CurrentViewResources->lightDescSet[skySlot], BoneMatrixBuffer::GetDescriptorSet(skySlot)};
+            const auto skyNative = m_Lighting.PrepareSkyBindings(skySets);
+            const SkyBindingRef skyBinding{&skyNative};
+            const GraphTextureRef opaqueHdr{geoOutput.color, {view.targets->GetSceneColor().get()}};
+            const GraphTextureRef litDepth{geoOutput.depth, {view.targets->GetSceneDepth().get()}};
+            const std::array skyResources{RenderInputBinding::Present(RenderResources::OpaqueHDR, opaqueHdr),
+                RenderInputBinding::Present(RenderResources::LitDepth, litDepth),
+                RenderInputBinding::Present(SkyResources::Bindings, skyBinding)};
+            FrameRenderInputs skyFrame;
+            skyFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex(); skyFrame.resources = skyResources;
+            ViewRenderInputs skyView;
+            skyView.id = view.id; skyView.width = m_CurrentViewResources->width; skyView.height = m_CurrentViewResources->height;
+            GraphTextureRef skyOutput;
+            const std::array skyExports{RenderOutputBinding::Capture(RenderResources::SkyHDR, skyOutput)};
+            const auto skyBuild = m_SkyComposition->Build(rg, skyFrame, skyView, s.GetFrameAllocator(), skyExports);
+            if (!skyBuild.success)
+            {
+                for (const auto& diagnostic : skyBuild.diagnostics)
+                    LH_LOG(Renderer, error, "Sky composition: {}", diagnostic.message);
+                return false;
+            }
+            const RG::ResourceHandle skyboxColor = skyOutput.handle;
             // Volumetric composite: blends fog into sceneColor (alpha-blend) BEFORE bloom so bright
             // in-scattered fog can bloom + the grid overlays unfogged lines. Off -> uses skyboxColor unchanged.
             RG::ResourceHandle fogColor = (volumetricEnabled && m_CurrentViewResources)

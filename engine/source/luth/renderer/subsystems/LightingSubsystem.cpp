@@ -928,75 +928,55 @@ namespace Luth
             });
         return output;
     }
-    RG::ResourceHandle LightingSubsystem::AddSkyboxPass(
-        RG::RenderGraph& rg, RG::ResourceHandle sceneColor, RG::ResourceHandle sceneDepth)
+    SkyBindings LightingSubsystem::PrepareSkyBindings(const std::array<VkDescriptorSet, 5>& sets) const
     {
-        LH_PROFILE_FUNCTION();
-        struct SkyboxPassData {
-            RG::ResourceHandle colorTex;
-            RG::ResourceHandle depthTex;
-        };
-
-        RG::ResourceHandle outputHandle;
-
-        rg.AddPass<SkyboxPassData>("SkyboxPass",
-            [&](SkyboxPassData& data, RG::RenderPassBuilder& builder)
-            {
-                data.colorTex = builder.Write(sceneColor,
-                    VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
-                data.depthTex = builder.WriteDepth(sceneDepth,
-                    VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_DONT_CARE);
-
-                outputHandle = data.colorTex;
-            },
-            [this](SkyboxPassData& data, RG::RenderPassContext& ctx)
-            {
-                auto& sys = m_Pipeline->GetSystem();
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "SkyboxPass", "SceneColor", false,
-                    { "skybox", 0, VK_CULL_MODE_BACK_BIT, VK_POLYGON_MODE_FILL, false, true, false, false });
-
-                if (!m_SkyboxPipeline || !m_SkyboxVB) { sys.GetFrameDebugger().EndCapturePass(); return; }
-
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                m_SkyboxPipeline->Bind(cmd);
-
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                VkDescriptorSet bindlessSet = VulkanContext::Get().GetBindlessSet().GetSet();
-                VkDescriptorSet sets[] = {
-                    m_Pipeline->GetCurrentViewResources()->globalDescriptorSet[slot],
-                    bindlessSet,
-                    MaterialSystem::GetDescriptorSet(slot),
-                    m_Pipeline->GetCurrentViewResources()->lightDescSet[slot],
-                    BoneMatrixBuffer::GetDescriptorSet(slot)
-                };
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_SkyboxPipeline->GetLayout(), 0, 5, sets, 0, nullptr);
-
-                RG::RenderGraph::ResourceNode* res = (RG::RenderGraph::ResourceNode*)ctx.GetResource(data.colorTex);
-                VkViewport viewport{};
-                viewport.width  = (float)res->desc.width;
-                viewport.height = (float)res->desc.height;
-                viewport.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-                VkRect2D scissor{};
-                scissor.extent = { res->desc.width, res->desc.height };
-                vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-                VkBuffer vb = m_SkyboxVB->GetVulkanBuffer();
-                VkDeviceSize offset = 0;
-                vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &offset);
-                vkCmdDraw(cmd, 36, 1, 0, 0);
-
-                ObjectPushConstants dummyPC{};
-                sys.GetFrameDebugger().CaptureDrawCall("SkyboxPass", "SkyboxCube", "Skybox", 0, 0, dummyPC,
-                    { "skybox", 0, VK_CULL_MODE_BACK_BIT, VK_POLYGON_MODE_FILL, false, true, false, false });
-                sys.GetFrameDebugger().EndCapturePass();
-            }
-        );
-        return outputHandle;
+        return {m_SkyboxPipeline ? m_SkyboxPipeline->GetHandle() : VK_NULL_HANDLE,
+            m_SkyboxPipeline ? m_SkyboxPipeline->GetLayout() : VK_NULL_HANDLE,
+            m_SkyboxVB ? m_SkyboxVB->GetVulkanBuffer() : VK_NULL_HANDLE, m_SkyboxVB, sets};
     }
 
+    RG::ResourceHandle LightingSubsystem::AddSkyboxPass(RG::RenderGraph& graph,
+        RG::ResourceHandle sceneColor, RG::ResourceHandle sceneDepth, u32 width, u32 height,
+        const SkyBindings& bindings, FrameDebugger* debugger)
+    {
+        LH_PROFILE_FUNCTION();
+        struct Data { RG::ResourceHandle color, depth; };
+        RG::ResourceHandle output;
+        graph.AddPass<Data>("SkyboxPass",
+            [&](Data& data, RG::RenderPassBuilder& builder) {
+                data.color = builder.Write(sceneColor, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
+                // Preserve the existing attachment policy. Sky shader depth writes are disabled.
+                data.depth = builder.WriteDepth(sceneDepth, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_DONT_CARE);
+                output = data.color;
+            },
+            [bindings, width, height, debugger](Data&, RG::RenderPassContext& ctx) {
+                if (debugger) debugger->BeginCapturePass(ctx.passIndex, "SkyboxPass", "SceneColor", false,
+                    {"skybox", 0, VK_CULL_MODE_BACK_BIT, VK_POLYGON_MODE_FILL, false, true, false, false});
+                if (bindings.pipeline && bindings.vertex)
+                {
+                    const auto cmd = ctx.commandBuffer;
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bindings.pipeline);
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        bindings.layout, 0, 5, bindings.sets.data(), 0, nullptr);
+                    VkViewport viewport{};
+                    viewport.width = float(width); viewport.height = float(height); viewport.maxDepth = 1.0f;
+                    vkCmdSetViewport(cmd, 0, 1, &viewport);
+                    const VkRect2D scissor{{0, 0}, {width, height}};
+                    vkCmdSetScissor(cmd, 0, 1, &scissor);
+                    const VkDeviceSize offset = 0;
+                    vkCmdBindVertexBuffers(cmd, 0, 1, &bindings.vertex, &offset);
+                    vkCmdDraw(cmd, 36, 1, 0, 0);
+                    if (debugger)
+                    {
+                        ObjectPushConstants dummy{};
+                        debugger->CaptureDrawCall("SkyboxPass", "SkyboxCube", "Skybox", 0, 0, dummy,
+                            {"skybox", 0, VK_CULL_MODE_BACK_BIT, VK_POLYGON_MODE_FILL, false, true, false, false});
+                    }
+                }
+                if (debugger) debugger->EndCapturePass();
+            });
+        return output;
+    }
     // Forward+ cluster build. Async-compute; per-view tagged-heap regions for AABB + grid.
     // Returns BufferHandles so downstream LightAssignPass / GeometryPass read the same VkBuffer
     // without re-importing (see arch/rendering-pipeline.md re-import hazard).
