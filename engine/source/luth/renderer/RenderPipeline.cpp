@@ -6,6 +6,7 @@
 #include "luth/renderer/features/DepthPrepassFeature.h"
 #include "luth/renderer/features/SlimGBufferFeature.h"
 #include "luth/renderer/features/CsmFeature.h"
+#include "luth/renderer/features/ClusteredLightingFeature.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
 #include "luth/renderer/debug/FrameDebuggerContext.h"
 #include "luth/scene/systems/RenderingSystem.h"
@@ -154,6 +155,14 @@ namespace Luth
         auto csmCompiled = RenderPipelineCompiler{}.Compile(std::move(csmDefinition), {}, csmInputs);
         if (!csmCompiled.ReplaceIfValid(m_CsmComposition))
             throw std::runtime_error("CSM feature definition failed semantic validation");
+        RenderPipelineDefinition clusterDefinition;
+        clusterDefinition.AddFeature<ClusteredLightingFeature>(m_Lighting, &m_System.GetFrameDebugger());
+        PipelineInputContract clusterInputs;
+        clusterInputs.resources = {{ClusterResources::Bindings},
+            {ClusterResources::UploadedLights, ResourceOutputPresence::Optional}};
+        auto clusterCompiled = RenderPipelineCompiler{}.Compile(std::move(clusterDefinition), {}, clusterInputs);
+        if (!clusterCompiled.ReplaceIfValid(m_ClusterComposition))
+            throw std::runtime_error("Clustered lighting feature definition failed semantic validation");
         // Shader hot-reload callback: pulls fresh SPIR-V into the cached blob and rebuilds pipelines that use it.
         // Fires after ShaderLibrary::Reload has already recompiled and re-reflected the single-stage shader.
         // Library keys are the shader filename (e.g. "pbr_vert.slang", "gtao_main.slang").
@@ -254,6 +263,7 @@ namespace Luth
         m_GeometryPreparationPipeline.reset();
         m_SurfacePreparationComposition.reset();
         m_CsmComposition.reset();
+        m_ClusterComposition.reset();
         m_Skinning.Shutdown();
         m_DenoiseDiSpec->Shutdown();
         m_DenoiseRefl->Shutdown();
@@ -468,17 +478,48 @@ namespace Luth
             slimGB = {normalOutput.handle, roughnessOutput.handle, motionOutput.handle, materialOutput.handle};
         }
 
-        // Forward+ cluster AABB builder + light-to-cluster assignment. Both async-compute; the assign pass
-        // consumes the build pass's AABB + grid handles directly (no re-import; see arch hazard 1).
-        // UploadLightSSBO must run BEFORE AddLightAssignPass so the assign pass can bind the same VkBuffer to
-        // its b0 read; WriteSet3PerView lands afterwards once all three per-view tagged-heap regions are known.
+        // Freeze native cluster resources before recording; retain shared Set 3 bindings.
         Memory::GPUSubRegion lightSSBORegion{};
+        u32 pointCount = 0, spotCount = 0;
         if (auto* lighting = SystemRegistry::GetSystem<LightingSystem>())
-            lightSSBORegion = m_Lighting.UploadLightSSBO(lighting->GetLights());
-        LightingSubsystem::ClusterBuildOutputs clusters = m_Lighting.AddClusterBuildPass(rg);
-        LightingSubsystem::LightAssignOutputs  assign   = m_Lighting.AddLightAssignPass(rg, clusters);
-        m_Lighting.WriteSet3PerView(lightSSBORegion, clusters.gridRegion, assign.indexRegion);
-
+        {
+            const auto& lights = lighting->GetLights();
+            lightSSBORegion = m_Lighting.UploadLightSSBO(lights);
+            pointCount = static_cast<u32>(lights.points.size());
+            spotCount = static_cast<u32>(lights.spots.size());
+        }
+        const u64 clusterFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+        const u32 clusterSlot = static_cast<u32>(clusterFrameIndex) % MAX_FRAMES_IN_FLIGHT;
+        const auto clusterNative = m_Lighting.PrepareClusterBindings(clusterFrameIndex,
+            m_CurrentViewResources->clusterBuildDescSet[clusterSlot],
+            m_CurrentViewResources->lightAssignDescSet[clusterSlot], view.camera,
+            m_CurrentViewResources->width, m_CurrentViewResources->height, lightSSBORegion, pointCount, spotCount);
+        const ClusterBindingRef clusterBinding{&clusterNative};
+        GraphBufferRef uploadedLights;
+        if (lightSSBORegion.buffer)
+            uploadedLights = m_Lighting.ImportLightingBuffer(rg, "LightSSBO", lightSSBORegion);
+        const std::array clusterResources{RenderInputBinding::Present(ClusterResources::Bindings, clusterBinding),
+            uploadedLights.handle.IsValid() ? RenderInputBinding::Present(ClusterResources::UploadedLights, uploadedLights)
+                : RenderInputBinding::Absent(ClusterResources::UploadedLights)};
+        FrameRenderInputs clusterFrame;
+        clusterFrame.renderFrameIndex = clusterFrameIndex; clusterFrame.resources = clusterResources;
+        ViewRenderInputs clusterView;
+        clusterView.id = view.id; clusterView.width = m_CurrentViewResources->width;
+        clusterView.height = m_CurrentViewResources->height;
+        GraphBufferRef lightData, clusterGrid, lightIndices;
+        const std::array clusterOutputs{RenderOutputBinding::Capture(RenderResources::LightData, lightData),
+            RenderOutputBinding::Capture(RenderResources::ClusterGrid, clusterGrid),
+            RenderOutputBinding::Capture(RenderResources::LightIndices, lightIndices)};
+        const auto clusterBuild = m_ClusterComposition->Build(rg, clusterFrame, clusterView, s.GetFrameAllocator(), clusterOutputs);
+        if (!clusterBuild.success)
+        {
+            for (const auto& diagnostic : clusterBuild.diagnostics)
+                LH_LOG(Renderer, error, "Clustered lighting composition: {}", diagnostic.message);
+            return false;
+        }
+        const Memory::GPUSubRegion clusterGridRegion = clusterGrid.binding.slice ? *clusterGrid.binding.slice : Memory::GPUSubRegion{};
+        const Memory::GPUSubRegion lightIndexRegion = lightIndices.binding.slice ? *lightIndices.binding.slice : Memory::GPUSubRegion{};
+        m_Lighting.WriteSet3PerView(lightSSBORegion, clusterGridRegion, lightIndexRegion);
         // RT acceleration structures: per-frame skinning + skinned BLAS refit + TLAS build, on AsyncCompute.
         // Built BEFORE the volumetric chain so the inject-scatter pass's RT fog-shadow rayQuery reads a BUILT TLAS;
         // passes execute in registration order on the shared compute primary; the inline AS barrier gives memory visibility,
@@ -512,7 +553,7 @@ namespace Luth
             // Resolve/composite/viz b1-or-b2 parity-rewrite to ping-pong HistA/B for temporal
             // accumulation. Cycled slots keep rewrites disjoint from in-flight prior frame reads.
             m_Volumetric.WriteInjectDensityPerFrame(fogVolumeRegion);
-            m_Volumetric.WriteInjectScatterPerFrame(lightSSBORegion, clusters.gridRegion, assign.indexRegion);
+            m_Volumetric.WriteInjectScatterPerFrame(lightSSBORegion, clusterGridRegion, lightIndexRegion);
             m_Volumetric.WriteResolvePerFrame(*m_CurrentViewResources, frameAbs);
             m_Volumetric.WriteCompositePerFrame(*m_CurrentViewResources, *view.targets, frameAbs);
             m_Volumetric.WriteVizPerFrame(*m_CurrentViewResources, frameAbs);

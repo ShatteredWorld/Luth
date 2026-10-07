@@ -36,6 +36,31 @@ namespace Luth
     };
     namespace fs = std::filesystem;
 
+    struct ClusterBuildConstants
+    {
+        Mat4 invProjection;
+        Vec2 viewportSize;
+        Vec2 pad{};
+        float nearZ = 0, farZ = 0;
+        u32 tilesX = k_ClusterTilesX, tilesY = k_ClusterTilesY;
+    };
+    struct LightAssignConstants
+    {
+        Mat4 view;
+        u32 pointLightCount = 0, spotLightCount = 0;
+        u32 maxLightsPerCluster = k_MaxLightsPerCluster, pad = 0;
+    };
+    struct ClusterBindings
+    {
+        VkPipeline build = VK_NULL_HANDLE, assign = VK_NULL_HANDLE;
+        VkPipelineLayout buildLayout = VK_NULL_HANDLE, assignLayout = VK_NULL_HANDLE;
+        VkDescriptorSet buildSet = VK_NULL_HANDLE, assignSet = VK_NULL_HANDLE;
+        Memory::GPUSubRegion lights{}, aabb{}, grid{}, indices{}, counter{};
+        ClusterBuildConstants buildConstants{};
+        LightAssignConstants assignConstants{};
+        bool ready = false;
+    };
+
     // Owns Set 3, shadow map, IBL maps, skybox VB + shadow/skybox pipelines.
     // invariant: Init() must precede BuildPipelines(geoLayouts); the latter needs Set 5.
     class LightingSubsystem
@@ -61,28 +86,18 @@ namespace Luth
             const DrawList&, const RenderSnapshot&, FrameDebugger*);
         RG::ResourceHandle AddSkyboxPass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor, RG::ResourceHandle sceneDepth);
 
-        // Forward+ cluster build. Returns BufferHandles + the underlying SubRegions so consumers can
-        // bind the right (buffer, offset, size) triple: BufferHandle stores only the backing VkBuffer
-        // pointer; the offset within that backing is in the SubRegion.
-        struct ClusterBuildOutputs {
-            RG::BufferHandle     aabb;
-            RG::BufferHandle     grid;
-            Memory::GPUSubRegion aabbRegion;
-            Memory::GPUSubRegion gridRegion;
-        };
-        ClusterBuildOutputs AddClusterBuildPass(RG::RenderGraph& rg);
-
-        // Forward+ light-to-cluster assignment. Reads LightSSBO + Cluster AABB; writes Cluster Grid
-        // (atomic offset+count) + LightIndex flat array. Returns the LightIndex handle + SubRegion
-        // so UploadLightingResources can bind b2 of the per-view Set 3.
-        struct LightAssignOutputs {
-            RG::BufferHandle     index;
-            Memory::GPUSubRegion indexRegion;
-        };
-        LightAssignOutputs AddLightAssignPass(RG::RenderGraph& rg, ClusterBuildOutputs cb);
-
+        // Native cluster preparation freezes per-view bindings before graph recording.
+        ClusterBindings PrepareClusterBindings(u64 renderFrameIndex, VkDescriptorSet buildSet,
+            VkDescriptorSet assignSet, const CameraParams&, u32 width, u32 height,
+            const Memory::GPUSubRegion& lights, u32 pointCount, u32 spotCount) const;
+        static GraphBufferRef ImportLightingBuffer(RG::RenderGraph&, const char* name, const Memory::GPUSubRegion&);
+        static std::array<RG::BufferHandle, 2> AddClusterBuildPass(RG::RenderGraph&,
+            RG::BufferHandle aabb, RG::BufferHandle grid, const ClusterBindings&, FrameDebugger*);
+        static std::array<RG::BufferHandle, 2> AddLightAssignPass(RG::RenderGraph&,
+            RG::BufferHandle lights, RG::BufferHandle aabb, RG::BufferHandle grid,
+            RG::BufferHandle indices, RG::BufferHandle counter, const ClusterBindings&, FrameDebugger*);
         // Per-frame LightSSBO upload. Allocates from tagged heap, copies the gathered header +
-        // point-light array, caches m_LastLightSSBORegion so AddLightAssignPass can bind the
+        // point-light array. The caller passes its physical slice explicitly to bind the
         // same backing for its b0 read. Returns the region for WriteSet3PerView's b0 write.
         Memory::GPUSubRegion UploadLightSSBO(const GatheredLights& lights);
 
@@ -183,8 +198,7 @@ namespace Luth
         std::vector<u32>            m_FullscreenVertSpv;
         std::vector<u32>            m_ClusterVizFragSpv;
 
-        // Latest per-frame LightSSBO region from UploadLightingResources. AddLightAssignPass binds
-        // the same VkBuffer to binding 0 of the LightAssign compute set.
-        Memory::GPUSubRegion m_LastLightSSBORegion{};
+
+
     };
 }

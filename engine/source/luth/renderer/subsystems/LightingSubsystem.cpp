@@ -490,7 +490,7 @@ namespace Luth
     // Allocates LightSSBO from the tagged heap, copies the header + point / spot / emissive-triangle
     // arrays + the power-weighted alias table (emissive sections appended after spots[]).
     // Returns the region; the BuildGraph caller threads it through WriteSet3PerView, and
-    // m_LastLightSSBORegion is cached for AddLightAssignPass's b0 binding.
+    // Assignment receives this physical slice explicitly through native preparation.
     Memory::GPUSubRegion LightingSubsystem::UploadLightSSBO(const GatheredLights& lights)
     {
         LH_PROFILE_FUNCTION();
@@ -525,7 +525,7 @@ namespace Luth
         if (!lights.tris.empty())   std::memcpy(base + pointBytes + spotBytes, lights.tris.data(), triBytes);
         if (!lights.alias.empty())  std::memcpy(base + pointBytes + spotBytes + triBytes, lights.alias.data(), aliasBytes);
         heap.FlushRegion(region);
-        m_LastLightSSBORegion = region;
+
         return region;
     }
 
@@ -1000,264 +1000,128 @@ namespace Luth
     // Forward+ cluster build. Async-compute; per-view tagged-heap regions for AABB + grid.
     // Returns BufferHandles so downstream LightAssignPass / GeometryPass read the same VkBuffer
     // without re-importing (see arch/rendering-pipeline.md re-import hazard).
-    LightingSubsystem::ClusterBuildOutputs LightingSubsystem::AddClusterBuildPass(RG::RenderGraph& rg)
+    GraphBufferRef LightingSubsystem::ImportLightingBuffer(RG::RenderGraph& graph, const char* name,
+        const Memory::GPUSubRegion& slice)
     {
-        LH_PROFILE_FUNCTION();
-        ClusterBuildOutputs out{};
-        if (!m_ClusterBuildPipeline) return out;
-
-        auto* jobCtx = JobSystem::GetCurrentJobContext();
-        if (!jobCtx) return out;
-        const u32 frameAbs = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
-        const u32 slot     = frameAbs % MAX_FRAMES_IN_FLIGHT;
-        jobCtx->GpuCache.CurrentTag = frameAbs;
-
-        ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-        if (!vr || vr->clusterBuildDescSet[slot] == VK_NULL_HANDLE) return out;
-
-        auto& heap = Memory::GPUTaggedPageAllocator::Get();
-        // ClusterAABB std430: vec4 min + vec4 max = 32 B per cluster.
-        const u64 aabbSize = static_cast<u64>(k_ClusterCount) * 32;
-        const u64 gridSize = static_cast<u64>(k_ClusterCount) * sizeof(GPUCluster);
-        Memory::GPUSubRegion aabbR = heap.Allocate(jobCtx->GpuCache, aabbSize, 16);
-        Memory::GPUSubRegion gridR = heap.Allocate(jobCtx->GpuCache, gridSize, 16);
-        if (!aabbR.buffer || !gridR.buffer) return out;
-
-        VkDescriptorBufferInfo aabbBi{ aabbR.buffer, aabbR.offset, aabbR.size };
-        VkDescriptorBufferInfo gridBi{ gridR.buffer, gridR.offset, gridR.size };
-        VkWriteDescriptorSet writes[2] = {};
-        writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[0].dstSet          = vr->clusterBuildDescSet[slot];
-        writes[0].dstBinding      = 0;
-        writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[0].descriptorCount = 1;
-        writes[0].pBufferInfo     = &aabbBi;
-        writes[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[1].dstSet          = vr->clusterBuildDescSet[slot];
-        writes[1].dstBinding      = 1;
-        writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[1].descriptorCount = 1;
-        writes[1].pBufferInfo     = &gridBi;
-        vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 2, writes, 0, nullptr);
-
-        RG::BufferDesc aabbDesc{ "ClusterAABB", aabbSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT };
-        RG::BufferDesc gridDesc{ "ClusterGrid", gridSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT };
-        out.aabb       = rg.ImportBuffer(aabbDesc, (void*)aabbR.buffer, RG::ResourceState::Undefined);
-        out.grid       = rg.ImportBuffer(gridDesc, (void*)gridR.buffer, RG::ResourceState::Undefined);
-        out.aabbRegion = aabbR;
-        out.gridRegion = gridR;
-
-        struct ClusterBuildData {
-            RG::BufferHandle aabb;
-            RG::BufferHandle grid;
-        };
-
-        // Capture per-frame values at graph-build time so the execute lambda body stays terse.
-        auto* pipeline = m_ClusterBuildPipeline.get();
-        FrameDebugger* debugger = &m_Pipeline->GetSystem().GetFrameDebugger();
-
-        rg.AddComputePass<ClusterBuildData>("ClusterBuild", RG::QueueFamily::AsyncCompute,
-            [&](ClusterBuildData& d, RG::RenderPassBuilder& builder)
-            {
-                d.aabb = builder.WriteBuffer(out.aabb);
-                d.grid = builder.WriteBuffer(out.grid);
-            },
-            [this, pipeline, debugger](ClusterBuildData&, RG::RenderPassContext& ctx)
-            {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                if (debugger)
-                    debugger->BeginCapturePass(ctx.passIndex, "ClusterBuild", "", false,
-                        { "cluster_build", 0, 0, VK_POLYGON_MODE_FILL, false, false, false, false });
-
-                const u32 slotLocal = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex())
-                                      % MAX_FRAMES_IN_FLIGHT;
-                ViewResources* vrLocal = m_Pipeline->GetCurrentViewResources();
-                if (!vrLocal || vrLocal->clusterBuildDescSet[slotLocal] == VK_NULL_HANDLE)
-                {
-                    if (debugger) debugger->EndCapturePass();
-                    return;
-                }
-
-                pipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    pipeline->GetLayout(), 0, 1, &vrLocal->clusterBuildDescSet[slotLocal], 0, nullptr);
-
-                const auto* view = m_Pipeline->GetCurrentView();
-                Mat4 proj = view->camera.projection;
-                proj[1][1] *= -1.0f;  // match the Y-flip GlobalSubsystem applies before upload
-                Mat4 invProj = Math::Inverse(proj);
-
-                struct ClusterBuildPC {
-                    Mat4  invProjection;
-                    Vec2  viewportSize;
-                    Vec2  _pad;
-                    float nearZ;
-                    float farZ;
-                    u32   tilesX;
-                    u32   tilesY;
-                } pc{};
-                pc.invProjection = invProj;
-                pc.viewportSize  = Vec2(static_cast<float>(vrLocal->width),
-                                        static_cast<float>(vrLocal->height));
-                pc.nearZ  = view->camera.nearZ;
-                pc.farZ   = view->camera.farZ;
-                pc.tilesX = k_ClusterTilesX;
-                pc.tilesY = k_ClusterTilesY;
-                vkCmdPushConstants(cmd, pipeline->GetLayout(),
-                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ClusterBuildPC), &pc);
-
-                // 4x4x4 local; group dims = ceil(tile/slice counts / 4); bounds-clamp in shader.
-                const u32 groupX = (k_ClusterTilesX  + 3) / 4;
-                const u32 groupY = (k_ClusterTilesY  + 3) / 4;
-                const u32 groupZ = (k_ClusterSlicesZ + 3) / 4;
-                vkCmdDispatch(cmd, groupX, groupY, groupZ);
-
-                if (debugger)
-                {
-                    debugger->CaptureComputeDispatch("ClusterBuild", "cluster_build", groupX, groupY, groupZ);
-                    debugger->EndCapturePass();
-                }
-            });
-
-        return out;
+        return {graph.ImportBuffer({name, slice.size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT},
+            (void*)slice.buffer, RG::ResourceState::Undefined), {&slice, slice.offset, slice.size}};
     }
 
-    // Forward+ light-to-cluster assignment. Reads LightSSBO (cached from UploadLightingResources)
-    // + Cluster AABB; atomicAdd packs per-cluster light indices into LightIndex and writes
-    // (offset, count) to Cluster Grid. Returns the LightIndex handle + SubRegion so the caller
-    // can bind b2 of Set 3 in UploadLightingResources.
-    LightingSubsystem::LightAssignOutputs LightingSubsystem::AddLightAssignPass(RG::RenderGraph& rg,
-                                                                                ClusterBuildOutputs cb)
+    ClusterBindings LightingSubsystem::PrepareClusterBindings(u64 renderFrameIndex, VkDescriptorSet buildSet,
+        VkDescriptorSet assignSet, const CameraParams& camera, u32 width, u32 height,
+        const Memory::GPUSubRegion& lights, u32 pointCount, u32 spotCount) const
     {
-        LH_PROFILE_FUNCTION();
-        LightAssignOutputs out{};
-        if (!m_LightAssignPipeline || !m_LastLightSSBORegion.buffer) return out;
-
+        ClusterBindings out;
+        out.buildSet = buildSet; out.assignSet = assignSet; out.lights = lights;
+        Mat4 projection = camera.projection;
+        projection[1][1] *= -1.0f; // Match GlobalSubsystem's Vulkan Y flip.
+        out.buildConstants.invProjection = Math::Inverse(projection);
+        out.buildConstants.viewportSize = Vec2(float(width), float(height));
+        out.buildConstants.nearZ = camera.nearZ; out.buildConstants.farZ = camera.farZ;
+        out.assignConstants.view = camera.view;
+        out.assignConstants.pointLightCount = pointCount;
+        out.assignConstants.spotLightCount = spotCount;
+        if (!m_ClusterBuildPipeline || !m_LightAssignPipeline || !buildSet || !assignSet || !lights.buffer)
+            return out;
         auto* jobCtx = JobSystem::GetCurrentJobContext();
         if (!jobCtx) return out;
-        const u32 frameAbs = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
-        const u32 slot     = frameAbs % MAX_FRAMES_IN_FLIGHT;
-        jobCtx->GpuCache.CurrentTag = frameAbs;
-
-        ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-        if (!vr || vr->lightAssignDescSet[slot] == VK_NULL_HANDLE) return out;
-
+        jobCtx->GpuCache.CurrentTag = static_cast<u32>(renderFrameIndex);
         auto& heap = Memory::GPUTaggedPageAllocator::Get();
-        const u64 indexSize   = static_cast<u64>(k_ClusterCount) * k_MaxLightsPerCluster * sizeof(u32);
-        Memory::GPUSubRegion indexR   = heap.Allocate(jobCtx->GpuCache, indexSize, 16);
-        Memory::GPUSubRegion counterR = heap.Allocate(jobCtx->GpuCache, 16, 16);
-        if (!indexR.buffer || !counterR.buffer) return out;
-        // Counter zero-init host-side: tagged-heap pages are HOST_VISIBLE | MAPPED, so no barrier
-        // needed before the compute pass on the async-compute queue (submit-time semaphore covers
-        // the host->device dependency).
-        std::memset(counterR.mappedPtr, 0, 16);
-        heap.FlushRegion(counterR);
-
-        // Reuse ClusterBuild's output buffers: same VkBuffers + offsets the producer wrote.
-        VkDescriptorBufferInfo lightBi{ m_LastLightSSBORegion.buffer, m_LastLightSSBORegion.offset,
-                                        m_LastLightSSBORegion.size };
-
-        // invariant: bind via the producer's SubRegion offsets; BufferHandle only carries the
-        // backing VkBuffer; offset+size live on the SubRegion. Tagged-heap bump allocations cannot
-        // be re-derived, so the producer hands its regions through ClusterBuildOutputs.
-        VkDescriptorBufferInfo aabbBi{ cb.aabbRegion.buffer, cb.aabbRegion.offset, cb.aabbRegion.size };
-        VkDescriptorBufferInfo gridBi{ cb.gridRegion.buffer, cb.gridRegion.offset, cb.gridRegion.size };
-        VkDescriptorBufferInfo indexBi{ indexR.buffer,   indexR.offset,   indexR.size };
-        VkDescriptorBufferInfo counterBi{ counterR.buffer, counterR.offset, counterR.size };
-
-        VkWriteDescriptorSet writes[5] = {};
-        for (u32 i = 0; i < 5; ++i)
+        out.aabb = heap.Allocate(jobCtx->GpuCache, u64(k_ClusterCount) * 32, 16);
+        out.grid = heap.Allocate(jobCtx->GpuCache, u64(k_ClusterCount) * sizeof(GPUCluster), 16);
+        out.indices = heap.Allocate(jobCtx->GpuCache, u64(k_ClusterCount) * k_MaxLightsPerCluster * sizeof(u32), 16);
+        out.counter = heap.Allocate(jobCtx->GpuCache, 16, 16);
+        if (!out.aabb.buffer || !out.grid.buffer || !out.indices.buffer || !out.counter.buffer || !out.counter.mappedPtr)
+            return out;
+        std::memset(out.counter.mappedPtr, 0, 16);
+        heap.FlushRegion(out.counter);
+        const auto info = [](const Memory::GPUSubRegion& region) {
+            return VkDescriptorBufferInfo{region.buffer, region.offset, region.size};
+        };
+        const std::array buildInfos{info(out.aabb), info(out.grid)};
+        const std::array assignInfos{info(lights), info(out.aabb), info(out.grid), info(out.indices), info(out.counter)};
+        std::array<VkWriteDescriptorSet, 7> writes{};
+        for (u32 i = 0; i < writes.size(); ++i)
         {
-            writes[i] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            writes[i].dstSet          = vr->lightAssignDescSet[slot];
-            writes[i].dstBinding      = i;
-            writes[i].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = i < 2 ? buildSet : assignSet;
+            writes[i].dstBinding = i < 2 ? i : i - 2;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].descriptorCount = 1;
+            writes[i].pBufferInfo = i < 2 ? &buildInfos[i] : &assignInfos[i - 2];
         }
-        writes[0].pBufferInfo = &lightBi;
-        writes[1].pBufferInfo = &aabbBi;
-        writes[2].pBufferInfo = &gridBi;
-        writes[3].pBufferInfo = &indexBi;
-        writes[4].pBufferInfo = &counterBi;
-        vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 5, writes, 0, nullptr);
-
-        RG::BufferDesc indexDesc{ "LightIndex", indexSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT };
-        out.index       = rg.ImportBuffer(indexDesc, (void*)indexR.buffer, RG::ResourceState::Undefined);
-        out.indexRegion = indexR;
-
-        struct LightAssignData {
-            RG::BufferHandle aabb;
-            RG::BufferHandle grid;
-            RG::BufferHandle index;
-        };
-
-        auto* pipeline = m_LightAssignPipeline.get();
-        FrameDebugger* debugger = &m_Pipeline->GetSystem().GetFrameDebugger();
-        // Snapshot light counts at graph-build time; LightingSystem::GetLights() is final by now.
-        u32 capturedPointCount = 0;
-        u32 capturedSpotCount  = 0;
-        if (auto* lightingSys = SystemRegistry::GetSystem<LightingSystem>())
-        {
-            capturedPointCount = static_cast<u32>(lightingSys->GetLights().points.size());
-            capturedSpotCount  = static_cast<u32>(lightingSys->GetLights().spots.size());
-        }
-
-        rg.AddComputePass<LightAssignData>("LightAssign", RG::QueueFamily::AsyncCompute,
-            [&](LightAssignData& d, RG::RenderPassBuilder& builder)
-            {
-                d.aabb  = builder.ReadBuffer(cb.aabb);
-                d.grid  = builder.WriteBuffer(cb.grid);
-                d.index = builder.WriteBuffer(out.index);
-            },
-            [this, pipeline, debugger, capturedPointCount, capturedSpotCount](LightAssignData&, RG::RenderPassContext& ctx)
-            {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                if (debugger)
-                    debugger->BeginCapturePass(ctx.passIndex, "LightAssign", "", false,
-                        { "light_assign", 0, 0, VK_POLYGON_MODE_FILL, false, false, false, false });
-
-                const u32 slotLocal = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex())
-                                      % MAX_FRAMES_IN_FLIGHT;
-                ViewResources* vrLoc = m_Pipeline->GetCurrentViewResources();
-                if (!vrLoc || vrLoc->lightAssignDescSet[slotLocal] == VK_NULL_HANDLE)
-                {
-                    if (debugger) debugger->EndCapturePass();
-                    return;
-                }
-
-                pipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    pipeline->GetLayout(), 0, 1, &vrLoc->lightAssignDescSet[slotLocal], 0, nullptr);
-
-                const auto* view = m_Pipeline->GetCurrentView();
-                struct LightAssignPC {
-                    Mat4 view;
-                    u32  pointLightCount;
-                    u32  spotLightCount;
-                    u32  maxLightsPerCluster;
-                    u32  _pad0;
-                } pc{};
-                pc.view                = view->camera.view;
-                pc.pointLightCount     = capturedPointCount;
-                pc.spotLightCount      = capturedSpotCount;
-                pc.maxLightsPerCluster = k_MaxLightsPerCluster;
-                vkCmdPushConstants(cmd, pipeline->GetLayout(),
-                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(LightAssignPC), &pc);
-
-                // 64-invocation workgroups; one workgroup per 64 clusters.
-                const u32 groupX = (k_ClusterCount + 63) / 64;
-                vkCmdDispatch(cmd, groupX, 1, 1);
-
-                if (debugger)
-                {
-                    debugger->CaptureComputeDispatch("LightAssign", "light_assign", groupX, 1, 1);
-                    debugger->EndCapturePass();
-                }
-            });
-
+        vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+        out.build = m_ClusterBuildPipeline->GetHandle(); out.buildLayout = m_ClusterBuildPipeline->GetLayout();
+        out.assign = m_LightAssignPipeline->GetHandle(); out.assignLayout = m_LightAssignPipeline->GetLayout();
+        out.ready = true;
         return out;
     }
 
+    std::array<RG::BufferHandle, 2> LightingSubsystem::AddClusterBuildPass(RG::RenderGraph& graph,
+        RG::BufferHandle aabb, RG::BufferHandle grid, const ClusterBindings& bindings, FrameDebugger* debugger)
+    {
+        struct Data { RG::BufferHandle aabb, grid; };
+        std::array<RG::BufferHandle, 2> output;
+        graph.AddComputePass<Data>("ClusterBuild", RG::QueueFamily::AsyncCompute,
+            [&](Data& data, RG::RenderPassBuilder& builder) {
+                data.aabb = builder.WriteBuffer(aabb);
+                data.grid = builder.WriteBuffer(grid);
+                output = {data.aabb, data.grid};
+            },
+            [bindings, debugger](Data&, RG::RenderPassContext& ctx) {
+                const auto cmd = ctx.commandBuffer;
+                if (debugger) debugger->BeginCapturePass(ctx.passIndex, "ClusterBuild", "", false,
+                    {"cluster_build", 0, 0, VK_POLYGON_MODE_FILL, false, false, false, false});
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bindings.build);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bindings.buildLayout,
+                    0, 1, &bindings.buildSet, 0, nullptr);
+                vkCmdPushConstants(cmd, bindings.buildLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                    sizeof(ClusterBuildConstants), &bindings.buildConstants);
+                const u32 x = (k_ClusterTilesX + 3) / 4, y = (k_ClusterTilesY + 3) / 4, z = (k_ClusterSlicesZ + 3) / 4;
+                vkCmdDispatch(cmd, x, y, z);
+                if (debugger)
+                {
+                    debugger->CaptureComputeDispatch("ClusterBuild", "cluster_build", x, y, z);
+                    debugger->EndCapturePass();
+                }
+            });
+        return output;
+    }
+
+    std::array<RG::BufferHandle, 2> LightingSubsystem::AddLightAssignPass(RG::RenderGraph& graph,
+        RG::BufferHandle lights, RG::BufferHandle aabb, RG::BufferHandle grid,
+        RG::BufferHandle indices, RG::BufferHandle counter, const ClusterBindings& bindings, FrameDebugger* debugger)
+    {
+        struct Data { RG::BufferHandle lights, aabb, grid, indices, counter; };
+        std::array<RG::BufferHandle, 2> output;
+        graph.AddComputePass<Data>("LightAssign", RG::QueueFamily::AsyncCompute,
+            [&](Data& data, RG::RenderPassBuilder& builder) {
+                data.lights = builder.ReadBuffer(lights);
+                data.aabb = builder.ReadBuffer(aabb);
+                data.grid = builder.WriteBuffer(grid);
+                data.indices = builder.WriteBuffer(indices);
+                data.counter = builder.WriteBuffer(counter);
+                output = {data.grid, data.indices};
+            },
+            [bindings, debugger](Data&, RG::RenderPassContext& ctx) {
+                const auto cmd = ctx.commandBuffer;
+                if (debugger) debugger->BeginCapturePass(ctx.passIndex, "LightAssign", "", false,
+                    {"light_assign", 0, 0, VK_POLYGON_MODE_FILL, false, false, false, false});
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bindings.assign);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bindings.assignLayout,
+                    0, 1, &bindings.assignSet, 0, nullptr);
+                vkCmdPushConstants(cmd, bindings.assignLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                    sizeof(LightAssignConstants), &bindings.assignConstants);
+                const u32 x = (k_ClusterCount + 63) / 64;
+                vkCmdDispatch(cmd, x, 1, 1);
+                if (debugger)
+                {
+                    debugger->CaptureComputeDispatch("LightAssign", "light_assign", x, 1, 1);
+                    debugger->EndCapturePass();
+                }
+            });
+        return output;
+    }
     // Per-view stable depth-sampler write for the ClusterViz set 0; called from
     // AllocateViewResources after FrameTargets exists.
     void LightingSubsystem::WriteClusterVizView(ViewResources& vr, FrameTargets& targets)
