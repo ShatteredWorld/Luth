@@ -517,6 +517,7 @@ namespace Luth
         std::unique_ptr<CompiledRenderPipeline> m_ClusterComposition;
         std::unique_ptr<CompiledRenderPipeline> m_FogComputeComposition;
         std::unique_ptr<CompiledRenderPipeline> m_FogCompositeComposition;
+        std::unique_ptr<CompiledRenderPipeline> m_RefractionComposition;
         std::unique_ptr<CompiledRenderPipeline> m_SkyComposition;
         std::unique_ptr<CompiledRenderPipeline> m_ForwardComposition;
         std::unique_ptr<IDenoiser> m_Denoise;     // DI SVGF; swappable to NRD/RELAX via the settings toggle

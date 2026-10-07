@@ -2,8 +2,10 @@
 
 #include "luth/core/types/LuthTypes.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
+#include "luth/renderer/features/RefractionBackdropBindings.h"
 #include "luth/renderer/pipeline/PipelineManager.h"
 
+#include <memory>
 #include <string>
 #include <vector>
 #include <vulkan/vulkan.h>
@@ -52,6 +54,10 @@ namespace Luth
                                      RG::ResourceHandle fogResolved,
                                      RG::ResourceHandle refractionBackdrop,
                                      RG::BufferHandle indirectBufferHandle);
+
+        static RefractionBackdropBindings PrepareBackdropBindings(const std::shared_ptr<Texture>&, bool enabled);
+        static GraphTextureRef AddBackdropCopyPass(RG::RenderGraph&, RG::ResourceHandle source,
+            const RefractionBackdropBindings&);
 
         VkDescriptorSetLayout GetSetLayout()        const { return m_TransparentSetLayout; }
         VkDescriptorSetLayout GetResolveSetLayout() const { return m_ResolveSetLayout; }

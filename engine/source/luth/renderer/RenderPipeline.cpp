@@ -9,6 +9,7 @@
 #include "luth/renderer/features/ClusteredLightingFeature.h"
 #include "luth/renderer/features/FogComputeFeature.h"
 #include "luth/renderer/features/FogCompositeFeature.h"
+#include "luth/renderer/features/RefractionBackdropFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -179,6 +180,13 @@ namespace Luth
         auto fogCompiled = RenderPipelineCompiler{}.Compile(std::move(fogDefinition), {}, fogInputs);
         if (!fogCompiled.ReplaceIfValid(m_FogComputeComposition))
             throw std::runtime_error("Fog compute feature definition failed semantic validation");
+        RenderPipelineDefinition backdropDefinition;
+        backdropDefinition.AddFeature<RefractionBackdropFeature>(m_Transparency);
+        PipelineInputContract backdropInputs;
+        backdropInputs.resources = {{RenderResources::FoggedHDR}, {RefractionResources::Bindings}};
+        auto backdropCompiled = RenderPipelineCompiler{}.Compile(std::move(backdropDefinition), {}, backdropInputs);
+        if (!backdropCompiled.ReplaceIfValid(m_RefractionComposition))
+            throw std::runtime_error("Refraction backdrop feature definition failed semantic validation");
         RenderPipelineDefinition fogCompositeDefinition;
         fogCompositeDefinition.AddFeature<FogCompositeFeature>(m_Volumetric, &m_System.GetFrameDebugger());
         PipelineInputContract fogCompositeInputs;
@@ -315,6 +323,7 @@ namespace Luth
         m_ClusterComposition.reset();
         m_FogComputeComposition.reset();
         m_FogCompositeComposition.reset();
+        m_RefractionComposition.reset();
         m_SkyComposition.reset();
         m_ForwardComposition.reset();
         m_Skinning.Shutdown();
@@ -878,39 +887,24 @@ namespace Luth
             // can sample the refracted background. RG orders the copy after the composite (reads fogColor as
             // TransferSrc) and before the transparent pass's Set 6 b3 sample (declared Read there). Skipped
             // when the transparent bucket is empty (matches AddPasses' own early-out).
-            RG::ResourceHandle backdropHandle{};
-            if (m_CurrentViewResources && m_CurrentViewResources->refractionBackdrop &&
-                !m_System.GetDrawList().transparent.empty())
+            const auto backdropNative = m_Transparency.PrepareBackdropBindings(m_CurrentViewResources->refractionBackdrop,
+                !m_System.GetDrawList().transparent.empty());
+            const RefractionBackdropBindingRef backdropBinding{&backdropNative};
+            const std::array backdropResources{RenderInputBinding::Present(RenderResources::FoggedHDR, foggedOutput),
+                RenderInputBinding::Present(RefractionResources::Bindings, backdropBinding)};
+            FrameRenderInputs backdropFrame;
+            backdropFrame.renderFrameIndex = skyFrame.renderFrameIndex; backdropFrame.resources = backdropResources;
+            GraphTextureRef backdropOutput;
+            const std::array backdropExports{RenderOutputBinding::Capture(RenderResources::RefractionBackdrop, backdropOutput)};
+            const auto backdropBuild = m_RefractionComposition->Build(rg, backdropFrame, skyView,
+                s.GetFrameAllocator(), backdropExports);
+            if (!backdropBuild.success)
             {
-                auto vkBackdrop = std::static_pointer_cast<VKTexture>(m_CurrentViewResources->refractionBackdrop);
-                RG::TextureDesc bdDesc;
-                bdDesc.name   = "RefractionBackdrop";
-                bdDesc.width  = vkBackdrop->GetWidth();
-                bdDesc.height = vkBackdrop->GetHeight();
-                bdDesc.format = RG::TextureFormat::RGBA16_Float;
-                RG::ResourceHandle bdImport = rg.ImportResource(bdDesc, (void*)vkBackdrop->GetImage(),
-                    (void*)vkBackdrop->GetImageView(), RG::ResourceState::ShaderResource);
-                struct BackdropCopyData { RG::ResourceHandle src, dst; };
-                rg.AddComputePass<BackdropCopyData>("RefractionBackdropCopy",
-                    [&](BackdropCopyData& data, RG::RenderPassBuilder& builder)
-                    {
-                        data.src = builder.ReadTransfer(fogColor);
-                        data.dst = builder.WriteTransfer(bdImport);
-                        backdropHandle = data.dst;
-                    },
-                    [](BackdropCopyData& data, RG::RenderPassContext& ctx)
-                    {
-                        auto* src = (RG::RenderGraph::ResourceNode*)ctx.GetResource(data.src);
-                        auto* dst = (RG::RenderGraph::ResourceNode*)ctx.GetResource(data.dst);
-                        VkImageCopy region{};
-                        region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-                        region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-                        region.extent = { src->desc.width, src->desc.height, 1 };
-                        vkCmdCopyImage(ctx.commandBuffer,
-                            src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                            dst->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-                    });
+                for (const auto& diagnostic : backdropBuild.diagnostics)
+                    LH_LOG(Renderer, error, "Refraction backdrop composition: {}", diagnostic.message);
+                return false;
             }
+            const RG::ResourceHandle backdropHandle = backdropOutput.handle;
             // Transparent tier: after the fog composite so glass blends over the fogged background (its own
             // fog is per-fragment at the glass depth, sampled from the resolved atlas inside pbr_transparent.frag).
             RG::ResourceHandle transparentColor = fogColor;
