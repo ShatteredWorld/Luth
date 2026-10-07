@@ -1,6 +1,7 @@
 #include "luth/renderer/features/RenderBlackboard.h"
 #include "luth/memory/LinearAllocator.h"
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <string>
 
@@ -103,6 +104,27 @@ namespace Luth
     [[noreturn]] void RenderBlackboard::Fail(BlackboardErrorCode code, ResourceKeyRef key) const
     {
         throw BlackboardError(code, key, m_FeatureName);
+    }
+
+    const void* RenderBlackboard::TryGetBorrowed(ResourceKeyRef key) const
+    {
+        const size_t slot = ReadSlot(key);
+        return m_States[slot] == State::Absent ? nullptr : ValueAddress(slot);
+    }
+
+    void RenderBlackboard::PublishBorrowed(ResourceKeyRef key, const void* value)
+    {
+        const size_t slot = WriteSlot(key, false);
+        // Values are constrained to trivially copyable types by typed key construction.
+        // memcpy starts their implicit lifetime in the destination storage (C++20).
+        std::memcpy(ValueAddress(slot), value, key.type->size);
+        m_States[slot] = State::Present;
+    }
+
+    void RenderBlackboard::PublishAbsentBorrowed(ResourceKeyRef key)
+    {
+        const size_t slot = WriteSlot(key, true);
+        m_States[slot] = State::Absent;
     }
 
     size_t RenderBlackboard::ReadSlot(ResourceKeyRef key) const

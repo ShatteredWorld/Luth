@@ -23,6 +23,10 @@ namespace Luth
         // consumers of aliasesInput before a transform that mutates that input.
         std::optional<ResourceKeyRef> aliasesInput;
         bool mutatesInput = false;
+        bool exclusive = false;
+        // An allocating transform can pass its input through when disabled without
+        // claiming its active output is the same physical image (e.g. TAA).
+        std::optional<ResourceKeyRef> disabledPassthrough;
     };
 
     struct ResourceContract

@@ -110,6 +110,10 @@ namespace Luth
         size_t StorageBytes() const noexcept { return m_Layout.ValueBytes() + m_Layout.SlotCount(); }
 
     private:
+        friend class CompiledRenderPipeline;
+        const void* TryGetBorrowed(ResourceKeyRef) const;
+        void PublishBorrowed(ResourceKeyRef, const void*);
+        void PublishAbsentBorrowed(ResourceKeyRef);
         enum class State : u8 { Unpublished, Absent, Present };
         static_assert(sizeof(State) == 1);
         size_t ReadSlot(ResourceKeyRef) const;
