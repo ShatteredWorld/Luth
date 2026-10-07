@@ -706,13 +706,24 @@ namespace Luth
         }
     }
 
-    void GeometrySubsystem::AddCullPass(RG::RenderGraph& rg,
+    CullBindings GeometrySubsystem::PrepareCullBindings(u64 renderFrameIndex, u32 objectCount) const
+    {
+        const u32 slot = static_cast<u32>(renderFrameIndex) % MAX_FRAMES_IN_FLIGHT;
+        return {m_CullPipeline ? m_CullPipeline->GetHandle() : VK_NULL_HANDLE,
+            m_CullPipeline ? m_CullPipeline->GetLayout() : VK_NULL_HANDLE, m_CullDescSet[slot], objectCount};
+    }
+
+    RG::BufferHandle GeometrySubsystem::AddCullPass(RG::RenderGraph& rg,
                                          RG::BufferHandle objectBuffer, RG::BufferHandle indirectBuffer,
                                          const std::array<Vec4, 6>& frustumPlanes, u32 destOffset,
-                                         const char* passName)
+                                         const char* passName, const CullBindings& bindings, FrameDebugger* debugger)
     {
         LH_PROFILE_FUNCTION();
-        if (!m_CullPipeline || m_GPUObjectCount == 0) return;
+        // Initialized indirect commands remain a valid unculled fallback when native
+        // shader initialization is incomplete; never advertise a no-op cull producer.
+        if (!bindings.pipeline || bindings.objectCount == 0) return indirectBuffer;
+        if (!bindings.layout || !bindings.descriptorSet)
+            throw std::invalid_argument("Visibility: incomplete native cull bindings");
 
         struct CullPassData {
             RG::BufferHandle objectBuffer;
@@ -725,38 +736,34 @@ namespace Luth
         };
 
         std::string name = passName ? passName : "FrustumCull";
-        auto* pipeline = m_CullPipeline.get();
-        u32 objectCount = m_GPUObjectCount;
-        FrameDebugger* debugger = &m_Pipeline->GetSystem().GetFrameDebugger();
+        RG::BufferHandle output = indirectBuffer;
 
         rg.AddComputePass<CullPassData>(name,
-            [=](CullPassData& data, RG::RenderPassBuilder& builder)
+            [=, &output](CullPassData& data, RG::RenderPassBuilder& builder)
             {
                 data.objectBuffer   = builder.ReadBuffer(objectBuffer);
                 data.indirectBuffer = builder.WriteBuffer(indirectBuffer);
+                output = data.indirectBuffer;
             },
-            [this, pipeline, frustumPlanes, objectCount, destOffset, name, debugger](CullPassData&, RG::RenderPassContext& ctx)
+            [bindings, frustumPlanes, destOffset, name, debugger](CullPassData&, RG::RenderPassContext& ctx)
             {
                 VkCommandBuffer cmd = ctx.commandBuffer;
                 if (debugger)
                     debugger->BeginCapturePass(ctx.passIndex, name, "", false,
                         { "gpu_cull", 0, 0, VK_POLYGON_MODE_FILL, false, false, false, false });
 
-                // Recompute slot at executor time; capturing m_CullDescSet by value
-                // would freeze slot 0 only (cycling refactor invariant).
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                pipeline->Bind(cmd);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bindings.pipeline);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    pipeline->GetLayout(), 0, 1, &m_CullDescSet[slot], 0, nullptr);
+                    bindings.layout, 0, 1, &bindings.descriptorSet, 0, nullptr);
 
                 CullPushConstants pc{};
                 for (int i = 0; i < 6; ++i) pc.frustumPlanes[i] = frustumPlanes[i];
-                pc.objectCount = objectCount;
+                pc.objectCount = bindings.objectCount;
                 pc.destOffset  = destOffset;
-                vkCmdPushConstants(cmd, pipeline->GetLayout(),
+                vkCmdPushConstants(cmd, bindings.layout,
                     VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CullPushConstants), &pc);
 
-                u32 groupCountX = (objectCount + 255) / 256;
+                u32 groupCountX = (bindings.objectCount + 255) / 256;
                 vkCmdDispatch(cmd, groupCountX, 1, 1);
 
                 if (debugger)
@@ -765,6 +772,7 @@ namespace Luth
                     debugger->EndCapturePass();
                 }
             });
+        return output;
     }
 
     RG::ResourceHandle GeometrySubsystem::AddDepthPrepass(RG::RenderGraph& rg, RG::BufferHandle indirectBufferHandle)

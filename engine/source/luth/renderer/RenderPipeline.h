@@ -552,7 +552,7 @@ namespace Luth
         PathTraceSubsystem      m_PathTrace;
         ReflectionsSubsystem    m_Reflections;
         SkinningSubsystem       m_Skinning;
-        std::unique_ptr<CompiledRenderPipeline> m_DeformationPipeline;
+        std::unique_ptr<CompiledRenderPipeline> m_GeometryPreparationPipeline;
         std::unique_ptr<IDenoiser> m_Denoise;     // DI SVGF; swappable to NRD/RELAX via the settings toggle
         std::unique_ptr<IDenoiser> m_DenoiseGi;   // GI SVGF: second instance (DenoiserChannel::Gi)
         std::unique_ptr<IDenoiser> m_DenoiseRefl; // specular SVGF: third instance (DenoiserChannel::Reflections)

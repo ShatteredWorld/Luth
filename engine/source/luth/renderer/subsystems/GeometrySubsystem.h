@@ -26,6 +26,14 @@ namespace Luth
     struct RenderSnapshot;
     struct GeometryOutput;
     struct SlimGBufferOutput;
+    struct FrameDebugger;
+    struct CullBindings
+    {
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkPipelineLayout layout = VK_NULL_HANDLE;
+        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+        u32 objectCount = 0;
+    };
 
     // Owns Set 5 (per-draw GPU object SSBO + indirect args), the cull compute pipeline, the PBR + depth-prepass
     // graphics pipelines, the per-frame entity<->SSBO mapping, and the geometry-side render-graph passes
@@ -51,10 +59,11 @@ namespace Luth
         static u32 GetDroppedObjectCount();
 
         // Render-graph contributions.
-        void AddCullPass(RG::RenderGraph& rg,
+        CullBindings PrepareCullBindings(u64 renderFrameIndex, u32 objectCount) const;
+        static RG::BufferHandle AddCullPass(RG::RenderGraph& rg,
                          RG::BufferHandle objectBuffer, RG::BufferHandle indirectBuffer,
                          const std::array<Vec4, 6>& frustumPlanes, u32 destOffset,
-                         const char* passName);
+                         const char* passName, const CullBindings&, FrameDebugger*);
         RG::ResourceHandle AddDepthPrepass(RG::RenderGraph& rg, RG::BufferHandle indirectBufferHandle);
         SlimGBufferOutput  AddSlimGBufferPass(RG::RenderGraph& rg,
                                               RG::BufferHandle indirectBufferHandle,

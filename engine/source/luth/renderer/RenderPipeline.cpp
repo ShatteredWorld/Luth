@@ -2,6 +2,7 @@
 #include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/features/GTAOFeature.h"
 #include "luth/renderer/features/DeformationFeature.h"
+#include "luth/renderer/features/VisibilityFeature.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
 #include "luth/renderer/debug/FrameDebuggerContext.h"
 #include "luth/scene/systems/RenderingSystem.h"
@@ -121,12 +122,14 @@ namespace Luth
         m_DenoiseDiSpec->Init(*this);
         m_Skinning.Init();
         RenderPipelineDefinition deformationDefinition;
+        deformationDefinition.AddFeature<VisibilityFeature>(m_Geometry, &m_System.GetFrameDebugger());
         deformationDefinition.AddFeature<DeformationFeature>(m_Skinning);
         PipelineInputContract deformationInputs;
-        deformationInputs.resources = {{DeformationResources::Parameters}};
+        deformationInputs.resources = {{DeformationResources::Parameters}, {VisibilityResources::Parameters},
+            {RenderResources::ObjectData}, {RenderResources::InitializedIndirectData}};
         auto deformationCompiled = RenderPipelineCompiler{}.Compile(std::move(deformationDefinition), {}, deformationInputs);
-        if (!deformationCompiled.ReplaceIfValid(m_DeformationPipeline))
-            throw std::runtime_error("Deformation feature definition failed semantic validation");
+        if (!deformationCompiled.ReplaceIfValid(m_GeometryPreparationPipeline))
+            throw std::runtime_error("Geometry preparation feature definition failed semantic validation");
 
         // Shader hot-reload callback: pulls fresh SPIR-V into the cached blob and rebuilds pipelines that use it.
         // Fires after ShaderLibrary::Reload has already recompiled and re-reflected the single-stage shader.
@@ -225,7 +228,7 @@ namespace Luth
 
         // Subsystems own their layouts/pools/samplers/pipelines.
         m_Transparency.Shutdown();
-        m_DeformationPipeline.reset();
+        m_GeometryPreparationPipeline.reset();
         m_Skinning.Shutdown();
         m_DenoiseDiSpec->Shutdown();
         m_DenoiseRefl->Shutdown();
@@ -293,19 +296,45 @@ namespace Luth
         // Deform: per-frame compute skinning into each mesh's deformed buffer, as the FIRST graphics
         // pass so raster geometry (gA) reads the current-frame deformation. Decoupled from needTlas:
         // raster always needs it, even when no RT consumer builds a TLAS this frame.
+        const bool ptEnabled = m_PathTrace.IsEnabled() && m_CurrentViewResources
+                            && m_Rt.GetTlas() != VK_NULL_HANDLE;
+        VisibilityParameters visibilityParams;
+        visibilityParams.cameraPlanes = CreateFrustumFromCamera(m_Global.GetCachedViewProj()).planes;
+        visibilityParams.viewIndex = view.viewIndex;
+        visibilityParams.regionStride = k_IndirectRegionStride;
+        visibilityParams.maxViews = k_MaxViews;
+        visibilityParams.objectCount = m_Geometry.GetGPUObjectCount();
+        visibilityParams.realtime = !ptEnabled;
+        visibilityParams.cullCascades = m_Global.GetShadowParams().castShadows
+            && (m_Global.GetShadowParams().mode == ShadowingMode::RasterCSM || view.camera.enableVolumetricFog);
+        if (visibilityParams.cullCascades)
+            for (u32 cascade = 0; cascade < k_ShadowCascadeCount; ++cascade)
+                visibilityParams.cascadePlanes[cascade] = CreateFrustumFromCamera(m_Global.GetCascades().lightSpaceMatrix[cascade]).planes;
+        const GraphBufferRef objectInput{hObjectBuf, {&objectRegion, objectRegion.offset, objectRegion.size}};
+        const GraphBufferRef indirectInput{hIndirectBuf, {&indirectRegion, indirectRegion.offset, indirectRegion.size}};
         const DeformationParameters deformationParams{s.GetWindSettings(), Time::GetTime()};
-        const std::array deformationBindings{RenderInputBinding::Present(DeformationResources::Parameters, deformationParams)};
+        const std::array deformationBindings{
+            RenderInputBinding::Present(DeformationResources::Parameters, deformationParams),
+            RenderInputBinding::Present(VisibilityResources::Parameters, visibilityParams),
+            RenderInputBinding::Present(RenderResources::ObjectData, objectInput),
+            RenderInputBinding::Present(RenderResources::InitializedIndirectData, indirectInput)};
         FrameRenderInputs deformationFrame;
         deformationFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
         deformationFrame.snapshot = &s.GetActiveSnapshot();
         deformationFrame.resources = deformationBindings;
         ViewRenderInputs deformationView;
         deformationView.id = view.id;
-        const auto deformationBuild = m_DeformationPipeline->Build(rg, deformationFrame, deformationView, s.GetFrameAllocator());
+        VisibleDrawRange cameraVisible;
+        CascadeDrawRanges cascadeVisible;
+        const std::array visibilityOutputs{
+            RenderOutputBinding::Capture(RenderResources::CameraVisibleDraws, cameraVisible),
+            RenderOutputBinding::Capture(RenderResources::CascadeVisibleDraws, cascadeVisible)};
+        const auto deformationBuild = m_GeometryPreparationPipeline->Build(rg, deformationFrame, deformationView,
+            s.GetFrameAllocator(), visibilityOutputs);
         if (!deformationBuild.success)
         {
             for (const auto& diagnostic : deformationBuild.diagnostics)
-                LH_LOG(Renderer, error, "Deformation composition: {}", diagnostic.message);
+                LH_LOG(Renderer, error, "Geometry preparation composition: {}", diagnostic.message);
             return false;
         }
 
@@ -317,8 +346,7 @@ namespace Luth
         // The TLAS-ready term makes ptEnabled imply ptActive below: a cold boot with PT pre-enabled renders
         // one real-time frame (which builds the TLAS) before PT takes over; never a black frame / invalid
         // geoOutput for the !ptActive overlays.
-        const bool ptEnabled = m_PathTrace.IsEnabled() && m_CurrentViewResources
-                            && m_Rt.GetTlas() != VK_NULL_HANDLE;
+
 
         // Real-time geometry inputs, hoisted so the post chain + overlays can reference them; produced only
         // on the real-time path (PT traces its own primary rays, so it needs none of these).
@@ -327,38 +355,15 @@ namespace Luth
         SlimGBufferOutput  slimGB{};
         if (!ptEnabled)
         {
-            // Frustum cull: 5 dispatches per view (camera + 4 cascades). Each view owns a disjoint range within the indirect region.
-            {
-                const u32 baseRegion = view.viewIndex * k_IndirectRegionsPerView;
-                Frustum camFrustum = CreateFrustumFromCamera(m_Global.GetCachedViewProj());
-                m_Geometry.AddCullPass(rg, hObjectBuf, hIndirectBuf, camFrustum.planes, baseRegion * k_IndirectRegionStride, "FrustumCull.Cam");
-
-                // CSM cascade cull: needed when ShadowPass runs (CSM mode OR volumetric on,
-                // since volumetric_inject_scatter samples cascades in both shadow modes).
-                const bool runCsmCascades = m_Global.GetShadowParams().castShadows
-                                         && ((m_Global.GetShadowParams().mode == ShadowingMode::RasterCSM)
-                                             || view.camera.enableVolumetricFog);
-                if (runCsmCascades)
-                {
-                    for (u32 i = 0; i < k_ShadowCascadeCount; ++i)
-                    {
-                        Frustum cascadeFrustum = CreateFrustumFromCamera(m_Global.GetCascades().lightSpaceMatrix[i]);
-                        const u32 destOffset = (baseRegion + 1 + i) * k_IndirectRegionStride;
-                        const std::string name = "FrustumCull.C" + std::to_string(i);
-                        m_Geometry.AddCullPass(rg, hObjectBuf, hIndirectBuf, cascadeFrustum.planes, destOffset, name.c_str());
-                    }
-                }
-            }
+            hIndirectBuf = cameraVisible.indirect.handle;
 
             // Shadow pass renders cascade depth: needed for CSM mode AND for volumetric god-rays
             // in either shadow mode (volumetric scatter samples shadowMap at Set 1 b5).
-            const bool runCsmShadowPasses = m_Global.GetShadowParams().castShadows
-                                         && ((m_Global.GetShadowParams().mode == ShadowingMode::RasterCSM)
-                                             || view.camera.enableVolumetricFog);
+            const bool runCsmShadowPasses = visibilityParams.cullCascades;
             if (runCsmShadowPasses)
             {
                 for (u32 i = 0; i < k_ShadowCascadeCount; ++i)
-                    shadowHandles[i] = m_Lighting.AddShadowPass(rg, hIndirectBuf, i);
+                    shadowHandles[i] = m_Lighting.AddShadowPass(rg, cascadeVisible.cascades[i].indirect.handle, i);
             }
 
             // Z-prepass produces SceneDepth before forward shading. The render graph can schedule it in parallel with the shadow cascades.
