@@ -557,6 +557,7 @@ namespace Luth
         std::unique_ptr<CompiledRenderPipeline> m_CsmComposition;
         std::unique_ptr<CompiledRenderPipeline> m_ClusterComposition;
         std::unique_ptr<CompiledRenderPipeline> m_SkyComposition;
+        std::unique_ptr<CompiledRenderPipeline> m_ForwardComposition;
         std::unique_ptr<IDenoiser> m_Denoise;     // DI SVGF; swappable to NRD/RELAX via the settings toggle
         std::unique_ptr<IDenoiser> m_DenoiseGi;   // GI SVGF: second instance (DenoiserChannel::Gi)
         std::unique_ptr<IDenoiser> m_DenoiseRefl; // specular SVGF: third instance (DenoiserChannel::Reflections)

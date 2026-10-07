@@ -1042,281 +1042,167 @@ namespace Luth
             });
         return output;
     }
-    GeometryOutput GeometrySubsystem::AddGeometryPass(RG::RenderGraph& rg,
-                                                      const RG::ResourceHandle (&shadowHandles)[k_ShadowCascadeCount],
-                                                      RG::BufferHandle indirectBufferHandle,
-                                                      RG::ResourceHandle sceneDepth,
-                                                      RG::ResourceHandle gtaoFinalAO,
-                                                      RG::ResourceHandle rtShadowMask,
-                                                      RG::ResourceHandle diHandle,
-                                                      RG::ResourceHandle giDIHandle,
-                                                      RG::ResourceHandle reflHandle,
-                                                      RG::ResourceHandle diSpecHandle)
+    VkDeviceSize GeometrySubsystem::ForwardDrawOffset(const VisibleDrawRange& visible, u32 objectIndex)
+    {
+        if (!visible.indirect.handle.IsValid() || !visible.indirect.binding.slice ||
+            !visible.indirect.binding.slice->buffer ||
+            visible.indirect.binding.offset != visible.indirect.binding.slice->offset ||
+            visible.indirect.binding.size > visible.indirect.binding.slice->size ||
+            objectIndex >= visible.maxDrawCount ||
+            (u64(visible.firstDraw) + visible.maxDrawCount) * sizeof(VkDrawIndexedIndirectCommand) > visible.indirect.binding.size)
+            throw std::invalid_argument("ForwardOpaque: draw outside camera-visible slice");
+        return visible.indirect.binding.offset + (u64(visible.firstDraw) + objectIndex) * sizeof(VkDrawIndexedIndirectCommand);
+    }
+
+    GraphTextureRef GeometrySubsystem::ImportForwardTarget(RG::RenderGraph& graph, const Texture& texture,
+        const char* name, RG::TextureFormat format, RG::ResourceState initialState)
+    {
+        const auto& native = static_cast<const VKTexture&>(texture);
+        RG::TextureDesc desc;
+        desc.name = name; desc.width = texture.GetWidth(); desc.height = texture.GetHeight(); desc.format = format;
+        return {graph.ImportResource(desc, (void*)native.GetImage(), (void*)native.GetImageView(), initialState), {&texture}};
+    }
+
+    ForwardOpaqueBindings GeometrySubsystem::PrepareForwardOpaqueBindings(const std::array<VkDescriptorSet, 6>& sets,
+        bool wireframe, bool shadedWireframe, bool captureDraws, const VisibleDrawRange& visible,
+        const DrawList& draws, const RenderSnapshot& snapshot)
     {
         LH_PROFILE_FUNCTION();
-        struct GeometryPassData {
-            RG::ResourceHandle outputTex;
-            RG::ResourceHandle entityIDTex;
-            RG::ResourceHandle depthTex;
-            RG::ResourceHandle shadowCascades[k_ShadowCascadeCount];
-            RG::ResourceHandle gtaoFinalAO;
-            RG::ResourceHandle rtShadowMask;
-            RG::ResourceHandle diHandle;
-            RG::ResourceHandle giDIHandle;
-            RG::ResourceHandle reflHandle;
-            RG::ResourceHandle diSpecHandle;
-            RG::BufferHandle   indirectBuf;
+        ForwardOpaqueBindings out;
+        out.sets = sets; out.captureDraws = captureDraws;
+        out.polygon = wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
+        if (m_PBRVertSpv.empty() || m_PBRFragSpv.empty()) return out;
+        const auto shader = ShaderLibrary::Get("pbr_vert.slang");
+        if (!shader) return out;
+        const UUID pbrUUID = shader->Handle;
+        auto* initial = m_GeoPipelineManager.GetOrCreate(pbrUUID, Material::RenderMode::Opaque,
+            Material::CullMode::Back, out.polygon, m_PBRVertSpv, m_PBRFragSpv);
+        if (!initial) return out;
+        out.initialLayout = initial->GetLayout();
+        const auto prepareBucket = [&](const auto& bucket, Material::RenderMode mode, bool overlay) {
+            VKPipeline* selected = nullptr;
+            Material::CullMode currentCull = static_cast<Material::CullMode>(0xFF);
+            bool currentDeformed = false;
+            UUID currentFrag = UUID::Invalid();
+            for (const auto& dc : bucket)
+            {
+                if (!dc.model) continue;
+                VKPipeline* pipeline = nullptr;
+                if (overlay)
+                    pipeline = dc.isDeformed ? m_WireframeOverlaySkinnedPipeline.get() : m_WireframeOverlayPipeline.get();
+                else if (dc.cullMode != currentCull || dc.isDeformed != currentDeformed || dc.fragShaderUUID != currentFrag)
+                {
+                    currentCull = dc.cullMode; currentDeformed = dc.isDeformed; currentFrag = dc.fragShaderUUID;
+                    const UUID key = dc.fragShaderUUID.IsValid() ? dc.fragShaderUUID : pbrUUID;
+                    const auto& frag = ResolveFragSpv(dc.fragShaderUUID);
+                    pipeline = dc.isDeformed
+                        ? m_GeoSkinnedPipelineManager.GetOrCreate(key, mode, dc.cullMode, out.polygon, m_PBRSkinnedVertSpv, frag)
+                        : m_GeoPipelineManager.GetOrCreate(key, mode, dc.cullMode, out.polygon, m_PBRVertSpv, frag);
+                    selected = pipeline;
+                }
+                else pipeline = selected;
+                if (!pipeline) continue;
+                auto mesh = dc.model->GetMesh(dc.meshIndex);
+                if (!mesh) continue;
+                auto vb = std::static_pointer_cast<VKVertexBuffer>(mesh->GetVertexBuffer());
+                auto ib = std::static_pointer_cast<VKIndexBuffer>(mesh->GetIndexBuffer());
+                if (!ib || (!vb && (!overlay || !dc.isDeformed))) continue;
+                ForwardDrawPacket packet;
+                packet.mesh = mesh; packet.pipeline = pipeline->GetHandle(); packet.layout = pipeline->GetLayout();
+                packet.vertex = vb ? vb->GetVulkanBuffer() : VK_NULL_HANDLE; packet.index = ib->GetVulkanBuffer();
+                packet.indexCount = ib->GetCount(); packet.objectIndex = dc.gpuObjectIndex; packet.entityIndex = dc.entityIndex;
+                packet.deformed = dc.isDeformed; packet.mode = static_cast<u32>(mode);
+                packet.cull = dc.cullMode == Material::CullMode::Back ? VK_CULL_MODE_BACK_BIT
+                    : dc.cullMode == Material::CullMode::Front ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_NONE;
+                if (!overlay) packet.indirectOffset = ForwardDrawOffset(visible, dc.gpuObjectIndex);
+                if (!overlay && captureDraws)
+                {
+                    packet.meshName = dc.model->GetName() + "[" + std::to_string(dc.meshIndex) + "]";
+                    packet.entityName = "Entity";
+                    const auto entity = entt::to_entity(dc.entity);
+                    if (entity < snapshot.tagsByEntity.size() && snapshot.tagsByEntity[entity])
+                        packet.entityName = snapshot.tagsByEntity[entity];
+                }
+                (overlay ? out.overlays : out.draws).push_back(std::move(packet));
+            }
         };
-        GeometryOutput output;
+        prepareBucket(draws.opaque, Material::RenderMode::Opaque, false);
+        prepareBucket(draws.cutout, Material::RenderMode::Cutout, false);
+        if (shadedWireframe && m_WireframeOverlayPipeline)
+        {
+            prepareBucket(draws.opaque, Material::RenderMode::Opaque, true);
+            prepareBucket(draws.cutout, Material::RenderMode::Cutout, true);
+            prepareBucket(draws.transparent, Material::RenderMode::Transparent, true);
+        }
+        return out;
+    }
 
-        rg.AddPass<GeometryPassData>("GeometryPass",
-            [&, sceneDepth](GeometryPassData& data, RG::RenderPassBuilder& builder)
-            {
-                const auto* view = m_Pipeline->GetCurrentView();
-                RG::TextureDesc desc;
-                desc.name   = "SceneColor";
-                desc.width  = view->targets->GetSceneColor()->GetWidth();
-                desc.height = view->targets->GetSceneColor()->GetHeight();
-                desc.format = RG::TextureFormat::RGBA16_Float;
-
-                auto vkTex = std::static_pointer_cast<VKTexture>(view->targets->GetSceneColor());
-                data.outputTex = rg.ImportResource(desc,
-                    (void*)vkTex->GetImage(),
-                    (void*)vkTex->GetImageView(),
-                    RG::ResourceState::ShaderResource);
-
-                RG::TextureDesc idDesc;
-                idDesc.name   = "EntityID";
-                idDesc.width  = view->targets->GetEntityIDBuffer()->GetWidth();
-                idDesc.height = view->targets->GetEntityIDBuffer()->GetHeight();
-                idDesc.format = RG::TextureFormat::R32_Uint;
-
-                auto vkID = std::static_pointer_cast<VKTexture>(view->targets->GetEntityIDBuffer());
-                data.entityIDTex = rg.ImportResource(idDesc,
-                    (void*)vkID->GetImage(),
-                    (void*)vkID->GetImageView(),
-                    RG::ResourceState::Undefined);
-
-                // SceneDepth is produced by DepthPrepass; load + keep writing (cutouts
-                // still write their own depth; opaques pass LESS_EQUAL against prepass).
-                data.depthTex  = builder.WriteDepth(sceneDepth,
-                    VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, {});
-                data.outputTex = builder.Write(data.outputTex);
-
-                VkClearValue idClear{};
-                idClear.color.uint32[0] = 0;
-                data.entityIDTex = builder.Write(data.entityIDTex,
-                    VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, idClear);
-
-                // Per-cascade Read triggers DEPTH->SHADER_READ barriers (baseArrayLayer=i, layerCount=1).
-                for (u32 i = 0; i < k_ShadowCascadeCount; ++i)
-                    if (shadowHandles[i].IsValid())
-                        data.shadowCascades[i] = builder.Read(shadowHandles[i]);
-
-                // pbr.frag samples gtaoFinal via Set 0 binding 4; explicit Read triggers
-                // GENERAL -> SHADER_READ_ONLY transition from GTAODenoise.
-                if (gtaoFinalAO.IsValid())
-                    data.gtaoFinalAO = builder.Read(gtaoFinalAO);
-
-                // RT sun-shadow mask. Read triggers GENERAL (RT raygen storage write) ->
-                // SHADER_READ_ONLY transition. Handle is invalid in CSM mode (RtSubsystem
-                // returns {} when the pass is gated off); pbr.frag's CSM branch doesn't
-                // dynamically access binding 4, so the descriptor's layout is irrelevant.
-                if (rtShadowMask.IsValid())
-                    data.rtShadowMask = builder.Read(rtShadowMask);
-
-                // ReSTIR DI image: Read triggers GENERAL (RestirShade storage write) ->
-                // SHADER_READ_ONLY transition before pbr.frag samples it at Set 3 b5. Invalid
-                // handle when ReSTIR is off / no TLAS; pbr.frag's restirParams.x gate then keeps the
-                // descriptor untouched and runs the point loop instead.
-                if (diHandle.IsValid())
-                    data.diHandle = builder.Read(diHandle);
-
-                // ReSTIR GI image: same GENERAL -> SHADER_READ_ONLY transition as the DI handle,
-                // before pbr.frag samples it at Set 3 b6. Invalid when GI is off / no TLAS; the
-                // restirParams.y gate then keeps the descriptor untouched.
-                if (giDIHandle.IsValid())
-                    data.giDIHandle = builder.Read(giDIHandle);
-
-                // Denoised RT reflection radiance: barrier-only read keeping the reflection trace +
-                // specular denoiser alive (no pbr.frag sampler until the Set 3 b7 composite lands).
-                if (reflHandle.IsValid())
-                    data.reflHandle = builder.Read(reflHandle);
-
-                // Denoised ReSTIR-DI specular: barrier-only read; pbr.frag samples it at Set 3 b8
-                // under the restirParams.z gate. Invalid when DI / specular off.
-                if (diSpecHandle.IsValid())
-                    data.diSpecHandle = builder.Read(diSpecHandle);
-
-                data.indirectBuf = builder.ReadIndirectBuffer(indirectBufferHandle);
-
-                output.color    = data.outputTex;
-                output.depth    = data.depthTex;
-                output.entityID = data.entityIDTex;
+    std::array<RG::ResourceHandle, 3> GeometrySubsystem::AddForwardOpaquePass(RG::RenderGraph& graph,
+        RG::ResourceHandle color, RG::ResourceHandle depth, RG::ResourceHandle picking,
+        const VisibleDrawRange& visible, u32 width, u32 height, const ForwardOpaqueBindings& bindings,
+        std::span<const RG::ResourceHandle> sampledImages, std::span<const RG::BufferHandle> lightBuffers, FrameDebugger* debugger)
+    {
+        LH_PROFILE_FUNCTION();
+        struct Data { RG::ResourceHandle color, depth, picking; };
+        std::array<RG::ResourceHandle, 3> output;
+        const auto indirectBuffer = visible.indirect.binding.slice->buffer;
+        graph.AddPass<Data>("GeometryPass",
+            [&](Data& data, RG::RenderPassBuilder& builder) {
+                data.depth = builder.WriteDepth(depth, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
+                data.color = builder.Write(color);
+                VkClearValue clear{};
+                data.picking = builder.Write(picking, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, clear);
+                for (auto image : sampledImages) builder.Read(image);
+                for (auto buffer : lightBuffers) builder.ReadBufferFragment(buffer);
+                builder.ReadIndirectBuffer(visible.indirect.handle);
+                output = {data.color, data.depth, data.picking};
             },
-            [this](GeometryPassData& data, RG::RenderPassContext& ctx)
-            {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                auto& sys = m_Pipeline->GetSystem();
-
-                VkPolygonMode polyMode = (sys.GetShadeMode() == ShadeMode::Wireframe) ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "GeometryPass", "SceneColor", false,
-                    { "pbr", 0, VK_CULL_MODE_BACK_BIT, polyMode, false, true, true, false });
-
-                UUID pbrUUID = ShaderLibrary::Get("pbr_vert.slang")->Handle;
-                auto* opaquePipeline = m_GeoPipelineManager.GetOrCreate(
-                    pbrUUID, Material::RenderMode::Opaque, Material::CullMode::Back, polyMode, m_PBRVertSpv, m_PBRFragSpv);
-                if (!opaquePipeline) { sys.GetFrameDebugger().EndCapturePass(); return; }
-                VkPipelineLayout pipelineLayout = opaquePipeline->GetLayout();
-
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                VkDescriptorSet bindlessSet = VulkanContext::Get().GetBindlessSet().GetSet();
-                VkDescriptorSet sets[] = {
-                    m_Pipeline->GetCurrentViewResources()->globalDescriptorSet[slot],
-                    bindlessSet,
-                    MaterialSystem::GetDescriptorSet(slot),
-                    m_Pipeline->GetLighting().GetLightDescSet(slot),
-                    BoneMatrixBuffer::GetDescriptorSet(slot),
-                    m_ObjectSSBODescSet[slot]
-                };
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    pipelineLayout, 0, 6, sets, 0, nullptr);
-
-                RG::RenderGraph::ResourceNode* res = (RG::RenderGraph::ResourceNode*)ctx.GetResource(data.outputTex);
-                VkViewport viewport{};
-                viewport.width    = (float)res->desc.width;
-                viewport.height   = (float)res->desc.height;
-                viewport.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-                VkRect2D scissor{};
-                scissor.extent = { res->desc.width, res->desc.height };
-                vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-                auto DrawBatch = [&](const std::vector<DrawCommand>& draws, Material::RenderMode mode)
+            [bindings, indirectBuffer, width, height, debugger](Data&, RG::RenderPassContext& ctx) {
+                const auto cmd = ctx.commandBuffer;
+                if (debugger) debugger->BeginCapturePass(ctx.passIndex, "GeometryPass", "SceneColor", false,
+                    {"pbr", 0, VK_CULL_MODE_BACK_BIT, bindings.polygon, false, true, true, false});
+                if (bindings.initialLayout)
                 {
-                    if (draws.empty()) return;
-
-                    // Sentinel cull never matches a real CullMode, so the first draw always binds.
-                    Material::CullMode currentCull = static_cast<Material::CullMode>(0xFF);
-                    bool currentSkinned = false;
-                    UUID currentFrag = UUID::Invalid();
-                    VKPipeline* pipeline = nullptr;
-
-                    for (const auto& dc : draws)
-                    {
-                        if (dc.cullMode != currentCull || dc.isDeformed != currentSkinned || dc.fragShaderUUID != currentFrag)
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bindings.initialLayout,
+                        0, 6, bindings.sets.data(), 0, nullptr);
+                    VkViewport viewport{};
+                    viewport.width = float(width); viewport.height = float(height); viewport.maxDepth = 1.0f;
+                    vkCmdSetViewport(cmd, 0, 1, &viewport);
+                    const VkRect2D scissor{{0, 0}, {width, height}};
+                    vkCmdSetScissor(cmd, 0, 1, &scissor);
+                    const auto recordBucket = [&](const auto& packets, bool overlay) {
+                        VkPipeline current = VK_NULL_HANDLE;
+                        for (const auto& packet : packets)
                         {
-                            currentCull    = dc.cullMode;
-                            currentSkinned = dc.isDeformed;
-                            currentFrag    = dc.fragShaderUUID;
-
-                            // Default materials key on pbrUUID (shared stock frag); a graph material keys on
-                            // its own frag UUID so PipelineManager caches one pipeline per distinct graph.
-                            const UUID keyUUID = dc.fragShaderUUID.IsValid() ? dc.fragShaderUUID : pbrUUID;
-                            const std::vector<u32>& fragSpv = ResolveFragSpv(dc.fragShaderUUID);
-                            pipeline = currentSkinned
-                                ? m_GeoSkinnedPipelineManager.GetOrCreate(keyUUID, mode, currentCull, polyMode, m_PBRSkinnedVertSpv, fragSpv)
-                                : m_GeoPipelineManager.GetOrCreate       (keyUUID, mode, currentCull, polyMode, m_PBRVertSpv,        fragSpv);
-                            if (!pipeline) continue;
-                            pipeline->Bind(cmd);
-                        }
-                        if (!pipeline) continue;
-
-                        auto mesh = dc.model->GetMesh(dc.meshIndex);
-                        auto vb = std::static_pointer_cast<VKVertexBuffer>(mesh->GetVertexBuffer());
-                        auto ib = std::static_pointer_cast<VKIndexBuffer >(mesh->GetIndexBuffer ());
-                        if (!vb || !ib) continue;
-
-                        // Deformable draws bind no VB; the VS fetches the deformed buffer by gl_VertexIndex.
-                        if (!dc.isDeformed)
-                        {
-                            VkBuffer vbuf[] = { vb->GetVulkanBuffer() };
-                            VkDeviceSize offsets[] = { 0 };
-                            vkCmdBindVertexBuffers(cmd, 0, 1, vbuf, offsets);
-                        }
-                        vkCmdBindIndexBuffer(cmd, ib->GetVulkanBuffer(), 0, VK_INDEX_TYPE_UINT32);
-
-                        // GPU cull sets instanceCount=0 for culled draws. gl_BaseInstance =
-                        // dc.gpuObjectIndex; shader reads objects[gl_BaseInstance] via Set 5.
-                        const u32 viewBaseRegion = m_Pipeline->GetCurrentView()->viewIndex * RenderPipeline::k_IndirectRegionsPerView;
-                        const u32 cmdIndex = viewBaseRegion * RenderPipeline::k_IndirectRegionStride + dc.gpuObjectIndex;
-                        VkDeviceSize indirectOffset = m_IndirectRegion.offset + cmdIndex * sizeof(VkDrawIndexedIndirectCommand);
-                        vkCmdDrawIndexedIndirect(cmd, m_IndirectRegion.buffer, indirectOffset, 1,
-                            sizeof(VkDrawIndexedIndirectCommand));
-
-                        if (sys.GetFrameDebugger().state == DebuggerState::CaptureRequested)
-                        {
-                            std::string entName = "Entity";
-                            const auto& tags = sys.GetActiveSnapshot().tagsByEntity;
-                            u32 idx = entt::to_entity(dc.entity);
-                            if (idx < tags.size() && tags[idx])
-                                entName = tags[idx];
-                            u32 vkCull = (currentCull == Material::CullMode::Back) ? VK_CULL_MODE_BACK_BIT
-                                       : (currentCull == Material::CullMode::Front) ? VK_CULL_MODE_FRONT_BIT
-                                       : VK_CULL_MODE_NONE;
-                            sys.GetFrameDebugger().CaptureIndirectDraw("GeometryPass",
-                                dc.model->GetName() + "[" + std::to_string(dc.meshIndex) + "]",
-                                entName, dc.entityIndex, ib->GetCount(),
-                                dc.gpuObjectIndex, indirectOffset,
-                                { "pbr", static_cast<u32>(mode), vkCull, polyMode, currentSkinned, true, true,
-                                  mode == Material::RenderMode::Transparent || mode == Material::RenderMode::Fade });
-                        }
-                    }
-                };
-
-                // Transparent moved to TransparencySubsystem's pass after skybox + fog composite.
-                DrawBatch(sys.GetDrawList().opaque, Material::RenderMode::Opaque);
-                DrawBatch(sys.GetDrawList().cutout, Material::RenderMode::Cutout);
-
-                // Shaded wireframe: redraw opaque + cutout as flat lines over the lit fill. LEQUAL depth
-                // against the prepass depth hides occluded edges; reuses the bound Sets 0-5 + indirect draws.
-                if (sys.GetShadeMode() == ShadeMode::WireframeShaded && m_WireframeOverlayPipeline)
-                {
-                    auto DrawOverlay = [&](const std::vector<DrawCommand>& draws)
-                    {
-                        VKPipeline* cur = nullptr;
-                        for (const auto& dc : draws)
-                        {
-                            VKPipeline* want = dc.isDeformed ? m_WireframeOverlaySkinnedPipeline.get()
-                                                             : m_WireframeOverlayPipeline.get();
-                            if (!want) continue;
-                            if (want != cur)
+                            if (packet.pipeline != current)
                             {
-                                cur = want;
-                                cur->Bind(cmd);
-                                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    cur->GetLayout(), 0, 6, sets, 0, nullptr);
+                                current = packet.pipeline;
+                                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, current);
+                                if (overlay) vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    packet.layout, 0, 6, bindings.sets.data(), 0, nullptr);
                             }
-                            auto mesh = dc.model->GetMesh(dc.meshIndex);
-                            auto vb = std::static_pointer_cast<VKVertexBuffer>(mesh->GetVertexBuffer());
-                            auto ib = std::static_pointer_cast<VKIndexBuffer >(mesh->GetIndexBuffer ());
-                            if (!ib) continue;
-                            if (!dc.isDeformed)
+                            if (!packet.deformed)
                             {
-                                if (!vb) continue;
-                                VkBuffer vbuf[] = { vb->GetVulkanBuffer() };
-                                VkDeviceSize offsets[] = { 0 };
-                                vkCmdBindVertexBuffers(cmd, 0, 1, vbuf, offsets);
+                                const VkDeviceSize offset = 0;
+                                vkCmdBindVertexBuffers(cmd, 0, 1, &packet.vertex, &offset);
                             }
-                            vkCmdBindIndexBuffer(cmd, ib->GetVulkanBuffer(), 0, VK_INDEX_TYPE_UINT32);
-                            // Direct draw (not indirect): firstInstance = gpuObjectIndex feeds gl_BaseInstance
-                            // so the VS reads objects[idx]. Skips GPU cull (minor overdraw, fine for a debug
-                            // overlay) and stays independent of which indirect region a draw list lives in.
-                            vkCmdDrawIndexed(cmd, ib->GetCount(), 1, 0, 0, dc.gpuObjectIndex);
+                            vkCmdBindIndexBuffer(cmd, packet.index, 0, VK_INDEX_TYPE_UINT32);
+                            if (overlay) vkCmdDrawIndexed(cmd, packet.indexCount, 1, 0, 0, packet.objectIndex);
+                            else
+                            {
+                                vkCmdDrawIndexedIndirect(cmd, indirectBuffer, packet.indirectOffset, 1, sizeof(VkDrawIndexedIndirectCommand));
+                                if (debugger && bindings.captureDraws)
+                                    debugger->CaptureIndirectDraw("GeometryPass", packet.meshName, packet.entityName,
+                                        packet.entityIndex, packet.indexCount, packet.objectIndex, packet.indirectOffset,
+                                        {"pbr", packet.mode, packet.cull, bindings.polygon, packet.deformed, true, true, false});
+                            }
                         }
                     };
-                    DrawOverlay(sys.GetDrawList().opaque);
-                    DrawOverlay(sys.GetDrawList().cutout);
-                    // Transparent meshes render their lit fill later (OIT); draw their wireframe here too so
-                    // Shaded Wireframe shows glass edges. They test against opaque depth (glass wrote none),
-                    // so the full silhouette shows through the surface.
-                    DrawOverlay(sys.GetDrawList().transparent);
+                    recordBucket(bindings.draws, false);
+                    recordBucket(bindings.overlays, true);
                 }
-
-                sys.GetFrameDebugger().EndCapturePass();
-            }
-        );
+                if (debugger) debugger->EndCapturePass();
+            });
         return output;
     }
 }

@@ -8,6 +8,7 @@
 #include "luth/renderer/features/CsmFeature.h"
 #include "luth/renderer/features/ClusteredLightingFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
+#include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
 #include "luth/renderer/debug/FrameDebuggerContext.h"
 #include "luth/scene/systems/RenderingSystem.h"
@@ -171,6 +172,24 @@ namespace Luth
         auto skyCompiled = RenderPipelineCompiler{}.Compile(std::move(skyDefinition), {}, skyInputs);
         if (!skyCompiled.ReplaceIfValid(m_SkyComposition))
             throw std::runtime_error("Sky feature definition failed semantic validation");
+        RenderPipelineDefinition forwardDefinition;
+        forwardDefinition.AddFeature<HybridForwardOpaqueFeature>(m_Geometry, &m_System.GetFrameDebugger());
+        PipelineInputContract forwardInputs;
+        forwardInputs.resources = {{ForwardOpaqueResources::Bindings}, {ForwardOpaqueResources::ColorTarget},
+            {ForwardOpaqueResources::PickingTarget}, {RenderResources::CameraVisibleDraws}, {RenderResources::SurfaceDepth},
+            {RenderResources::ShadowCascades, ResourceOutputPresence::Optional},
+            {RenderResources::AmbientOcclusion, ResourceOutputPresence::Optional},
+            {RenderResources::LightData, ResourceOutputPresence::Optional}, {RenderResources::ClusterGrid, ResourceOutputPresence::Optional},
+            {RenderResources::LightIndices, ResourceOutputPresence::Optional},
+            {ForwardCompatibilityResources::SunShadowMask, ResourceOutputPresence::Optional},
+            {ForwardCompatibilityResources::DenoisedDiffuseDI, ResourceOutputPresence::Optional},
+            {ForwardCompatibilityResources::DenoisedDiffuseGI, ResourceOutputPresence::Optional},
+            {ForwardCompatibilityResources::DenoisedReflectionRadiance, ResourceOutputPresence::Optional},
+            {ForwardCompatibilityResources::DenoisedSpecularDI, ResourceOutputPresence::Optional}};
+        forwardInputs.capabilities = {&DeformationResources::DeformedGeometry};
+        auto forwardCompiled = RenderPipelineCompiler{}.Compile(std::move(forwardDefinition), {}, forwardInputs);
+        if (!forwardCompiled.ReplaceIfValid(m_ForwardComposition))
+            throw std::runtime_error("Forward opaque definition failed semantic validation");
         // Shader hot-reload callback: pulls fresh SPIR-V into the cached blob and rebuilds pipelines that use it.
         // Fires after ShaderLibrary::Reload has already recompiled and re-reflected the single-stage shader.
         // Library keys are the shader filename (e.g. "pbr_vert.slang", "gtao_main.slang").
@@ -273,6 +292,7 @@ namespace Luth
         m_CsmComposition.reset();
         m_ClusterComposition.reset();
         m_SkyComposition.reset();
+        m_ForwardComposition.reset();
         m_Skinning.Shutdown();
         m_DenoiseDiSpec->Shutdown();
         m_DenoiseRefl->Shutdown();
@@ -395,6 +415,7 @@ namespace Luth
         // Real-time geometry inputs, hoisted so the post chain + overlays can reference them; produced only
         // on the real-time path (PT traces its own primary rays, so it needs none of these).
         RG::ResourceHandle shadowHandles[k_ShadowCascadeCount]{};
+        ShadowCascadeRefs shadowOutputs;
         GraphTextureRef surfaceDepth{};
         SlimGBufferOutput  slimGB{};
         if (!ptEnabled)
@@ -433,6 +454,7 @@ namespace Luth
                     LH_LOG(Renderer, error, "CSM composition: {}", diagnostic.message);
                 return false;
             }
+            shadowOutputs = csmOutput;
             for (u32 i = 0; i < k_ShadowCascadeCount; ++i)
                 shadowHandles[i] = csmOutput.cascades[i].handle;
             const auto depthNative = m_Geometry.PrepareDepthPrepassBindings(depthSets,
@@ -695,7 +717,7 @@ namespace Luth
                 LH_LOG(Renderer, error, "GTAO composition: {}", diagnostic.message);
             return false; // Never compile/record a graph with invalid contracts.
         }
-        const RG::ResourceHandle gtaoFinalAO = aoOutput.handle;
+
 
         // Real-time lit chain (geometry -> skybox -> fog composite -> transparent -> TAA). Skipped in PT; the
         // megakernel output drives the post chain via hdrForPost below. geoOutput/maskOutput/taaColor hoisted
@@ -705,7 +727,61 @@ namespace Luth
         RG::ResourceHandle  taaColor{};
         if (!ptEnabled)
         {
-            geoOutput  = m_Geometry.AddGeometryPass(rg, shadowHandles, hIndirectBuf, surfaceDepth.handle, gtaoFinalAO, rtShadowMaskHandle, denoisedDIHandle, denoisedGiHandle, denoisedReflHandle, denoisedDiSpecHandle);
+            const u32 forwardSlot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
+            const std::array<VkDescriptorSet, 6> forwardSets{m_CurrentViewResources->globalDescriptorSet[forwardSlot],
+                VulkanContext::Get().GetBindlessSet().GetSet(), MaterialSystem::GetDescriptorSet(forwardSlot),
+                m_CurrentViewResources->lightDescSet[forwardSlot], BoneMatrixBuffer::GetDescriptorSet(forwardSlot),
+                m_Geometry.GetObjectSSBODescSet(forwardSlot)};
+            const auto forwardNative = m_Geometry.PrepareForwardOpaqueBindings(forwardSets,
+                s.GetShadeMode() == ShadeMode::Wireframe, s.GetShadeMode() == ShadeMode::WireframeShaded,
+                view.captureRequested && s.GetFrameDebugger().state == DebuggerState::CaptureRequested,
+                cameraVisible, s.GetDrawList(), s.GetActiveSnapshot());
+            const ForwardOpaqueBindingRef forwardBinding{&forwardNative};
+            const auto colorTarget = m_Geometry.ImportForwardTarget(rg, *view.targets->GetSceneColor(),
+                "SceneColor", RG::TextureFormat::RGBA16_Float, RG::ResourceState::ShaderResource);
+            const auto pickingTarget = m_Geometry.ImportForwardTarget(rg, *view.targets->GetEntityIDBuffer(),
+                "EntityID", RG::TextureFormat::R32_Uint, RG::ResourceState::Undefined);
+            // Transitional RT references are barrier reads; existing native Set 3 owns their descriptors.
+            const GraphTextureRef sunSignal{rtShadowMaskHandle, {}}, diSignal{denoisedDIHandle, {}},
+                giSignal{denoisedGiHandle, {}}, reflectionSignal{denoisedReflHandle, {}}, specularSignal{denoisedDiSpecHandle, {}};
+            const auto optionalImage = [](auto key, const GraphTextureRef& value) {
+                return value.handle.IsValid() ? RenderInputBinding::Present(key, value) : RenderInputBinding::Absent(key);
+            };
+            const auto optionalBuffer = [](auto key, const GraphBufferRef& value) {
+                return value.handle.IsValid() ? RenderInputBinding::Present(key, value) : RenderInputBinding::Absent(key);
+            };
+            const std::array forwardResources{RenderInputBinding::Present(ForwardOpaqueResources::Bindings, forwardBinding),
+                RenderInputBinding::Present(ForwardOpaqueResources::ColorTarget, colorTarget),
+                RenderInputBinding::Present(ForwardOpaqueResources::PickingTarget, pickingTarget),
+                RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
+                RenderInputBinding::Present(RenderResources::CameraVisibleDraws, cameraVisible),
+                shadowOutputs.cascades[0].handle.IsValid() ? RenderInputBinding::Present(RenderResources::ShadowCascades, shadowOutputs)
+                    : RenderInputBinding::Absent(RenderResources::ShadowCascades),
+                optionalImage(RenderResources::AmbientOcclusion, aoOutput),
+                optionalBuffer(RenderResources::LightData, lightData), optionalBuffer(RenderResources::ClusterGrid, clusterGrid),
+                optionalBuffer(RenderResources::LightIndices, lightIndices),
+                optionalImage(ForwardCompatibilityResources::SunShadowMask, sunSignal),
+                optionalImage(ForwardCompatibilityResources::DenoisedDiffuseDI, diSignal),
+                optionalImage(ForwardCompatibilityResources::DenoisedDiffuseGI, giSignal),
+                optionalImage(ForwardCompatibilityResources::DenoisedReflectionRadiance, reflectionSignal),
+                optionalImage(ForwardCompatibilityResources::DenoisedSpecularDI, specularSignal)};
+            const std::array forwardCapabilities{&DeformationResources::DeformedGeometry};
+            FrameRenderInputs forwardFrame;
+            forwardFrame.resources = forwardResources; forwardFrame.capabilities = forwardCapabilities;
+            ViewRenderInputs forwardView;
+            forwardView.id = view.id; forwardView.width = m_CurrentViewResources->width; forwardView.height = m_CurrentViewResources->height;
+            GraphTextureRef opaqueOutput, litOutput, pickingOutput;
+            const std::array forwardExports{RenderOutputBinding::Capture(RenderResources::OpaqueHDR, opaqueOutput),
+                RenderOutputBinding::Capture(RenderResources::LitDepth, litOutput),
+                RenderOutputBinding::Capture(RenderResources::OpaquePickingIDs, pickingOutput)};
+            const auto forwardBuild = m_ForwardComposition->Build(rg, forwardFrame, forwardView, s.GetFrameAllocator(), forwardExports);
+            if (!forwardBuild.success)
+            {
+                for (const auto& diagnostic : forwardBuild.diagnostics)
+                    LH_LOG(Renderer, error, "Forward opaque composition: {}", diagnostic.message);
+                return false;
+            }
+            geoOutput = {opaqueOutput.handle, litOutput.handle, pickingOutput.handle};
             maskOutput = view.drawSelectionOutline
                          ? m_EditorOverlays.AddSelectionMaskPass(rg)
                          : SelectionMaskOutput{};
@@ -716,8 +792,8 @@ namespace Luth
                 m_CurrentViewResources->lightDescSet[skySlot], BoneMatrixBuffer::GetDescriptorSet(skySlot)};
             const auto skyNative = m_Lighting.PrepareSkyBindings(skySets);
             const SkyBindingRef skyBinding{&skyNative};
-            const GraphTextureRef opaqueHdr{geoOutput.color, {view.targets->GetSceneColor().get()}};
-            const GraphTextureRef litDepth{geoOutput.depth, {view.targets->GetSceneDepth().get()}};
+            const GraphTextureRef opaqueHdr = opaqueOutput;
+            const GraphTextureRef litDepth = litOutput;
             const std::array skyResources{RenderInputBinding::Present(RenderResources::OpaqueHDR, opaqueHdr),
                 RenderInputBinding::Present(RenderResources::LitDepth, litDepth),
                 RenderInputBinding::Present(SkyResources::Bindings, skyBinding)};

@@ -25,6 +25,7 @@ add_executable(LuthTests
     renderer/CsmFeature.cpp
     renderer/ClusteredLightingFeature.cpp
     renderer/SkyFeature.cpp
+    renderer/ForwardOpaqueFeature.cpp
 )
 target_compile_features(LuthTests PRIVATE cxx_std_20)
 target_include_directories(LuthTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

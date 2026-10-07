@@ -16,6 +16,7 @@
 #include <array>
 #include <memory>
 #include <string>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -23,6 +24,7 @@
 namespace Luth
 {
     class Material;
+    class Mesh;
     class RenderPipeline;
     struct RenderSnapshot;
     struct DrawList;
@@ -48,6 +50,25 @@ namespace Luth
         DepthPrepassBindings opaque, cutout;
     };
 
+    struct ForwardDrawPacket
+    {
+        std::shared_ptr<Mesh> mesh;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkPipelineLayout layout = VK_NULL_HANDLE;
+        VkBuffer vertex = VK_NULL_HANDLE, index = VK_NULL_HANDLE;
+        VkDeviceSize indirectOffset = 0;
+        u32 entityIndex = 0, indexCount = 0, objectIndex = 0, mode = 0, cull = 0;
+        bool deformed = false;
+        std::string meshName, entityName;
+    };
+    struct ForwardOpaqueBindings
+    {
+        VkPipelineLayout initialLayout = VK_NULL_HANDLE;
+        std::array<VkDescriptorSet, 6> sets{};
+        VkPolygonMode polygon = VK_POLYGON_MODE_FILL;
+        bool captureDraws = false;
+        std::vector<ForwardDrawPacket> draws, overlays;
+    };
     // Owns Set 5 (per-draw GPU object SSBO + indirect args), the cull compute pipeline, the PBR + depth-prepass
     // graphics pipelines, the per-frame entity<->SSBO mapping, and the geometry-side render-graph passes
     // (cull / depth-prepass / forward PBR).
@@ -88,17 +109,17 @@ namespace Luth
             const std::array<GraphTextureRef, 4>& targets, RG::ResourceHandle prepassDepth,
             const VisibleDrawRange&, u32 width, u32 height, const SlimGBufferBindings&,
             const DrawList&, const RenderSnapshot&, FrameDebugger*);
-        GeometryOutput     AddGeometryPass(RG::RenderGraph& rg,
-                                           const RG::ResourceHandle (&shadowHandles)[k_ShadowCascadeCount],
-                                           RG::BufferHandle indirectBufferHandle,
-                                           RG::ResourceHandle sceneDepth,
-                                           RG::ResourceHandle gtaoFinalAO,
-                                           RG::ResourceHandle rtShadowMask,
-                                           RG::ResourceHandle diHandle,
-                                           RG::ResourceHandle giDIHandle,
-                                           RG::ResourceHandle reflHandle,
-                                           RG::ResourceHandle diSpecHandle);
-
+        ForwardOpaqueBindings PrepareForwardOpaqueBindings(const std::array<VkDescriptorSet, 6>&,
+            bool wireframe, bool shadedWireframe, bool captureDraws, const VisibleDrawRange&,
+            const DrawList&, const RenderSnapshot&);
+        static VkDeviceSize ForwardDrawOffset(const VisibleDrawRange&, u32 objectIndex);
+        static GraphTextureRef ImportForwardTarget(RG::RenderGraph&, const Texture&, const char*,
+            RG::TextureFormat, RG::ResourceState);
+        static std::array<RG::ResourceHandle, 3> AddForwardOpaquePass(RG::RenderGraph&,
+            RG::ResourceHandle color, RG::ResourceHandle depth, RG::ResourceHandle picking,
+            const VisibleDrawRange&, u32 width, u32 height, const ForwardOpaqueBindings&,
+            std::span<const RG::ResourceHandle> sampledImages, std::span<const RG::BufferHandle> lightBuffers,
+            FrameDebugger*);
         // ---- Accessors ----
         VkDescriptorSetLayout       GetSet5Layout()         const { return m_ObjectSSBODescLayout; }
         VkDescriptorSet             GetObjectSSBODescSet(u32 slot) const { return m_ObjectSSBODescSet[slot]; }
