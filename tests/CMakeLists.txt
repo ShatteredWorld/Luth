@@ -14,6 +14,7 @@ add_executable(LuthTests
     jobs/test_workstealing.cpp
     jobs/test_waitcounter.cpp
     renderer/RenderGraphSolver.cpp
+    renderer/RenderBlackboard.cpp
 )
 target_compile_features(LuthTests PRIVATE cxx_std_20)
 target_include_directories(LuthTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
