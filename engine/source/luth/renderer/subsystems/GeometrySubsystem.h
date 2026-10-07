@@ -10,6 +10,7 @@
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 #include "luth/renderer/pipeline/PipelineManager.h"
 #include "luth/memory/GPUTaggedPageAllocator.h"
+#include "luth/renderer/features/RenderResource.h"
 
 #include <entt/entt.hpp>
 #include <array>
@@ -24,6 +25,7 @@ namespace Luth
     class Material;
     class RenderPipeline;
     struct RenderSnapshot;
+    struct DrawList;
     struct GeometryOutput;
     struct SlimGBufferOutput;
     struct FrameDebugger;
@@ -33,6 +35,13 @@ namespace Luth
         VkPipelineLayout layout = VK_NULL_HANDLE;
         VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
         u32 objectCount = 0;
+    };
+    struct DepthPrepassBindings
+    {
+        VkPipeline rigid = VK_NULL_HANDLE, deformed = VK_NULL_HANDLE;
+        VkPipelineLayout rigidLayout = VK_NULL_HANDLE, deformedLayout = VK_NULL_HANDLE;
+        std::array<VkDescriptorSet, 6> sets{};
+        bool captureDraws = false;
     };
 
     // Owns Set 5 (per-draw GPU object SSBO + indirect args), the cull compute pipeline, the PBR + depth-prepass
@@ -64,7 +73,11 @@ namespace Luth
                          RG::BufferHandle objectBuffer, RG::BufferHandle indirectBuffer,
                          const std::array<Vec4, 6>& frustumPlanes, u32 destOffset,
                          const char* passName, const CullBindings&, FrameDebugger*);
-        RG::ResourceHandle AddDepthPrepass(RG::RenderGraph& rg, RG::BufferHandle indirectBufferHandle);
+        DepthPrepassBindings PrepareDepthPrepassBindings(const std::array<VkDescriptorSet, 6>&, bool captureDraws) const;
+        static GraphTextureRef ImportDepthTarget(RG::RenderGraph&, const Texture&);
+        static RG::ResourceHandle AddDepthPrepass(RG::RenderGraph&, RG::ResourceHandle targetDepth,
+            const VisibleDrawRange&, u32 width, u32 height, const DepthPrepassBindings&,
+            const DrawList&, const RenderSnapshot&, FrameDebugger*);
         SlimGBufferOutput  AddSlimGBufferPass(RG::RenderGraph& rg,
                                               RG::BufferHandle indirectBufferHandle,
                                               RG::ResourceHandle sceneDepth);

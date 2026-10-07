@@ -20,6 +20,7 @@ add_executable(LuthTests
     renderer/GTAOFeature.cpp
     renderer/DeformationFeature.cpp
     renderer/VisibilityFeature.cpp
+    renderer/DepthPrepassFeature.cpp
 )
 target_compile_features(LuthTests PRIVATE cxx_std_20)
 target_include_directories(LuthTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

@@ -1,6 +1,8 @@
 #include "luthpch.h"
 #include <atomic>
 #include "luth/renderer/subsystems/GeometrySubsystem.h"
+#include "luth/renderer/draw/DrawList.h"
+#include "luth/renderer/resources/Mesh.h"
 #include "luth/renderer/subsystems/LightingSubsystem.h"
 #include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/Renderer.h"
@@ -775,141 +777,134 @@ namespace Luth
         return output;
     }
 
-    RG::ResourceHandle GeometrySubsystem::AddDepthPrepass(RG::RenderGraph& rg, RG::BufferHandle indirectBufferHandle)
+    DepthPrepassBindings GeometrySubsystem::PrepareDepthPrepassBindings(const std::array<VkDescriptorSet, 6>& sets, bool captureDraws) const
     {
-        LH_PROFILE_FUNCTION();
-        struct DepthPrepassData {
-            RG::ResourceHandle depthTex;
-            RG::BufferHandle   indirectBuf;
-        };
-        RG::ResourceHandle depthHandle;
-
-        rg.AddPass<DepthPrepassData>("DepthPrepass",
-            [&](DepthPrepassData& data, RG::RenderPassBuilder& builder)
-            {
-                const auto* view = m_Pipeline->GetCurrentView();
-                RG::TextureDesc depthDesc;
-                depthDesc.name   = "SceneDepth";
-                depthDesc.width  = view->targets->GetSceneDepth()->GetWidth();
-                depthDesc.height = view->targets->GetSceneDepth()->GetHeight();
-                depthDesc.format = RG::TextureFormat::D32_Float;
-
-                auto vkDepth = std::static_pointer_cast<VKTexture>(view->targets->GetSceneDepth());
-                data.depthTex = rg.ImportResource(depthDesc,
-                    (void*)vkDepth->GetImage(),
-                    (void*)vkDepth->GetImageView(),
-                    RG::ResourceState::Undefined);
-
-                VkClearValue depthClear{};
-                depthClear.depthStencil = { 1.0f, 0 };
-                data.depthTex = builder.WriteDepth(data.depthTex,
-                    VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, depthClear);
-
-                data.indirectBuf = builder.ReadIndirectBuffer(indirectBufferHandle);
-                depthHandle = data.depthTex;
-            },
-            [this](DepthPrepassData& data, RG::RenderPassContext& ctx)
-            {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                auto& sys = m_Pipeline->GetSystem();
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "DepthPrepass", "SceneDepth", true,
-                    { "depthPrepass", 0, VK_CULL_MODE_BACK_BIT, VK_POLYGON_MODE_FILL, false, true, true, false });
-
-                if (!m_DepthPrepassPipeline) { LH_LOG(Renderer, error, "DepthPrepass pipeline is null!"); sys.GetFrameDebugger().EndCapturePass(); return; }
-
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                VkDescriptorSet bindlessSet = VulkanContext::Get().GetBindlessSet().GetSet();
-                VkDescriptorSet sets[] = {
-                    m_Pipeline->GetCurrentViewResources()->globalDescriptorSet[slot],
-                    bindlessSet,
-                    MaterialSystem::GetDescriptorSet(slot),
-                    m_Pipeline->GetLighting().GetLightDescSet(slot),
-                    BoneMatrixBuffer::GetDescriptorSet(slot),
-                    m_ObjectSSBODescSet[slot]
-                };
-
-                m_DepthPrepassPipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_DepthPrepassPipeline->GetLayout(), 0, 6, sets, 0, nullptr);
-
-                RG::RenderGraph::ResourceNode* res = (RG::RenderGraph::ResourceNode*)ctx.GetResource(data.depthTex);
-                VkViewport viewport{};
-                viewport.width    = (float)res->desc.width;
-                viewport.height   = (float)res->desc.height;
-                viewport.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-                VkRect2D scissor{};
-                scissor.extent = { res->desc.width, res->desc.height };
-                vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-                bool currentSkinned = false;
-
-                // Opaque-only: cutouts/transparents write their depth in GeometryPass.
-                for (const auto& dc : sys.GetDrawList().opaque)
-                {
-                    auto mesh = dc.model->GetMesh(dc.meshIndex);
-                    auto vb = std::static_pointer_cast<VKVertexBuffer>(mesh->GetVertexBuffer());
-                    auto ib = std::static_pointer_cast<VKIndexBuffer>(mesh->GetIndexBuffer());
-                    if (!vb || !ib) continue;
-                    // Deformed draws need the empty-input pipeline; skip if absent (static binds no VB).
-                    if (dc.isDeformed && !m_DepthPrepassSkinnedPipeline) continue;
-
-                    if (dc.isDeformed != currentSkinned)
-                    {
-                        currentSkinned = dc.isDeformed;
-                        if (currentSkinned && m_DepthPrepassSkinnedPipeline)
-                        {
-                            m_DepthPrepassSkinnedPipeline->Bind(cmd);
-                            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                m_DepthPrepassSkinnedPipeline->GetLayout(), 0, 6, sets, 0, nullptr);
-                        }
-                        else
-                        {
-                            m_DepthPrepassPipeline->Bind(cmd);
-                            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                m_DepthPrepassPipeline->GetLayout(), 0, 6, sets, 0, nullptr);
-                        }
-                    }
-
-                    // Deformable draws bind no VB; the VS fetches the deformed buffer by gl_VertexIndex.
-                    if (!dc.isDeformed)
-                    {
-                        VkBuffer vbuf[] = { vb->GetVulkanBuffer() };
-                        VkDeviceSize offsets[] = { 0 };
-                        vkCmdBindVertexBuffers(cmd, 0, 1, vbuf, offsets);
-                    }
-                    vkCmdBindIndexBuffer(cmd, ib->GetVulkanBuffer(), 0, VK_INDEX_TYPE_UINT32);
-
-                    const u32 viewBaseRegion = m_Pipeline->GetCurrentView()->viewIndex * RenderPipeline::k_IndirectRegionsPerView;
-                    const u32 cmdIndex = viewBaseRegion * RenderPipeline::k_IndirectRegionStride + dc.gpuObjectIndex;
-                    VkDeviceSize indirectOffset = m_IndirectRegion.offset + cmdIndex * sizeof(VkDrawIndexedIndirectCommand);
-                    vkCmdDrawIndexedIndirect(cmd, m_IndirectRegion.buffer, indirectOffset, 1,
-                        sizeof(VkDrawIndexedIndirectCommand));
-
-                    if (sys.GetFrameDebugger().state == DebuggerState::CaptureRequested)
-                    {
-                        std::string entName = "Entity";
-                        const auto& tags = sys.GetActiveSnapshot().tagsByEntity;
-                        u32 idx = entt::to_entity(dc.entity);
-                        if (idx < tags.size() && tags[idx])
-                            entName = tags[idx];
-                        sys.GetFrameDebugger().CaptureIndirectDraw("DepthPrepass",
-                            dc.model->GetName() + "[" + std::to_string(dc.meshIndex) + "]",
-                            entName, dc.entityIndex, ib->GetCount(), dc.gpuObjectIndex, indirectOffset,
-                            { "depthPrepass", 0, static_cast<u32>(VK_CULL_MODE_BACK_BIT),
-                              VK_POLYGON_MODE_FILL, dc.isSkinned, true, true, false });
-                    }
-                }
-
-                sys.GetFrameDebugger().EndCapturePass();
-            }
-        );
-
-        return depthHandle;
+        return {m_DepthPrepassPipeline ? m_DepthPrepassPipeline->GetHandle() : VK_NULL_HANDLE,
+            m_DepthPrepassSkinnedPipeline ? m_DepthPrepassSkinnedPipeline->GetHandle() : VK_NULL_HANDLE,
+            m_DepthPrepassPipeline ? m_DepthPrepassPipeline->GetLayout() : VK_NULL_HANDLE,
+            m_DepthPrepassSkinnedPipeline ? m_DepthPrepassSkinnedPipeline->GetLayout() : VK_NULL_HANDLE, sets, captureDraws};
     }
 
+    GraphTextureRef GeometrySubsystem::ImportDepthTarget(RG::RenderGraph& graph, const Texture& texture)
+    {
+        const auto& native = static_cast<const VKTexture&>(texture);
+        RG::TextureDesc desc;
+        desc.name = "SceneDepth"; desc.width = texture.GetWidth(); desc.height = texture.GetHeight();
+        desc.format = RG::TextureFormat::D32_Float;
+        return {graph.ImportResource(desc, (void*)native.GetImage(), (void*)native.GetImageView(),
+            RG::ResourceState::Undefined), {&texture}};
+    }
+
+    RG::ResourceHandle GeometrySubsystem::AddDepthPrepass(RG::RenderGraph& rg, RG::ResourceHandle targetDepth,
+        const VisibleDrawRange& visible, u32 width, u32 height, const DepthPrepassBindings& bindings,
+        const DrawList& draws, const RenderSnapshot& snapshot, FrameDebugger* debugger)
+    {
+        LH_PROFILE_FUNCTION();
+        struct DrawPacket
+        {
+            std::shared_ptr<Mesh> mesh; // Retain native buffers through recording.
+            VkBuffer vertex, index;
+            VkDeviceSize indirectOffset;
+            u32 entityIndex, indexCount, objectIndex;
+            bool deformed, skinned;
+            std::string meshName, entityName;
+        };
+        std::vector<DrawPacket> packets;
+        const bool capturing = debugger && bindings.captureDraws;
+        if (bindings.rigid)
+        {
+            if (!bindings.rigidLayout || std::any_of(bindings.sets.begin(), bindings.sets.end(),
+                [](VkDescriptorSet set) { return set == VK_NULL_HANDLE; }))
+                throw std::invalid_argument("DepthPrepass: incomplete native bindings");
+            for (const auto& dc : draws.opaque)
+            {
+                if (!dc.model) continue;
+                auto mesh = dc.model->GetMesh(dc.meshIndex);
+                if (!mesh) continue;
+                auto vb = std::static_pointer_cast<VKVertexBuffer>(mesh->GetVertexBuffer());
+                auto ib = std::static_pointer_cast<VKIndexBuffer>(mesh->GetIndexBuffer());
+                if (!vb || !ib || (dc.isDeformed && !bindings.deformed)) continue;
+                if (dc.isDeformed && !bindings.deformedLayout)
+                    throw std::invalid_argument("DepthPrepass: missing deformed pipeline layout");
+                if (dc.gpuObjectIndex >= visible.maxDrawCount)
+                    throw std::invalid_argument("DepthPrepass: draw outside camera-visible range");
+                const VkDeviceSize offset = visible.indirect.binding.offset
+                    + (u64(visible.firstDraw) + dc.gpuObjectIndex) * sizeof(VkDrawIndexedIndirectCommand);
+                std::string meshName, entityName;
+                if (capturing)
+                {
+                    meshName = dc.model->GetName() + "[" + std::to_string(dc.meshIndex) + "]";
+                    entityName = "Entity";
+                    const auto entity = entt::to_entity(dc.entity);
+                    if (entity < snapshot.tagsByEntity.size() && snapshot.tagsByEntity[entity])
+                        entityName = snapshot.tagsByEntity[entity];
+                }
+                packets.push_back({mesh, vb->GetVulkanBuffer(), ib->GetVulkanBuffer(), offset,
+                    dc.entityIndex, ib->GetCount(), dc.gpuObjectIndex, dc.isDeformed, dc.isSkinned,
+                    std::move(meshName), std::move(entityName)});
+            }
+        }
+        const VkBuffer indirectBuffer = visible.indirect.binding.slice->buffer;
+        struct DepthPrepassData { RG::ResourceHandle depthTex; RG::BufferHandle indirectBuf; };
+        RG::ResourceHandle output;
+        rg.AddPass<DepthPrepassData>("DepthPrepass",
+            [&, targetDepth](DepthPrepassData& data, RG::RenderPassBuilder& builder) {
+                VkClearValue clear{};
+                clear.depthStencil = {1.0f, 0};
+                data.depthTex = builder.WriteDepth(targetDepth,
+                    VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, clear);
+                data.indirectBuf = builder.ReadIndirectBuffer(visible.indirect.handle);
+                output = data.depthTex;
+            },
+            [bindings, packets = std::move(packets), indirectBuffer, width, height, debugger, capturing]
+            (DepthPrepassData&, RG::RenderPassContext& ctx) {
+                const auto cmd = ctx.commandBuffer;
+                if (debugger) debugger->BeginCapturePass(ctx.passIndex, "DepthPrepass", "SceneDepth", true,
+                    {"depthPrepass", 0, VK_CULL_MODE_BACK_BIT, VK_POLYGON_MODE_FILL, false, true, true, false});
+                if (bindings.rigid)
+                {
+                    const auto bind = [&](bool deformed) {
+                        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            deformed ? bindings.deformed : bindings.rigid);
+                        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            deformed ? bindings.deformedLayout : bindings.rigidLayout,
+                            0, 6, bindings.sets.data(), 0, nullptr);
+                    };
+                    bind(false);
+                    VkViewport viewport{};
+                    viewport.width = float(width); viewport.height = float(height); viewport.maxDepth = 1.0f;
+                    vkCmdSetViewport(cmd, 0, 1, &viewport);
+                    const VkRect2D scissor{{0, 0}, {width, height}};
+                    vkCmdSetScissor(cmd, 0, 1, &scissor);
+                    bool currentDeformed = false;
+                    // Opaque only; slim G-buffer writes cutout depth in the next contribution.
+                    for (const auto& packet : packets)
+                    {
+                        if (packet.deformed != currentDeformed)
+                        {
+                            currentDeformed = packet.deformed;
+                            bind(currentDeformed);
+                        }
+                        if (!packet.deformed)
+                        {
+                            const VkDeviceSize offset = 0;
+                            vkCmdBindVertexBuffers(cmd, 0, 1, &packet.vertex, &offset);
+                        }
+                        vkCmdBindIndexBuffer(cmd, packet.index, 0, VK_INDEX_TYPE_UINT32);
+                        vkCmdDrawIndexedIndirect(cmd, indirectBuffer, packet.indirectOffset, 1,
+                            sizeof(VkDrawIndexedIndirectCommand));
+                        if (capturing)
+                            debugger->CaptureIndirectDraw("DepthPrepass", packet.meshName, packet.entityName,
+                                packet.entityIndex, packet.indexCount, packet.objectIndex, packet.indirectOffset,
+                                {"depthPrepass", 0, static_cast<u32>(VK_CULL_MODE_BACK_BIT),
+                                    VK_POLYGON_MODE_FILL, packet.skinned, true, true, false});
+                    }
+                }
+                else LH_LOG(Renderer, error, "DepthPrepass pipeline is null!");
+                if (debugger) debugger->EndCapturePass();
+            });
+        return output;
+    }
     SlimGBufferOutput GeometrySubsystem::AddSlimGBufferPass(RG::RenderGraph& rg,
                                                             RG::BufferHandle indirectBufferHandle,
                                                             RG::ResourceHandle sceneDepth)

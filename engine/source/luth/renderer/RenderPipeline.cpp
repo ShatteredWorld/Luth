@@ -3,6 +3,7 @@
 #include "luth/renderer/features/GTAOFeature.h"
 #include "luth/renderer/features/DeformationFeature.h"
 #include "luth/renderer/features/VisibilityFeature.h"
+#include "luth/renderer/features/DepthPrepassFeature.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
 #include "luth/renderer/debug/FrameDebuggerContext.h"
 #include "luth/scene/systems/RenderingSystem.h"
@@ -130,6 +131,15 @@ namespace Luth
         auto deformationCompiled = RenderPipelineCompiler{}.Compile(std::move(deformationDefinition), {}, deformationInputs);
         if (!deformationCompiled.ReplaceIfValid(m_GeometryPreparationPipeline))
             throw std::runtime_error("Geometry preparation feature definition failed semantic validation");
+        RenderPipelineDefinition depthDefinition;
+        depthDefinition.AddFeature<DepthPrepassFeature>(m_Geometry, &m_System.GetFrameDebugger());
+        PipelineInputContract depthInputs;
+        depthInputs.resources = {{RenderResources::CameraVisibleDraws}, {DepthPrepassResources::Target},
+            {DepthPrepassResources::Bindings}};
+        depthInputs.capabilities = {&DeformationResources::DeformedGeometry};
+        auto depthCompiled = RenderPipelineCompiler{}.Compile(std::move(depthDefinition), {}, depthInputs);
+        if (!depthCompiled.ReplaceIfValid(m_DepthPrepassComposition))
+            throw std::runtime_error("Depth prepass feature definition failed semantic validation");
 
         // Shader hot-reload callback: pulls fresh SPIR-V into the cached blob and rebuilds pipelines that use it.
         // Fires after ShaderLibrary::Reload has already recompiled and re-reflected the single-stage shader.
@@ -229,6 +239,7 @@ namespace Luth
         // Subsystems own their layouts/pools/samplers/pipelines.
         m_Transparency.Shutdown();
         m_GeometryPreparationPipeline.reset();
+        m_DepthPrepassComposition.reset();
         m_Skinning.Shutdown();
         m_DenoiseDiSpec->Shutdown();
         m_DenoiseRefl->Shutdown();
@@ -367,7 +378,42 @@ namespace Luth
             }
 
             // Z-prepass produces SceneDepth before forward shading. The render graph can schedule it in parallel with the shadow cascades.
-            prepassDepth = m_Geometry.AddDepthPrepass(rg, hIndirectBuf);
+            const u32 depthSlot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
+            const std::array<VkDescriptorSet, 6> depthSets{
+                m_CurrentViewResources->globalDescriptorSet[depthSlot],
+                VulkanContext::Get().GetBindlessSet().GetSet(), MaterialSystem::GetDescriptorSet(depthSlot),
+                m_Lighting.GetLightDescSet(depthSlot), BoneMatrixBuffer::GetDescriptorSet(depthSlot),
+                m_Geometry.GetObjectSSBODescSet(depthSlot)};
+            const auto depthNative = m_Geometry.PrepareDepthPrepassBindings(depthSets,
+                view.captureRequested && s.GetFrameDebugger().state == DebuggerState::CaptureRequested);
+            const DepthPrepassBindingRef depthNativeRef{&depthNative};
+            const auto depthTarget = m_Geometry.ImportDepthTarget(rg, *view.targets->GetSceneDepth());
+            const std::array depthBindings{
+                RenderInputBinding::Present(RenderResources::CameraVisibleDraws, cameraVisible),
+                RenderInputBinding::Present(DepthPrepassResources::Target, depthTarget),
+                RenderInputBinding::Present(DepthPrepassResources::Bindings, depthNativeRef)};
+            const std::array depthCapabilities{&DeformationResources::DeformedGeometry};
+            FrameRenderInputs depthFrame;
+            depthFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            depthFrame.draws = &s.GetDrawList();
+            depthFrame.snapshot = &s.GetActiveSnapshot();
+            depthFrame.capabilities = depthCapabilities; // Published after geometry-preparation succeeds.
+            depthFrame.resources = depthBindings;
+            ViewRenderInputs depthView;
+            depthView.id = view.id;
+            depthView.width = m_CurrentViewResources->width;
+            depthView.height = m_CurrentViewResources->height;
+            GraphTextureRef depthOutput;
+            const std::array depthOutputs{RenderOutputBinding::Capture(RenderResources::PrepassDepth, depthOutput)};
+            const auto depthBuild = m_DepthPrepassComposition->Build(rg, depthFrame, depthView,
+                s.GetFrameAllocator(), depthOutputs);
+            if (!depthBuild.success)
+            {
+                for (const auto& diagnostic : depthBuild.diagnostics)
+                    LH_LOG(Renderer, error, "Depth prepass composition: {}", diagnostic.message);
+                return false;
+            }
+            prepassDepth = depthOutput.handle;
 
             // Slim G-buffer: opaque normal/roughness/motion/matID. Reads prepass depth with EQUAL test;
             // feeds TAA + downstream RT denoise + RT reflections.
