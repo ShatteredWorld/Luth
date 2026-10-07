@@ -43,6 +43,10 @@ namespace Luth
         std::array<VkDescriptorSet, 6> sets{};
         bool captureDraws = false;
     };
+    struct SlimGBufferBindings
+    {
+        DepthPrepassBindings opaque, cutout;
+    };
 
     // Owns Set 5 (per-draw GPU object SSBO + indirect args), the cull compute pipeline, the PBR + depth-prepass
     // graphics pipelines, the per-frame entity<->SSBO mapping, and the geometry-side render-graph passes
@@ -78,9 +82,12 @@ namespace Luth
         static RG::ResourceHandle AddDepthPrepass(RG::RenderGraph&, RG::ResourceHandle targetDepth,
             const VisibleDrawRange&, u32 width, u32 height, const DepthPrepassBindings&,
             const DrawList&, const RenderSnapshot&, FrameDebugger*);
-        SlimGBufferOutput  AddSlimGBufferPass(RG::RenderGraph& rg,
-                                              RG::BufferHandle indirectBufferHandle,
-                                              RG::ResourceHandle sceneDepth);
+        SlimGBufferBindings PrepareSlimGBufferBindings(const std::array<VkDescriptorSet, 6>&, bool captureDraws) const;
+        static GraphTextureRef ImportSlimTarget(RG::RenderGraph&, const Texture&, const char* name, RG::TextureFormat);
+        static std::array<RG::ResourceHandle, 5> AddSlimGBufferPass(RG::RenderGraph&,
+            const std::array<GraphTextureRef, 4>& targets, RG::ResourceHandle prepassDepth,
+            const VisibleDrawRange&, u32 width, u32 height, const SlimGBufferBindings&,
+            const DrawList&, const RenderSnapshot&, FrameDebugger*);
         GeometryOutput     AddGeometryPass(RG::RenderGraph& rg,
                                            const RG::ResourceHandle (&shadowHandles)[k_ShadowCascadeCount],
                                            RG::BufferHandle indirectBufferHandle,

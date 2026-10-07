@@ -4,6 +4,7 @@
 #include "luth/renderer/features/DeformationFeature.h"
 #include "luth/renderer/features/VisibilityFeature.h"
 #include "luth/renderer/features/DepthPrepassFeature.h"
+#include "luth/renderer/features/SlimGBufferFeature.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
 #include "luth/renderer/debug/FrameDebuggerContext.h"
 #include "luth/scene/systems/RenderingSystem.h"
@@ -133,13 +134,15 @@ namespace Luth
             throw std::runtime_error("Geometry preparation feature definition failed semantic validation");
         RenderPipelineDefinition depthDefinition;
         depthDefinition.AddFeature<DepthPrepassFeature>(m_Geometry, &m_System.GetFrameDebugger());
+        depthDefinition.AddFeature<SlimGBufferFeature>(m_Geometry, &m_System.GetFrameDebugger());
         PipelineInputContract depthInputs;
         depthInputs.resources = {{RenderResources::CameraVisibleDraws}, {DepthPrepassResources::Target},
-            {DepthPrepassResources::Bindings}};
+            {DepthPrepassResources::Bindings}, {SlimGBufferResources::NormalTarget}, {SlimGBufferResources::RoughnessTarget},
+            {SlimGBufferResources::MotionTarget}, {SlimGBufferResources::MaterialTarget}, {SlimGBufferResources::Bindings}};
         depthInputs.capabilities = {&DeformationResources::DeformedGeometry};
         auto depthCompiled = RenderPipelineCompiler{}.Compile(std::move(depthDefinition), {}, depthInputs);
-        if (!depthCompiled.ReplaceIfValid(m_DepthPrepassComposition))
-            throw std::runtime_error("Depth prepass feature definition failed semantic validation");
+        if (!depthCompiled.ReplaceIfValid(m_SurfacePreparationComposition))
+            throw std::runtime_error("Surface preparation feature definition failed semantic validation");
 
         // Shader hot-reload callback: pulls fresh SPIR-V into the cached blob and rebuilds pipelines that use it.
         // Fires after ShaderLibrary::Reload has already recompiled and re-reflected the single-stage shader.
@@ -239,7 +242,7 @@ namespace Luth
         // Subsystems own their layouts/pools/samplers/pipelines.
         m_Transparency.Shutdown();
         m_GeometryPreparationPipeline.reset();
-        m_DepthPrepassComposition.reset();
+        m_SurfacePreparationComposition.reset();
         m_Skinning.Shutdown();
         m_DenoiseDiSpec->Shutdown();
         m_DenoiseRefl->Shutdown();
@@ -362,7 +365,7 @@ namespace Luth
         // Real-time geometry inputs, hoisted so the post chain + overlays can reference them; produced only
         // on the real-time path (PT traces its own primary rays, so it needs none of these).
         RG::ResourceHandle shadowHandles[k_ShadowCascadeCount]{};
-        RG::ResourceHandle prepassDepth{};
+        GraphTextureRef surfaceDepth{};
         SlimGBufferOutput  slimGB{};
         if (!ptEnabled)
         {
@@ -386,12 +389,25 @@ namespace Luth
                 m_Geometry.GetObjectSSBODescSet(depthSlot)};
             const auto depthNative = m_Geometry.PrepareDepthPrepassBindings(depthSets,
                 view.captureRequested && s.GetFrameDebugger().state == DebuggerState::CaptureRequested);
+            const auto slimNative = m_Geometry.PrepareSlimGBufferBindings(depthSets,
+                view.captureRequested && s.GetFrameDebugger().state == DebuggerState::CaptureRequested);
+            const SlimGBufferBindingRef slimNativeRef{&slimNative};
             const DepthPrepassBindingRef depthNativeRef{&depthNative};
             const auto depthTarget = m_Geometry.ImportDepthTarget(rg, *view.targets->GetSceneDepth());
+            const auto normalTarget = m_Geometry.ImportSlimTarget(rg, *view.targets->GetSlimNormal(), "SlimNormal", RG::TextureFormat::RG16_Float);
+            const auto roughnessTarget = m_Geometry.ImportSlimTarget(rg, *view.targets->GetSlimRoughness(), "SlimRoughness", RG::TextureFormat::R8_Unorm);
+            const auto motionTarget = m_Geometry.ImportSlimTarget(rg, *view.targets->GetSlimMotion(), "SlimMotion", RG::TextureFormat::RG16_Float);
+            const auto materialTarget = m_Geometry.ImportSlimTarget(rg, *view.targets->GetSlimMaterialID(), "SlimMaterialID", RG::TextureFormat::R16_Uint);
+
             const std::array depthBindings{
                 RenderInputBinding::Present(RenderResources::CameraVisibleDraws, cameraVisible),
                 RenderInputBinding::Present(DepthPrepassResources::Target, depthTarget),
-                RenderInputBinding::Present(DepthPrepassResources::Bindings, depthNativeRef)};
+                RenderInputBinding::Present(DepthPrepassResources::Bindings, depthNativeRef),
+                RenderInputBinding::Present(SlimGBufferResources::NormalTarget, normalTarget),
+                RenderInputBinding::Present(SlimGBufferResources::RoughnessTarget, roughnessTarget),
+                RenderInputBinding::Present(SlimGBufferResources::MotionTarget, motionTarget),
+                RenderInputBinding::Present(SlimGBufferResources::MaterialTarget, materialTarget),
+                RenderInputBinding::Present(SlimGBufferResources::Bindings, slimNativeRef)};
             const std::array depthCapabilities{&DeformationResources::DeformedGeometry};
             FrameRenderInputs depthFrame;
             depthFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
@@ -404,20 +420,23 @@ namespace Luth
             depthView.width = m_CurrentViewResources->width;
             depthView.height = m_CurrentViewResources->height;
             GraphTextureRef depthOutput;
-            const std::array depthOutputs{RenderOutputBinding::Capture(RenderResources::PrepassDepth, depthOutput)};
-            const auto depthBuild = m_DepthPrepassComposition->Build(rg, depthFrame, depthView,
+            GraphTextureRef normalOutput, roughnessOutput, motionOutput, materialOutput;
+            const std::array depthOutputs{
+                RenderOutputBinding::Capture(RenderResources::PrepassDepth, depthOutput),
+                RenderOutputBinding::Capture(RenderResources::SurfaceDepth, surfaceDepth),
+                RenderOutputBinding::Capture(RenderResources::Normal, normalOutput),
+                RenderOutputBinding::Capture(RenderResources::Roughness, roughnessOutput),
+                RenderOutputBinding::Capture(RenderResources::MotionVectors, motionOutput),
+                RenderOutputBinding::Capture(RenderResources::MaterialID, materialOutput)};
+            const auto depthBuild = m_SurfacePreparationComposition->Build(rg, depthFrame, depthView,
                 s.GetFrameAllocator(), depthOutputs);
             if (!depthBuild.success)
             {
                 for (const auto& diagnostic : depthBuild.diagnostics)
-                    LH_LOG(Renderer, error, "Depth prepass composition: {}", diagnostic.message);
+                    LH_LOG(Renderer, error, "Surface preparation composition: {}", diagnostic.message);
                 return false;
             }
-            prepassDepth = depthOutput.handle;
-
-            // Slim G-buffer: opaque normal/roughness/motion/matID. Reads prepass depth with EQUAL test;
-            // feeds TAA + downstream RT denoise + RT reflections.
-            slimGB = m_Geometry.AddSlimGBufferPass(rg, hIndirectBuf, prepassDepth);
+            slimGB = {normalOutput.handle, roughnessOutput.handle, motionOutput.handle, materialOutput.handle};
         }
 
         // Forward+ cluster AABB builder + light-to-cluster assignment. Both async-compute; the assign pass
@@ -491,11 +510,11 @@ namespace Luth
         // RT sun-shadow trace: per-view (each view's depth/camera/mask differ), so this runs on every view's RG.
         // Writes per-view R8 mask, consumed by GeometryPass via Read(handle). AsyncCompute pass overlaps with the
         // GTAO chain below. Gated on RT mode + CastShadows; CSM mode (or CastShadows=false) returns invalid handle
-        // and GeometryPass skips the Read. Threads prepassDepth + slimGB.normal so RG transitions them from
+        // and GeometryPass skips the Read. Threads surfaceDepth.handle + slimGB.normal so RG transitions them from
         // DSA/COLOR_ATTACHMENT to SHADER_READ_ONLY_OPTIMAL ahead of the raygen sample (descriptor declared that layout).
         RG::ResourceHandle rtShadowMaskHandle{};
         if (runRtShadows && !ptEnabled)
-            rtShadowMaskHandle = m_Rt.AddRtSunShadowsPass(rg, prepassDepth, slimGB.normal);
+            rtShadowMaskHandle = m_Rt.AddRtSunShadowsPass(rg, surfaceDepth.handle, slimGB.normal);
 
         // ReSTIR DI: shadowed direct lighting for point lights via per-pixel reservoir RIS + one
         // visibility ray, then a demodulated-irradiance shade. AsyncCompute; reads prepass depth +
@@ -504,14 +523,14 @@ namespace Luth
         // loop runs instead (the restirParams.x flag gates the consumption).
         RtRestirSubsystem::Outputs restirOut = ptEnabled
             ? RtRestirSubsystem::Outputs{}
-            : m_Restir.AddPasses(rg, prepassDepth, slimGB.normal, slimGB.motion, slimGB.roughness);
+            : m_Restir.AddPasses(rg, surfaceDepth.handle, slimGB.normal, slimGB.motion, slimGB.roughness);
         RG::ResourceHandle restirDIHandle = restirOut.di;
 
         // Denoise the demodulated DI (SVGF; swappable to NRD/RELAX). Transparent filter: consumes the
         // ReSTIR DI handle, returns the denoised handle GeometryPass reads + Set 3 b5 binds. Invalid in
         // (ReSTIR off / pre-TLAS) -> invalid out, and pbr.frag falls back to its own cluster light loop.
         RG::ResourceHandle denoisedDIHandle = m_Denoise->AddPasses(rg, DenoiseInputs{
-            restirDIHandle, prepassDepth, slimGB.normal, slimGB.motion,
+            restirDIHandle, surfaceDepth.handle, slimGB.normal, slimGB.motion,
             slimGB.roughness, slimGB.materialID, {}, {} });
 
         // Denoise the demodulated ReSTIR-DI specular (4th SVGF instance, DenoiserChannel::DiSpecular). Surface-
@@ -522,34 +541,34 @@ namespace Luth
         RG::ResourceHandle denoisedDiSpecHandle{};
         if (m_System.GetRestirSettings().specular)
             denoisedDiSpecHandle = m_DenoiseDiSpec->AddPasses(rg, DenoiseInputs{
-                restirOut.spec, prepassDepth, slimGB.normal, slimGB.motion,
+                restirOut.spec, surfaceDepth.handle, slimGB.normal, slimGB.motion,
                 slimGB.roughness, slimGB.materialID, {}, {} });
         // Half-res DI: AddPasses returns the half svgfDiHalf / svgfDiSpecHalf handles; bilaterally upscale
         // each into the full svgfDenoised / svgfDiSpecDenoised that GeometryPass / pbr Set 3 b5/b8 consume.
         if (m_System.GetRestirSettings().halfResolution)
         {
             if (denoisedDIHandle.IsValid())
-                denoisedDIHandle = m_Restir.AddUpscalePass(rg, denoisedDIHandle, prepassDepth, slimGB.normal, false);
+                denoisedDIHandle = m_Restir.AddUpscalePass(rg, denoisedDIHandle, surfaceDepth.handle, slimGB.normal, false);
             if (denoisedDiSpecHandle.IsValid())
-                denoisedDiSpecHandle = m_Restir.AddUpscalePass(rg, denoisedDiSpecHandle, prepassDepth, slimGB.normal, true);
+                denoisedDiSpecHandle = m_Restir.AddUpscalePass(rg, denoisedDiSpecHandle, surfaceDepth.handle, slimGB.normal, true);
         }
 
         // ReSTIR GI: 1-bounce indirect diffuse via per-pixel reservoir resampling. Returns the demodulated
         // GI image; restirParams.y gates the remodulation in pbr.frag. Invalid when disabled / no TLAS.
         RG::ResourceHandle giDIHandle = ptEnabled
             ? RG::ResourceHandle{}
-            : m_RestirGi.AddPasses(rg, prepassDepth, slimGB.normal, slimGB.motion);
+            : m_RestirGi.AddPasses(rg, surfaceDepth.handle, slimGB.normal, slimGB.motion);
 
         // Denoise the demodulated GI (second SVGF instance, DenoiserChannel::Gi). Same transparent-filter
         // contract as DI: consumes the GI handle, returns the denoised handle GeometryPass reads + Set 3 b6
         // binds. Invalid in -> invalid out (pbr.frag then adds nothing under the .y gate).
         RG::ResourceHandle denoisedGiHandle = m_DenoiseGi->AddPasses(rg, DenoiseInputs{
-            giDIHandle, prepassDepth, slimGB.normal, slimGB.motion,
+            giDIHandle, surfaceDepth.handle, slimGB.normal, slimGB.motion,
             slimGB.roughness, slimGB.materialID, {}, {} });
         // Half-res GI: AddPasses returns the half-res svgfGiHalf handle; bilaterally upscale it into the
         // full-res svgfGiDenoised that GeometryPass / pbr Set 3 b6 consume. Full-res mode is a no-op.
         if (denoisedGiHandle.IsValid() && m_System.GetRestirGiSettings().halfResolution)
-            denoisedGiHandle = m_RestirGi.AddUpscalePass(rg, denoisedGiHandle, prepassDepth, slimGB.normal);
+            denoisedGiHandle = m_RestirGi.AddUpscalePass(rg, denoisedGiHandle, surfaceDepth.handle, slimGB.normal);
 
         // RT specular reflections: one GGX-VNDF ray/pixel from the slim G-buffer, then
         // a dedicated specular SVGF (3rd instance, DenoiserChannel::Reflections). The DenoiseInputs.motion
@@ -559,18 +578,18 @@ namespace Luth
         // after the TLAS build (needTlas gate includes Reflections).
         RG::ResourceHandle reflHandle = ptEnabled
             ? RG::ResourceHandle{}
-            : m_Reflections.AddPasses(rg, prepassDepth, slimGB.normal, slimGB.roughness);
+            : m_Reflections.AddPasses(rg, surfaceDepth.handle, slimGB.normal, slimGB.roughness);
         RG::ResourceHandle denoisedReflHandle = m_DenoiseRefl->AddPasses(rg, DenoiseInputs{
-            reflHandle, prepassDepth, slimGB.normal, slimGB.roughness,
+            reflHandle, surfaceDepth.handle, slimGB.normal, slimGB.roughness,
             slimGB.roughness, slimGB.materialID, {}, {} });
         // Half-res reflections: AddPasses returns the half svgfSpecHalf handle; bilaterally upscale it into
         // the full-res svgfSpecDenoised that pbr.frag Set 3 b7 consumes. Full-res mode is a no-op.
         if (denoisedReflHandle.IsValid() && m_System.GetReflectionsSettings().halfResolution)
-            denoisedReflHandle = m_Reflections.AddUpscalePass(rg, denoisedReflHandle, prepassDepth, slimGB.normal);
+            denoisedReflHandle = m_Reflections.AddUpscalePass(rg, denoisedReflHandle, surfaceDepth.handle, slimGB.normal);
 
         // Legacy depth/geometry bridge shares graph-local references with the compiled
         // feature. Disabled/PT frames publish absent AO and register no GTAO passes.
-        const GraphTextureRef surfaceDepth{prepassDepth, {view.targets->GetSceneDepth().get()}};
+
         const auto* preparedGtao = GetGtaoViewState(view.id);
         const GtaoFrameParameters gtaoParams{
             preparedGtao && preparedGtao->uniformEnabled, !ptEnabled,
@@ -607,7 +626,7 @@ namespace Luth
         RG::ResourceHandle  taaColor{};
         if (!ptEnabled)
         {
-            geoOutput  = m_Geometry.AddGeometryPass(rg, shadowHandles, hIndirectBuf, prepassDepth, gtaoFinalAO, rtShadowMaskHandle, denoisedDIHandle, denoisedGiHandle, denoisedReflHandle, denoisedDiSpecHandle);
+            geoOutput  = m_Geometry.AddGeometryPass(rg, shadowHandles, hIndirectBuf, surfaceDepth.handle, gtaoFinalAO, rtShadowMaskHandle, denoisedDIHandle, denoisedGiHandle, denoisedReflHandle, denoisedDiSpecHandle);
             maskOutput = view.drawSelectionOutline
                          ? m_EditorOverlays.AddSelectionMaskPass(rg)
                          : SelectionMaskOutput{};
@@ -615,7 +634,7 @@ namespace Luth
             // Volumetric composite: blends fog into sceneColor (alpha-blend) BEFORE bloom so bright
             // in-scattered fog can bloom + the grid overlays unfogged lines. Off -> uses skyboxColor unchanged.
             RG::ResourceHandle fogColor = (volumetricEnabled && m_CurrentViewResources)
-                                          ? m_Volumetric.AddCompositePass(rg, skyboxColor, prepassDepth, volResolvedHandle)
+                                          ? m_Volumetric.AddCompositePass(rg, skyboxColor, surfaceDepth.handle, volResolvedHandle)
                                           : skyboxColor;
             // Snapshot the pre-transparent scene (opaque + fog) into the per-view refraction backdrop so glass
             // can sample the refracted background. RG orders the copy after the composite (reads fogColor as
@@ -672,7 +691,7 @@ namespace Luth
                 m_PostProcess.WriteTaaResolvePerFrame(*m_CurrentViewResources,
                     static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()));
             taaColor = taaEnabled
-                       ? m_PostProcess.AddTaaResolvePass(rg, transparentColor, slimGB.motion, prepassDepth)
+                       ? m_PostProcess.AddTaaResolvePass(rg, transparentColor, slimGB.motion, surfaceDepth.handle)
                        : transparentColor;
         }
         // Bloom/composite source rebind runs in BOTH paths: PT -> the ptColor display image; else the TAA
@@ -709,18 +728,18 @@ namespace Luth
         }
         else if (shadeMode == ShadeMode::ClustersDensity)
         {
-            ldrOutput = m_Lighting.AddClusterVizPass(rg, ldrOutput, prepassDepth);
+            ldrOutput = m_Lighting.AddClusterVizPass(rg, ldrOutput, surfaceDepth.handle);
         }
         else if ((shadeMode == ShadeMode::VolumetricDensity ||
                   shadeMode == ShadeMode::VolumetricInScatter) &&
                  volumetricEnabled && m_CurrentViewResources)
         {
             const u32 vizMode = (shadeMode == ShadeMode::VolumetricDensity) ? 0u : 1u;
-            ldrOutput = m_Volumetric.AddVizPass(rg, ldrOutput, injectOut.density, volResolvedHandle, prepassDepth, vizMode);
+            ldrOutput = m_Volumetric.AddVizPass(rg, ldrOutput, injectOut.density, volResolvedHandle, surfaceDepth.handle, vizMode);
         }
         else if (shadeMode == ShadeMode::RestirGiReservoir && m_RestirGi.IsEnabled() && m_CurrentViewResources)
         {
-            ldrOutput = m_RestirGi.AddReservoirVizPass(rg, ldrOutput, prepassDepth);
+            ldrOutput = m_RestirGi.AddReservoirVizPass(rg, ldrOutput, surfaceDepth.handle);
         }
 
         // Selection outline + debug shapes need the raster G-buffer (entityID mask + scene depth), which

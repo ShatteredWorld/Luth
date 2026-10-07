@@ -905,230 +905,143 @@ namespace Luth
             });
         return output;
     }
-    SlimGBufferOutput GeometrySubsystem::AddSlimGBufferPass(RG::RenderGraph& rg,
-                                                            RG::BufferHandle indirectBufferHandle,
-                                                            RG::ResourceHandle sceneDepth)
+    SlimGBufferBindings GeometrySubsystem::PrepareSlimGBufferBindings(const std::array<VkDescriptorSet, 6>& sets, bool captureDraws) const
     {
-        LH_PROFILE_FUNCTION();
-        struct SlimGBufferData {
-            RG::ResourceHandle normalTex;
-            RG::ResourceHandle roughnessTex;
-            RG::ResourceHandle motionTex;
-            RG::ResourceHandle materialIDTex;
-            RG::ResourceHandle depthTex;
-            RG::BufferHandle   indirectBuf;
+        const auto prepare = [&](const auto& rigid, const auto& deformed) {
+            return DepthPrepassBindings{rigid ? rigid->GetHandle() : VK_NULL_HANDLE,
+                deformed ? deformed->GetHandle() : VK_NULL_HANDLE,
+                rigid ? rigid->GetLayout() : VK_NULL_HANDLE,
+                deformed ? deformed->GetLayout() : VK_NULL_HANDLE, sets, captureDraws};
         };
-        SlimGBufferOutput output;
-
-        rg.AddPass<SlimGBufferData>("SlimGBufferPass",
-            [&, sceneDepth](SlimGBufferData& data, RG::RenderPassBuilder& builder)
-            {
-                const auto* view = m_Pipeline->GetCurrentView();
-                const u32 w = view->targets->GetSlimNormal()->GetWidth();
-                const u32 h = view->targets->GetSlimNormal()->GetHeight();
-
-                auto importColor = [&](const std::shared_ptr<Texture>& tex,
-                                       const char* name, RG::TextureFormat fmt) -> RG::ResourceHandle
-                {
-                    RG::TextureDesc desc;
-                    desc.name = name; desc.width = w; desc.height = h; desc.format = fmt;
-                    auto vkTex = std::static_pointer_cast<VKTexture>(tex);
-                    return rg.ImportResource(desc,
-                        (void*)vkTex->GetImage(), (void*)vkTex->GetImageView(),
-                        RG::ResourceState::Undefined);
-                };
-
-                data.normalTex     = importColor(view->targets->GetSlimNormal(),     "SlimNormal",     RG::TextureFormat::RG16_Float);
-                data.roughnessTex  = importColor(view->targets->GetSlimRoughness(),  "SlimRoughness",  RG::TextureFormat::R8_Unorm);
-                data.motionTex     = importColor(view->targets->GetSlimMotion(),     "SlimMotion",     RG::TextureFormat::RG16_Float);
-                data.materialIDTex = importColor(view->targets->GetSlimMaterialID(), "SlimMaterialID", RG::TextureFormat::R16_Uint);
-
-                // Clear values: encoded up-vector for normal, max roughness, zero motion, null matID.
-                VkClearValue normalClear{};     normalClear.color.float32[0] = 0.5f; normalClear.color.float32[1] = 0.5f;
-                VkClearValue roughnessClear{};  roughnessClear.color.float32[0] = 1.0f;
-                VkClearValue motionClear{};     motionClear.color.float32[0] = 0.0f; motionClear.color.float32[1] = 0.0f;
-                VkClearValue materialIDClear{}; materialIDClear.color.uint32[0] = 0u;
-
-                data.normalTex     = builder.Write(data.normalTex,     VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, normalClear);
-                data.roughnessTex  = builder.Write(data.roughnessTex,  VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, roughnessClear);
-                data.motionTex     = builder.Write(data.motionTex,     VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, motionClear);
-                data.materialIDTex = builder.Write(data.materialIDTex, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, materialIDClear);
-
-                // Depth: LOAD prepass depth, keep storing (downstream GTAO/Geometry passes still
-                // need it). EQUAL test in the pipeline; depthWrite=false -> SceneDepth contents
-                // are preserved bit-for-bit.
-                data.depthTex    = builder.WriteDepth(sceneDepth, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, {});
-                data.indirectBuf = builder.ReadIndirectBuffer(indirectBufferHandle);
-
-                output.normal     = data.normalTex;
-                output.roughness  = data.roughnessTex;
-                output.motion     = data.motionTex;
-                output.materialID = data.materialIDTex;
-            },
-            [this](SlimGBufferData& data, RG::RenderPassContext& ctx)
-            {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                auto& sys = m_Pipeline->GetSystem();
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "SlimGBufferPass", "SlimNormal", false,
-                    { "slim_gbuffer", 0, VK_CULL_MODE_BACK_BIT, VK_POLYGON_MODE_FILL, false, true, false, false });
-
-                if (!m_SlimGBufferPipeline) { LH_LOG(Renderer, error, "SlimGBuffer pipeline is null!"); sys.GetFrameDebugger().EndCapturePass(); return; }
-
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                VkDescriptorSet bindlessSet = VulkanContext::Get().GetBindlessSet().GetSet();
-                VkDescriptorSet sets[] = {
-                    m_Pipeline->GetCurrentViewResources()->globalDescriptorSet[slot],
-                    bindlessSet,
-                    MaterialSystem::GetDescriptorSet(slot),
-                    m_Pipeline->GetLighting().GetLightDescSet(slot),
-                    BoneMatrixBuffer::GetDescriptorSet(slot),
-                    m_ObjectSSBODescSet[slot]
-                };
-
-                m_SlimGBufferPipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_SlimGBufferPipeline->GetLayout(), 0, 6, sets, 0, nullptr);
-
-                RG::RenderGraph::ResourceNode* res = (RG::RenderGraph::ResourceNode*)ctx.GetResource(data.normalTex);
-                VkViewport viewport{};
-                viewport.width    = (float)res->desc.width;
-                viewport.height   = (float)res->desc.height;
-                viewport.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-                VkRect2D scissor{};
-                scissor.extent = { res->desc.width, res->desc.height };
-                vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-                bool currentSkinned = false;
-
-                // Opaque pass: EQUAL against prepass depth, no depth write. Cutout follows in its own
-                // loop below (writes depth + alpha-tests). See arch/rendering-pipeline.md.
-                for (const auto& dc : sys.GetDrawList().opaque)
-                {
-                    auto mesh = dc.model->GetMesh(dc.meshIndex);
-                    auto vb = std::static_pointer_cast<VKVertexBuffer>(mesh->GetVertexBuffer());
-                    auto ib = std::static_pointer_cast<VKIndexBuffer>(mesh->GetIndexBuffer());
-                    if (!vb || !ib) continue;
-                    // Deformed draws need the empty-input pipeline; skip if absent (static binds no VB).
-                    if (dc.isDeformed && !m_SlimGBufferSkinnedPipeline) continue;
-
-                    if (dc.isDeformed != currentSkinned)
-                    {
-                        currentSkinned = dc.isDeformed;
-                        if (currentSkinned && m_SlimGBufferSkinnedPipeline)
-                        {
-                            m_SlimGBufferSkinnedPipeline->Bind(cmd);
-                            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                m_SlimGBufferSkinnedPipeline->GetLayout(), 0, 6, sets, 0, nullptr);
-                        }
-                        else
-                        {
-                            m_SlimGBufferPipeline->Bind(cmd);
-                            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                m_SlimGBufferPipeline->GetLayout(), 0, 6, sets, 0, nullptr);
-                        }
-                    }
-
-                    // Deformable draws bind no VB; the VS fetches the deformed buffer by gl_VertexIndex.
-                    if (!dc.isDeformed)
-                    {
-                        VkBuffer vbuf[] = { vb->GetVulkanBuffer() };
-                        VkDeviceSize offsets[] = { 0 };
-                        vkCmdBindVertexBuffers(cmd, 0, 1, vbuf, offsets);
-                    }
-                    vkCmdBindIndexBuffer(cmd, ib->GetVulkanBuffer(), 0, VK_INDEX_TYPE_UINT32);
-
-                    const u32 viewBaseRegion = m_Pipeline->GetCurrentView()->viewIndex * RenderPipeline::k_IndirectRegionsPerView;
-                    const u32 cmdIndex = viewBaseRegion * RenderPipeline::k_IndirectRegionStride + dc.gpuObjectIndex;
-                    VkDeviceSize indirectOffset = m_IndirectRegion.offset + cmdIndex * sizeof(VkDrawIndexedIndirectCommand);
-                    vkCmdDrawIndexedIndirect(cmd, m_IndirectRegion.buffer, indirectOffset, 1,
-                        sizeof(VkDrawIndexedIndirectCommand));
-
-                    if (sys.GetFrameDebugger().state == DebuggerState::CaptureRequested)
-                    {
-                        std::string entName = "Entity";
-                        const auto& tags = sys.GetActiveSnapshot().tagsByEntity;
-                        u32 idx = entt::to_entity(dc.entity);
-                        if (idx < tags.size() && tags[idx])
-                            entName = tags[idx];
-                        sys.GetFrameDebugger().CaptureIndirectDraw("SlimGBufferPass",
-                            dc.model->GetName() + "[" + std::to_string(dc.meshIndex) + "]",
-                            entName, dc.entityIndex, ib->GetCount(), dc.gpuObjectIndex, indirectOffset,
-                            { "slim_gbuffer", 0, static_cast<u32>(VK_CULL_MODE_BACK_BIT),
-                              VK_POLYGON_MODE_FILL, dc.isSkinned, true, false, false });
-                    }
-                }
-
-                // Cutout: alpha-tested into the slim G-buffer as alpha-tested-opaque. Writes its own
-                // depth (LESS_OR_EQUAL) so SceneDepth + SlimNormal carry the holed surface; RT sun shadows /
-                // reflections + GTAO then reconstruct from it instead of the geometry behind the holes.
-                if (m_SlimGBufferCutoutPipeline && !sys.GetDrawList().cutout.empty())
-                {
-                    currentSkinned = false;
-                    m_SlimGBufferCutoutPipeline->Bind(cmd);
-                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        m_SlimGBufferCutoutPipeline->GetLayout(), 0, 6, sets, 0, nullptr);
-
-                    for (const auto& dc : sys.GetDrawList().cutout)
-                    {
-                        auto mesh = dc.model->GetMesh(dc.meshIndex);
-                        auto vb = std::static_pointer_cast<VKVertexBuffer>(mesh->GetVertexBuffer());
-                        auto ib = std::static_pointer_cast<VKIndexBuffer>(mesh->GetIndexBuffer());
-                        if (!vb || !ib) continue;
-                        // Deformed draws need the empty-input pipeline; skip if absent (static binds no VB).
-                        if (dc.isDeformed && !m_SlimGBufferCutoutSkinnedPipeline) continue;
-
-                        if (dc.isDeformed != currentSkinned)
-                        {
-                            currentSkinned = dc.isDeformed;
-                            VKPipeline* p = (currentSkinned && m_SlimGBufferCutoutSkinnedPipeline)
-                                ? m_SlimGBufferCutoutSkinnedPipeline.get()
-                                : m_SlimGBufferCutoutPipeline.get();
-                            p->Bind(cmd);
-                            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                p->GetLayout(), 0, 6, sets, 0, nullptr);
-                        }
-
-                        // Deformable draws bind no VB; the VS fetches the deformed buffer by gl_VertexIndex.
-                        if (!dc.isDeformed)
-                        {
-                            VkBuffer vbuf[] = { vb->GetVulkanBuffer() };
-                            VkDeviceSize offsets[] = { 0 };
-                            vkCmdBindVertexBuffers(cmd, 0, 1, vbuf, offsets);
-                        }
-                        vkCmdBindIndexBuffer(cmd, ib->GetVulkanBuffer(), 0, VK_INDEX_TYPE_UINT32);
-
-                        const u32 viewBaseRegion = m_Pipeline->GetCurrentView()->viewIndex * RenderPipeline::k_IndirectRegionsPerView;
-                        const u32 cmdIndex = viewBaseRegion * RenderPipeline::k_IndirectRegionStride + dc.gpuObjectIndex;
-                        VkDeviceSize indirectOffset = m_IndirectRegion.offset + cmdIndex * sizeof(VkDrawIndexedIndirectCommand);
-                        vkCmdDrawIndexedIndirect(cmd, m_IndirectRegion.buffer, indirectOffset, 1,
-                            sizeof(VkDrawIndexedIndirectCommand));
-
-                        if (sys.GetFrameDebugger().state == DebuggerState::CaptureRequested)
-                        {
-                            std::string entName = "Entity";
-                            const auto& tags = sys.GetActiveSnapshot().tagsByEntity;
-                            u32 idx = entt::to_entity(dc.entity);
-                            if (idx < tags.size() && tags[idx])
-                                entName = tags[idx];
-                            sys.GetFrameDebugger().CaptureIndirectDraw("SlimGBufferPass",
-                                dc.model->GetName() + "[" + std::to_string(dc.meshIndex) + "]",
-                                entName, dc.entityIndex, ib->GetCount(), dc.gpuObjectIndex, indirectOffset,
-                                { "slim_gbuffer", 0, static_cast<u32>(VK_CULL_MODE_BACK_BIT),
-                                  VK_POLYGON_MODE_FILL, dc.isSkinned, true, true, false });
-                        }
-                    }
-                }
-
-                sys.GetFrameDebugger().EndCapturePass();
-            }
-        );
-
-        return output;
+        return {prepare(m_SlimGBufferPipeline, m_SlimGBufferSkinnedPipeline),
+            prepare(m_SlimGBufferCutoutPipeline, m_SlimGBufferCutoutSkinnedPipeline)};
     }
 
+    GraphTextureRef GeometrySubsystem::ImportSlimTarget(RG::RenderGraph& graph, const Texture& texture,
+        const char* name, RG::TextureFormat format)
+    {
+        const auto& native = static_cast<const VKTexture&>(texture);
+        RG::TextureDesc desc;
+        desc.name = name; desc.width = texture.GetWidth(); desc.height = texture.GetHeight(); desc.format = format;
+        return {graph.ImportResource(desc, (void*)native.GetImage(), (void*)native.GetImageView(),
+            RG::ResourceState::Undefined), {&texture}};
+    }
+
+    std::array<RG::ResourceHandle, 5> GeometrySubsystem::AddSlimGBufferPass(RG::RenderGraph& rg,
+        const std::array<GraphTextureRef, 4>& targets, RG::ResourceHandle prepassDepth,
+        const VisibleDrawRange& visible, u32 width, u32 height, const SlimGBufferBindings& bindings,
+        const DrawList& draws, const RenderSnapshot& snapshot, FrameDebugger* debugger)
+    {
+        LH_PROFILE_FUNCTION();
+        struct DrawPacket
+        {
+            std::shared_ptr<Mesh> mesh;
+            VkBuffer vertex, index;
+            VkDeviceSize indirectOffset;
+            u32 entityIndex, indexCount, objectIndex;
+            bool deformed, skinned;
+            std::string meshName, entityName;
+        };
+        const auto prepareDraws = [&](const auto& bucket, const DepthPrepassBindings& variant) {
+            std::vector<DrawPacket> packets;
+            if (!variant.rigid) return packets;
+            if (!variant.rigidLayout || std::any_of(variant.sets.begin(), variant.sets.end(),
+                [](VkDescriptorSet set) { return set == VK_NULL_HANDLE; }))
+                throw std::invalid_argument("SlimGBuffer: incomplete native bindings");
+            for (const auto& dc : bucket)
+            {
+                if (!dc.model) continue;
+                auto mesh = dc.model->GetMesh(dc.meshIndex);
+                if (!mesh) continue;
+                auto vb = std::static_pointer_cast<VKVertexBuffer>(mesh->GetVertexBuffer());
+                auto ib = std::static_pointer_cast<VKIndexBuffer>(mesh->GetIndexBuffer());
+                if (!vb || !ib || (dc.isDeformed && !variant.deformed)) continue;
+                if (dc.isDeformed && !variant.deformedLayout)
+                    throw std::invalid_argument("SlimGBuffer: missing deformed pipeline layout");
+                if (dc.gpuObjectIndex >= visible.maxDrawCount)
+                    throw std::invalid_argument("SlimGBuffer: draw outside camera-visible range");
+                const VkDeviceSize offset = visible.indirect.binding.offset
+                    + (u64(visible.firstDraw) + dc.gpuObjectIndex) * sizeof(VkDrawIndexedIndirectCommand);
+                std::string meshName, entityName;
+                if (debugger && variant.captureDraws)
+                {
+                    meshName = dc.model->GetName() + "[" + std::to_string(dc.meshIndex) + "]";
+                    entityName = "Entity";
+                    const auto entity = entt::to_entity(dc.entity);
+                    if (entity < snapshot.tagsByEntity.size() && snapshot.tagsByEntity[entity])
+                        entityName = snapshot.tagsByEntity[entity];
+                }
+                packets.push_back({mesh, vb->GetVulkanBuffer(), ib->GetVulkanBuffer(), offset,
+                    dc.entityIndex, ib->GetCount(), dc.gpuObjectIndex, dc.isDeformed, dc.isSkinned,
+                    std::move(meshName), std::move(entityName)});
+            }
+            return packets;
+        };
+        auto opaque = prepareDraws(draws.opaque, bindings.opaque);
+        // Preserve the existing whole-pass rigid-PSO guard before attempting cutouts.
+        auto cutout = bindings.opaque.rigid ? prepareDraws(draws.cutout, bindings.cutout) : std::vector<DrawPacket>{};
+        const VkBuffer indirectBuffer = visible.indirect.binding.slice->buffer;
+        struct Data { std::array<RG::ResourceHandle, 5> images; RG::BufferHandle indirect; };
+        std::array<RG::ResourceHandle, 5> output;
+        rg.AddPass<Data>("SlimGBufferPass",
+            [&](Data& data, RG::RenderPassBuilder& builder) {
+                std::array<VkClearValue, 4> clears{};
+                clears[0].color.float32[0] = 0.5f; clears[0].color.float32[1] = 0.5f;
+                clears[1].color.float32[0] = 1.0f;
+                for (u32 i = 0; i < 4; ++i)
+                    data.images[i] = builder.Write(targets[i].handle,
+                        VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, clears[i]);
+                // Opaque EQUAL preserves depth; alpha-tested cutouts write their surface.
+                data.images[4] = builder.WriteDepth(prepassDepth, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, {});
+                data.indirect = builder.ReadIndirectBuffer(visible.indirect.handle);
+                output = data.images;
+            },
+            [bindings, opaque = std::move(opaque), cutout = std::move(cutout), indirectBuffer, width, height, debugger]
+            (Data&, RG::RenderPassContext& ctx) {
+                const auto cmd = ctx.commandBuffer;
+                if (debugger) debugger->BeginCapturePass(ctx.passIndex, "SlimGBufferPass", "SlimNormal", false,
+                    {"slim_gbuffer", 0, VK_CULL_MODE_BACK_BIT, VK_POLYGON_MODE_FILL, false, true, false, false});
+                if (bindings.opaque.rigid)
+                {
+                    VkViewport viewport{};
+                    viewport.width = float(width); viewport.height = float(height); viewport.maxDepth = 1.0f;
+                    vkCmdSetViewport(cmd, 0, 1, &viewport);
+                    const VkRect2D scissor{{0, 0}, {width, height}};
+                    vkCmdSetScissor(cmd, 0, 1, &scissor);
+                    const auto record = [&](const auto& packets, const DepthPrepassBindings& variant, bool depthWrite) {
+                        const auto bind = [&](bool deformed) {
+                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                deformed ? variant.deformed : variant.rigid);
+                            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                deformed ? variant.deformedLayout : variant.rigidLayout, 0, 6, variant.sets.data(), 0, nullptr);
+                        };
+                        bind(false);
+                        bool currentDeformed = false;
+                        for (const auto& packet : packets)
+                        {
+                            if (packet.deformed != currentDeformed) { currentDeformed = packet.deformed; bind(currentDeformed); }
+                            if (!packet.deformed)
+                            {
+                                const VkDeviceSize offset = 0;
+                                vkCmdBindVertexBuffers(cmd, 0, 1, &packet.vertex, &offset);
+                            }
+                            vkCmdBindIndexBuffer(cmd, packet.index, 0, VK_INDEX_TYPE_UINT32);
+                            vkCmdDrawIndexedIndirect(cmd, indirectBuffer, packet.indirectOffset, 1, sizeof(VkDrawIndexedIndirectCommand));
+                            if (debugger && variant.captureDraws)
+                                debugger->CaptureIndirectDraw("SlimGBufferPass", packet.meshName, packet.entityName,
+                                    packet.entityIndex, packet.indexCount, packet.objectIndex, packet.indirectOffset,
+                                    {"slim_gbuffer", 0, static_cast<u32>(VK_CULL_MODE_BACK_BIT),
+                                        VK_POLYGON_MODE_FILL, packet.skinned, true, depthWrite, false});
+                        }
+                    };
+                    record(opaque, bindings.opaque, false);
+                    if (!cutout.empty()) record(cutout, bindings.cutout, true);
+                }
+                else LH_LOG(Renderer, error, "SlimGBuffer pipeline is null!");
+                if (debugger) debugger->EndCapturePass();
+            });
+        return output;
+    }
     GeometryOutput GeometrySubsystem::AddGeometryPass(RG::RenderGraph& rg,
                                                       const RG::ResourceHandle (&shadowHandles)[k_ShadowCascadeCount],
                                                       RG::BufferHandle indirectBufferHandle,
