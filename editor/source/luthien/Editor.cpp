@@ -520,7 +520,7 @@ namespace Luth
         {
             for (auto& panel : s_Panels)
             {
-                if (!panel->m_Open) continue;
+                if (!panel->m_Open) { panel->OnClosed(); continue; }
                 if (panel->m_Crashed) {
                     DrawCrashedPlaceholder(panel.get());
                     continue;

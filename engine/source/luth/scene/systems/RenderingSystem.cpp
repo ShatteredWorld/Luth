@@ -17,6 +17,7 @@ namespace Luth
 
     RenderingSystem::RenderingSystem(u32 viewportWidth, u32 viewportHeight)
     {
+        m_SceneViewId = RegisterView(m_SceneTargets);
         m_FrameAllocator = std::make_unique<Memory::LinearAllocator>(1 * Memory::MB);
         m_Pipeline       = std::make_unique<RenderPipeline>(*this);
         m_Pipeline->Initialize(viewportWidth, viewportHeight);
@@ -202,6 +203,7 @@ namespace Luth
 
         // Primary view: always rendered, emits the per-frame ImGui pass.
         RenderView sceneView;
+        sceneView.id                   = m_SceneViewId;
         sceneView.targets              = &m_SceneTargets;
         sceneView.camera               = m_CameraParams;
         sceneView.viewIndex            = 0;
@@ -219,6 +221,10 @@ namespace Luth
         // view's ImGui pass), then the scene view closes with the ImGui pass + present barrier. Cross-view ordering
         // for shared resources (m_ShadowMap, IBL maps) is enforced by view K+1's gA submit waiting on view K's gB
         // signal at EARLY_FRAGMENT_TESTS_BIT.
+        std::erase_if(m_QueuedViews, [this](const RenderView& view) {
+            const auto* registered = m_Views.Get(view.id);
+            return !registered || registered->targets != view.targets;
+        });
         const u64 frameIndex  = Renderer::GetFrameData()->GetFrameIndex();
         const u32 totalViews  = (u32)m_QueuedViews.size() + 1;  // queued + scene view
         LH_CORE_ASSERT(totalViews <= MAX_VIEWS_PER_FRAME, "view count exceeds MAX_VIEWS_PER_FRAME");
@@ -229,6 +235,13 @@ namespace Luth
             QueueRecorders r = Renderer::BeginPrimaryCmd(frameIndex, viewSlot);
             const bool hasCompute = RecordView(v, r);
             Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/false);
+            if (auto* state = m_Pipeline->GetViewResources(v.targets))
+            {
+                state->cameraHistory.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
+                if (state->taaRecorded)
+                    state->taaHistory.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
+                else state->taaHistory.Invalidate();
+            }
             ++viewSlot;
         }
         m_QueuedViews.clear();
@@ -236,6 +249,13 @@ namespace Luth
         QueueRecorders r = Renderer::BeginPrimaryCmd(frameIndex, viewSlot);
         const bool hasCompute = RecordView(sceneView, r);
         Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/true);
+        if (auto* state = m_Pipeline->GetViewResources(sceneView.targets))
+        {
+            state->cameraHistory.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
+            if (state->taaRecorded)
+                state->taaHistory.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
+            else state->taaHistory.Invalidate();
+        }
     }
 
     // ---- Per-view record ----
@@ -278,11 +298,42 @@ namespace Luth
         {
             // Drain GPU + drop ViewResources before swapping textures; see GamePanel::SetOnResize for
             // the same hazard description.
-            Renderer::WaitForGPU();
-            m_Pipeline->ReleaseViewResources(m_SceneTargets);
-
-            m_SceneTargets.Resize(width, height);
+            ResizeView(m_SceneViewId, m_SceneTargets, width, height);
             m_Pipeline->OnResize(width, height);
         }
+    }
+
+    u64 RenderingSystem::InvalidateView(RenderViewId id)
+    {
+        const u64 generation = m_Views.Invalidate(id);
+        if (m_FrameDebugger.capturedFrame.capturedView.id == id) ExitCapture();
+        return generation;
+    }
+
+    void RenderingSystem::ResizeView(RenderViewId id, FrameTargets& targets, u32 width, u32 height)
+    {
+        const auto* registered = m_Views.Get(id);
+        if (!registered || registered->targets != &targets)
+            throw std::invalid_argument("Resize requires the registered view owner");
+        if (!width || !height || width > 16384 || height > 16384) return;
+        if (targets.GetSceneColor() && targets.GetSceneColor()->GetWidth() == width &&
+            targets.GetSceneColor()->GetHeight() == height) return;
+        Renderer::WaitForGPU();
+        InvalidateView(id);
+        m_Pipeline->ReleaseViewResources(targets);
+        if (targets.IsAllocated()) targets.Resize(width, height);
+        else targets.Allocate(width, height);
+    }
+
+    void RenderingSystem::ReleaseView(RenderViewId id)
+    {
+        const auto* registered = m_Views.Get(id);
+        if (!registered) return;
+        Renderer::WaitForGPU();
+        if (m_FrameDebugger.capturedFrame.capturedView.id == id) ExitCapture();
+        auto* targets = static_cast<FrameTargets*>(const_cast<void*>(registered->targets));
+        m_Pipeline->ReleaseViewResources(*targets);
+        std::erase_if(m_QueuedViews, [id](const RenderView& view) { return view.id == id; });
+        m_Views.Release(id);
     }
 }

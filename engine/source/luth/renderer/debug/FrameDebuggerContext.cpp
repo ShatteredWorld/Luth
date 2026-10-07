@@ -326,14 +326,15 @@ namespace Luth
     {
         auto& sys = m_Pipeline.GetSystem();
         auto& cf  = sys.GetFrameDebugger().capturedFrame;
-        if (m_Pipeline.HasViewResources(cf.capturedView.targets, cf.capturedView.viewResourcesId))
+        if (m_Pipeline.HasViewResources(cf.capturedView.targets, cf.capturedView.id,
+                                       cf.capturedView.resourceGeneration))
             return true;
 
         // Captured view's panel was closed mid-Freeze; clear the capture so the panel
         // returns to live mode rather than serving stale archives against a missing view.
         sys.ExitCapture();
         if (auto* hooks = EditorHooks::Get())
-            hooks->OnFrameDebuggerNotice("Captured view closed; capture cleared.");
+            hooks->OnFrameDebuggerNotice("Captured view closed or resources changed; capture cleared.");
         return false;
     }
 

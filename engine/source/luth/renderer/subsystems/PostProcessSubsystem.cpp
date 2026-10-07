@@ -922,6 +922,7 @@ namespace Luth
         ViewResources* vr = m_Pipeline->GetCurrentViewResources();
         if (!m_TaaResolvePipeline || !vr || !vr->taaHistoryA || !vr->taaHistoryB)
             return sceneColor;
+        vr->taaRecorded = true;
 
         const u64 frameAbs = Renderer::GetFrameData()->GetRenderFrameIndex();
         const bool parity  = (frameAbs & 1u) != 0u;
@@ -977,7 +978,10 @@ namespace Luth
                 // skyReproj covers depth == 1, where nothing rasterized a motion vector.
                 TaaResolvePushConstants pc{};
                 pc.skyReproj     = m_Pipeline->GetGlobal().GetCachedSkyReproj();
-                pc.temporalAlpha = sys.GetPostProcessSettings().taaTemporalAlpha;
+                // Negative alpha is an ABI-compatible bootstrap sentinel: skip history
+                // after resize, re-enable or a visibility gap.
+                pc.temporalAlpha = vr->taaHistory.CanReuse(Renderer::GetFrameData()->GetRenderFrameIndex(), vr->generation)
+                    ? sys.GetPostProcessSettings().taaTemporalAlpha : -1.0f;
                 vkCmdPushConstants(cmd, m_TaaResolvePipeline->GetLayout(),
                     VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
 

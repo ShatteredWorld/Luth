@@ -1,5 +1,6 @@
 #include "luthpch.h"
 #include "luth/renderer/RenderPipeline.h"
+#include "luth/renderer/Renderer.h"
 #include "luth/renderer/subsystems/GlobalSubsystem.h"
 #include "luth/renderer/subsystems/GTAOSubsystem.h"
 #include "luth/renderer/subsystems/PostProcessSubsystem.h"
@@ -54,7 +55,9 @@ namespace Luth
 
     ViewResources& RenderPipeline::EnsureViewResources(FrameTargets& targets)
     {
-        auto [it, inserted] = m_ViewResources.try_emplace(&targets);
+        const RenderViewId id = m_System.GetViews().Find(&targets);
+        if (!id.value) throw std::invalid_argument("Unregistered render view targets");
+        auto [it, inserted] = m_ViewResources.try_emplace(id.value);
         ViewResources& vr = it->second;
 
         if (!targets.GetSceneColor())
@@ -63,12 +66,11 @@ namespace Luth
         const u32 newW = targets.GetSceneColor()->GetWidth();
         const u32 newH = targets.GetSceneColor()->GetHeight();
 
-        if (inserted)
+        if (inserted || vr.descPool == VK_NULL_HANDLE)
         {
-            // Mint a fresh identity token. Survives resize, dies with ReleaseViewResources; replay's
-            // HasViewResources(t,id) check detects FrameTargets-pointer reuse after a panel close.
-            static std::atomic<u64> s_NextId{ 1 };
-            vr.id = s_NextId.fetch_add(1, std::memory_order_relaxed);
+            // Borrow the owner's identity; native allocation does not mint a new view.
+            vr.id = id.value;
+            vr.generation = m_System.GetViews().Get(id)->generation;
             AllocateViewResources(vr, targets);
         }
         else if (vr.width != newW || vr.height != newH ||
@@ -78,6 +80,9 @@ namespace Luth
                  vr.diHalfCached != (m_System.GetRestirSettings().halfResolution ? 1u : 0u) ||
                  vr.reflHalfCached != (m_System.GetReflectionsSettings().halfResolution ? 1u : 0u))
         {
+            // Stable descriptor slots may still be referenced by earlier submissions.
+            Renderer::WaitForGPU();
+            vr.generation = m_System.InvalidateView(id);
             const u32 halfW = std::max(newW / 2, 1u);
             const u32 halfH = std::max(newH / 2, 1u);
             RecreateViewTextures(vr, newW, newH, halfW, halfH);
@@ -121,30 +126,32 @@ namespace Luth
 
     void RenderPipeline::ReleaseViewResources(FrameTargets& targets)
     {
-        auto it = m_ViewResources.find(&targets);
+        auto it = m_ViewResources.find(m_System.GetViews().Find(&targets).value);
         if (it == m_ViewResources.end()) return;
         DestroyViewResources(it->second);
+        if (m_CurrentViewResources == &it->second) m_CurrentViewResources = nullptr;
         m_ViewResources.erase(it);
     }
 
-    bool RenderPipeline::HasViewResources(FrameTargets* targets, u64 expectedId) const
+    bool RenderPipeline::HasViewResources(FrameTargets* targets, RenderViewId id, u64 generation) const
     {
         if (!targets) return false;
-        auto it = m_ViewResources.find(targets);
-        return it != m_ViewResources.end() && it->second.id == expectedId;
+        if (!m_System.GetViews().Matches(id, targets, generation)) return false;
+        auto it = m_ViewResources.find(id.value);
+        return it != m_ViewResources.end() && it->second.generation == generation;
     }
 
     ViewResources* RenderPipeline::GetViewResources(FrameTargets* targets)
     {
         if (!targets) return nullptr;
-        auto it = m_ViewResources.find(targets);
+        auto it = m_ViewResources.find(m_System.GetViews().Find(targets).value);
         return it == m_ViewResources.end() ? nullptr : &it->second;
     }
 
     const ViewResources* RenderPipeline::GetViewResources(FrameTargets* targets) const
     {
         if (!targets) return nullptr;
-        auto it = m_ViewResources.find(targets);
+        auto it = m_ViewResources.find(m_System.GetViews().Find(targets).value);
         return it == m_ViewResources.end() ? nullptr : &it->second;
     }
 
@@ -333,8 +340,8 @@ namespace Luth
 
         // TAA history (Karis14 YCoCg-clip recipe): viewport-sized RGBA16F HDR. Persistent across
         // frames; ping-pong via frameAbs parity. SAMPLED for the resolve's history read; COLOR
-        // attachment for the resolve's write. Frame 0 settles via off-screen UV rejection in
-        // the resolve shader (motion vectors land outside [0,1] when prevViewProj is identity).
+        // attachment for the resolve's write. Invalid history is rejected explicitly by
+        // the resolve shader before sampling, independently of camera motion.
         vr.taaHistoryA = Texture::Create(fullW, fullH, TextureFormat::RGBA16F);
         vr.taaHistoryB = Texture::Create(fullW, fullH, TextureFormat::RGBA16F);
 

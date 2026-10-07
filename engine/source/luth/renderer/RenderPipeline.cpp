@@ -239,6 +239,7 @@ namespace Luth
     void RenderPipeline::PrepareForTargets(FrameTargets& targets)
     {
         m_CurrentViewResources = &EnsureViewResources(targets);
+        m_CurrentViewResources->taaRecorded = false;
     }
 
     void RenderPipeline::ExecuteMinimal()
@@ -788,7 +789,8 @@ namespace Luth
             // textures, since the live state reflects whichever view ran last and IBL
             // can change mid-Freeze.
             cf.capturedView.targets         = view.targets;
-            cf.capturedView.viewResourcesId = m_CurrentViewResources ? m_CurrentViewResources->id : 0;
+            cf.capturedView.id = view.id;
+            cf.capturedView.resourceGeneration = m_CurrentViewResources ? m_CurrentViewResources->generation : 0;
             cf.capturedView.viewIndex       = view.viewIndex;
             if (view.targets && view.targets->GetSceneColor())
             {
@@ -964,7 +966,7 @@ namespace Luth
         if (m_System.GetSceneTargets().GetLDROutput())     m_NamedTextures["LDROutput"]    = m_System.GetSceneTargets().GetLDROutput();
         if (m_System.GetSceneTargets().GetEntityIDBuffer())m_NamedTextures["EntityID"]     = m_System.GetSceneTargets().GetEntityIDBuffer();
         // Scene-view bloom textures; Frame Debugger is scene-view-only.
-        if (auto it = m_ViewResources.find(&m_System.GetSceneTargets()); it != m_ViewResources.end()) {
+        if (auto it = m_ViewResources.find(m_System.GetViews().Find(&m_System.GetSceneTargets()).value); it != m_ViewResources.end()) {
             for (u32 i = 0; i < ViewResources::kBloomMipCount; ++i)
                 if (it->second.bloomMip[i]) m_NamedTextures["BloomMip" + std::to_string(i)] = it->second.bloomMip[i];
             if (it->second.volDensity)          m_NamedTextures["VolDensity"]           = it->second.volDensity;

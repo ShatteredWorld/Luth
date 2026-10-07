@@ -3,6 +3,7 @@
 #include "luthien/Editor.h"
 #include "luthien/viewport/ViewportRenderer.h"
 #include "luth/renderer/FrameTargets.h"
+#include "luth/renderer/features/RenderViewState.h"
 
 #include <memory>
 
@@ -24,12 +25,14 @@ namespace Luth
         ~GamePanel() override;
 
         void OnInit() override;
+        void OnClosed() override;
         void OnGather(EditorSnapshotBuilder& builder) override;
         void OnDraw(const EditorSnapshot& snapshot) override;
 
     private:
         RenderingSystem* m_RenderingSystem = nullptr;
         FrameTargets     m_Targets;
+        RenderViewId     m_ViewId;
         bool             m_TargetsAllocated = false;
         std::unique_ptr<ViewportRenderer> m_Viewport;
     };

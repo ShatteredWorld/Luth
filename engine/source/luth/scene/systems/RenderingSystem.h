@@ -196,6 +196,12 @@ namespace Luth
         // Update; views record in queued order ahead of the scene view's subgraph. Cleared each Update.
         void QueueView(const RenderView& view) { m_QueuedViews.push_back(view); }
 
+        RenderViewId RegisterView(FrameTargets& targets) { return m_Views.Register(&targets); }
+        void ReleaseView(RenderViewId id);
+        void ResizeView(RenderViewId id, FrameTargets& targets, u32 width, u32 height);
+        const RenderViewRegistry& GetViews() const { return m_Views; }
+        u64 InvalidateView(RenderViewId id);
+
         // Project lifecycle hooks: extend / restrict the shader hot-reload watcher to cover the active project's shaders directory.
         void OnProjectLoaded();
         void OnProjectUnloaded();
@@ -351,6 +357,8 @@ namespace Luth
 
         // Scene panel's render targets. GamePanel owns its own FrameTargets so the two views resize independently.
         FrameTargets m_SceneTargets;
+        RenderViewRegistry m_Views;
+        RenderViewId m_SceneViewId;
 
         // Per-frame draw list (RenderMode-sorted buckets + tri count).
         DrawListBuilder m_DrawListBuilder;

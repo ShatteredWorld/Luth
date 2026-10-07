@@ -1,6 +1,7 @@
 #pragma once
 
 #include "luth/renderer/features/RenderBlackboard.h"
+#include "luth/renderer/features/RenderViewState.h"
 #include <string>
 
 namespace Luth
@@ -12,7 +13,6 @@ namespace Luth
 
     using FeatureInstanceId = u32;
     inline constexpr FeatureInstanceId InvalidFeatureInstance = 0;
-    struct RenderViewId { u64 value = 0; bool operator==(const RenderViewId&) const = default; };
     enum class FeaturePhase { BeforeAsync, Async, AfterAsync };
     enum class FeatureActivation { Always, Conditional, DemandDriven };
 

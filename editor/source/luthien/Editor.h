@@ -49,6 +49,8 @@ namespace Luth
         virtual void OnDraw(const EditorSnapshot& snapshot) = 0;
         virtual void OnEvent(const EditorSignal& /*signal*/) {}
         virtual void OnShutdown() {}
+        // Called while the persistent Window-menu open flag is false. Idempotent.
+        virtual void OnClosed() {}
 
         // Introspection: Editor populates these; panels read.
         bool IsVisible() const { return m_Visible; }

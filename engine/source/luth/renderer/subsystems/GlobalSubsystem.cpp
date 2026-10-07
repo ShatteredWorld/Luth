@@ -128,7 +128,7 @@ namespace Luth
 
         // Per-view prev-VP + viewport size: stored on ViewResources, NOT on GlobalSubsystem. A single
         // global cross-contaminates between Scene + Game panels (huge motion vectors for static geometry).
-        // Frame 0: prevViewProj is Identity -> motion nonsense for one frame, settles by frame 1.
+        // New/reallocated views and visibility gaps seed previous transforms from this camera.
         ViewResources* vr = m_Pipeline->GetCurrentViewResources();
         const PostProcessSettings& pps = m_Pipeline->GetSystem().GetPostProcessSettings();
 
@@ -151,6 +151,15 @@ namespace Luth
         ubo.invViewProjection = Math::Inverse(ubo.viewProjection);
 
         if (vr) {
+            if (!vr->cameraHistory.CanReuse(Renderer::GetFrameData()->GetRenderFrameIndex(), vr->generation))
+            {
+                vr->prevViewProj = ubo.viewProjection;
+                vr->prevViewProjNoJitter = projNoJitter * ubo.view;
+                vr->prevCameraPos = camera.position;
+                vr->prevNearZ = camera.nearZ;
+                vr->prevFarZ = camera.farZ;
+                vr->currentJitter = thisFrameJitter;
+            }
             ubo.prevViewProjection = vr->prevViewProj;
             vr->prevViewProj       = ubo.viewProjection;
             // Sky reprojection for the TAA resolve: un-jittered pair so a static camera maps sky to

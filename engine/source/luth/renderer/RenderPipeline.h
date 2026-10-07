@@ -3,6 +3,7 @@
 #include "luth/core/types/LuthMath.h"
 #include "luth/core/UUID.h"
 #include "luth/renderer/CameraParams.h"
+#include "luth/renderer/features/RenderViewState.h"
 #include "luth/renderer/QueueRecorders.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/rendergraph/RenderGraphSnapshot.h"
@@ -61,6 +62,7 @@ namespace Luth
     // once per frame, after ImGui::Render).
     struct RenderView
     {
+        RenderViewId  id;
         FrameTargets* targets              = nullptr;
         CameraParams  camera;
         u32           viewIndex            = 0;
@@ -74,15 +76,15 @@ namespace Luth
         bool          captureRequested     = false;
     };
 
-    // GPU resources bound to a specific FrameTargets. Keyed by targets pointer in
+    // Legacy GPU resource bridge bound to a registered view. Keyed by stable view ID in
     // RenderPipeline::m_ViewResources, allocated on first use by EnsureViewResources, recreated on size
     // change, destroyed on ReleaseViewResources or pipeline shutdown. Having a distinct set per view lets
     // multiple subgraphs share one primary command buffer without mid-frame vkUpdateDescriptorSets aliasing.
     struct ViewResources
     {
-        // Identity token minted at creation; survives resize, dies with ReleaseViewResources.
-        // invariant: replay validates against this to catch FrameTargets-pointer reuse after panel close.
+        // Registration identity survives resize; generation invalidates incompatible replay.
         u64 id     = 0;
+        u64 generation = 0;
         u32 width  = 0;
         u32 height = 0;
 
@@ -201,6 +203,9 @@ namespace Luth
         // Game panel) cross-contaminates the prev-VP. Per-view storage keeps each view's prev-VP
         // independent. Identity-initialized, so frame 0 has nonsense motion; settles by frame 1.
         Mat4 prevViewProj{ 1.0f };
+        ViewHistoryState cameraHistory;
+        ViewHistoryState taaHistory;
+        bool taaRecorded = false;
         // Per-view previous-frame camera position; feeds ubo.prevCameraPos for DI temporal BASIC's
         // view-dependent spec target. Per-view for the same multi-view reason as prevViewProj.
         Vec3 prevCameraPos{ 0.0f };
@@ -501,7 +506,7 @@ namespace Luth
         ViewResources*     m_CurrentViewResources = nullptr;
 
         // Per-view resource cache. Entries are owned here; panels call ReleaseViewResources on destruction.
-        std::unordered_map<FrameTargets*, ViewResources> m_ViewResources;
+        std::unordered_map<u64, ViewResources> m_ViewResources;
 
         // ---- Constants (shared with RS-side callers when needed) ----
     public:
@@ -517,10 +522,8 @@ namespace Luth
         ViewResources& EnsureViewResources(FrameTargets& targets);
         void           ReleaseViewResources(FrameTargets& targets);
 
-        // True iff `targets` has a cached ViewResources whose identity token matches `expectedId`.
-        // Replay path uses this to validate that the captured FrameTargets is still the same instance;
-        // pointer reuse after panel close + reopen would mint a different id.
-        bool HasViewResources(FrameTargets* targets, u64 expectedId) const;
+        // Replay validates the registration and generation before dereferencing targets.
+        bool HasViewResources(FrameTargets* targets, RenderViewId id, u64 generation) const;
 
         // Lookup without minting: returns nullptr if `targets` isn't in the map.
         // Used by replay to fetch the captured view's resources.
