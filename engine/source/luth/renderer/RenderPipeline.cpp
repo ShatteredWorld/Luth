@@ -7,6 +7,7 @@
 #include "luth/renderer/features/SlimGBufferFeature.h"
 #include "luth/renderer/features/CsmFeature.h"
 #include "luth/renderer/features/ClusteredLightingFeature.h"
+#include "luth/renderer/features/FogComputeFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -165,6 +166,18 @@ namespace Luth
         auto clusterCompiled = RenderPipelineCompiler{}.Compile(std::move(clusterDefinition), {}, clusterInputs);
         if (!clusterCompiled.ReplaceIfValid(m_ClusterComposition))
             throw std::runtime_error("Clustered lighting feature definition failed semantic validation");
+        RenderPipelineDefinition fogDefinition;
+        fogDefinition.AddFeature<FogComputeFeature>(m_Volumetric, &m_System.GetFrameDebugger());
+        PipelineInputContract fogInputs;
+        fogInputs.resources = {{FogResources::Bindings},
+            {FogResources::Volumes, ResourceOutputPresence::Optional},
+            {RenderResources::LightData, ResourceOutputPresence::Optional},
+            {RenderResources::ClusterGrid, ResourceOutputPresence::Optional},
+            {RenderResources::LightIndices, ResourceOutputPresence::Optional},
+            {RenderResources::ShadowCascades, ResourceOutputPresence::Optional}};
+        auto fogCompiled = RenderPipelineCompiler{}.Compile(std::move(fogDefinition), {}, fogInputs);
+        if (!fogCompiled.ReplaceIfValid(m_FogComputeComposition))
+            throw std::runtime_error("Fog compute feature definition failed semantic validation");
         RenderPipelineDefinition skyDefinition;
         skyDefinition.AddFeature<SkyFeature>(m_Lighting, &m_System.GetFrameDebugger());
         PipelineInputContract skyInputs;
@@ -291,6 +304,7 @@ namespace Luth
         m_SurfacePreparationComposition.reset();
         m_CsmComposition.reset();
         m_ClusterComposition.reset();
+        m_FogComputeComposition.reset();
         m_SkyComposition.reset();
         m_ForwardComposition.reset();
         m_Skinning.Shutdown();
@@ -568,34 +582,52 @@ namespace Luth
         if (needTlas)
             m_Rt.AddTlasBuildPass(rg);
 
-        // Volumetric chain: gated by per-view editor toggle. When off the inject + integrate + composite passes
-        // skip entirely; sceneColor flows through unchanged. injectOut hoisted to outer scope so the debug viz
-        // pass below can reference the density atlas handle.
-        VolumetricSubsystem::InjectOutputs injectOut{};
-        RG::ResourceHandle volInScatterHandle{};  // post-integrate scratch (viz mode 1 samples this)
-        RG::ResourceHandle volResolvedHandle{};   // post-resolve (composite + viz sample)
-        if (volumetricEnabled && m_CurrentViewResources && !ptEnabled)
-        {
-            const u32 frameAbs = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
-            Memory::GPUSubRegion fogVolumeRegion{};
+        // Native CPU preparation freezes the graph's fog bindings. RT table pairing remains
+        // an explicit native compatibility dependency until the scene provider migrates.
+        const u32 fogFrameAbs = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
+        Memory::GPUSubRegion fogVolumeRegion{};
+        if (volumetricEnabled && !ptEnabled)
             if (auto* lighting = SystemRegistry::GetSystem<LightingSystem>())
                 fogVolumeRegion = m_Volumetric.UploadFogVolumeSSBO(lighting->GetFogVolumes());
-            // Density pass binds FogVolume SSBO; scatter pass binds Light/ClusterGrid/LightIndex.
-            // Resolve/composite/viz b1-or-b2 parity-rewrite to ping-pong HistA/B for temporal
-            // accumulation. Cycled slots keep rewrites disjoint from in-flight prior frame reads.
-            m_Volumetric.WriteInjectDensityPerFrame(fogVolumeRegion);
-            m_Volumetric.WriteInjectScatterPerFrame(lightSSBORegion, clusterGridRegion, lightIndexRegion);
-            m_Volumetric.WriteResolvePerFrame(*m_CurrentViewResources, frameAbs);
-            m_Volumetric.WriteCompositePerFrame(*m_CurrentViewResources, *view.targets, frameAbs);
-            m_Volumetric.WriteVizPerFrame(*m_CurrentViewResources, frameAbs);
-            // Density pass writes volDensity; scatter pass reads it (via shared ResourceNode so RG inserts the
-            // barrier) and samples it along the sun ray for proper density-aware absorption. Scatter samples
-            // shadow cascades via descriptor binding 5; per-cascade RG Reads emit the DSA -> SHADER_READ_ONLY
-            // transitions. Atlas handles chain through integrate + resolve so RG transitions are coherent end-to-end.
-            injectOut.density   = m_Volumetric.AddInjectDensityPass(rg);
-            injectOut.inScatter = m_Volumetric.AddInjectScatterPass(rg, injectOut.density, shadowHandles);
-            volInScatterHandle  = m_Volumetric.AddIntegratePass(rg, injectOut);
-            volResolvedHandle   = m_Volumetric.AddResolvePass(rg, volInScatterHandle);
+        const auto fogNative = m_Volumetric.PrepareComputeBindings(*m_CurrentViewResources->fog, fogFrameAbs,
+            view.camera, m_CurrentViewResources->globalDescriptorSet[fogFrameAbs % MAX_FRAMES_IN_FLIGHT],
+            volumetricEnabled && !ptEnabled, m_Volumetric.IsRtShadowsEnabled(), &m_Rt,
+            fogVolumeRegion, lightSSBORegion, clusterGridRegion, lightIndexRegion);
+        GraphBufferRef fogVolumes;
+        if (fogNative.enabled && fogVolumeRegion.buffer)
+            fogVolumes = LightingSubsystem::ImportLightingBuffer(rg, "FogVolumes", fogVolumeRegion);
+        const ShadowCascadeRefs fogShadows = shadowOutputs;
+        bool haveFogShadows = true;
+        for (u32 i = 0; i < k_ShadowCascadeCount; ++i)
+        {
+            haveFogShadows &= shadowHandles[i].IsValid();
+        }
+        const FogComputeBindingRef fogBinding{&fogNative};
+        const std::array fogResources{RenderInputBinding::Present(FogResources::Bindings, fogBinding),
+            fogVolumes.handle.IsValid() ? RenderInputBinding::Present(FogResources::Volumes, fogVolumes) : RenderInputBinding::Absent(FogResources::Volumes),
+            lightData.handle.IsValid() ? RenderInputBinding::Present(RenderResources::LightData, lightData) : RenderInputBinding::Absent(RenderResources::LightData),
+            clusterGrid.handle.IsValid() ? RenderInputBinding::Present(RenderResources::ClusterGrid, clusterGrid) : RenderInputBinding::Absent(RenderResources::ClusterGrid),
+            lightIndices.handle.IsValid() ? RenderInputBinding::Present(RenderResources::LightIndices, lightIndices) : RenderInputBinding::Absent(RenderResources::LightIndices),
+            haveFogShadows ? RenderInputBinding::Present(RenderResources::ShadowCascades, fogShadows) : RenderInputBinding::Absent(RenderResources::ShadowCascades)};
+        FrameRenderInputs fogFrame; fogFrame.renderFrameIndex = fogFrameAbs; fogFrame.resources = fogResources;
+        ViewRenderInputs fogView; fogView.id = view.id; fogView.camera = &view.camera;
+        fogView.width = m_CurrentViewResources->width; fogView.height = m_CurrentViewResources->height;
+        GraphTextureRef fogDensity, fogIntegrated, fogResolved;
+        const std::array fogOutputs{RenderOutputBinding::Capture(RenderResources::FogDensity, fogDensity),
+            RenderOutputBinding::Capture(FogResources::IntegratedScatter, fogIntegrated),
+            RenderOutputBinding::Capture(RenderResources::ResolvedFog, fogResolved)};
+        const auto fogBuild = m_FogComputeComposition->Build(rg, fogFrame, fogView, s.GetFrameAllocator(), fogOutputs);
+        if (!fogBuild.success)
+        {
+            for (const auto& diagnostic : fogBuild.diagnostics)
+                LH_LOG(Renderer, error, "Fog compute composition: {}", diagnostic.message);
+            return false;
+        }
+        const RG::ResourceHandle volResolvedHandle = fogResolved.handle;
+        if (volResolvedHandle.IsValid())
+        {
+            m_Volumetric.WriteCompositePerFrame(*m_CurrentViewResources, *view.targets, fogFrameAbs);
+            m_Volumetric.WriteVizPerFrame(*m_CurrentViewResources, fogFrameAbs);
         }
 
         // Path-traced reference mode: a megakernel that bypasses the entire raster + ReSTIR chain. When active,
@@ -813,7 +845,7 @@ namespace Luth
             const RG::ResourceHandle skyboxColor = skyOutput.handle;
             // Volumetric composite: blends fog into sceneColor (alpha-blend) BEFORE bloom so bright
             // in-scattered fog can bloom + the grid overlays unfogged lines. Off -> uses skyboxColor unchanged.
-            RG::ResourceHandle fogColor = (volumetricEnabled && m_CurrentViewResources)
+            RG::ResourceHandle fogColor = (volResolvedHandle.IsValid() && m_CurrentViewResources)
                                           ? m_Volumetric.AddCompositePass(rg, skyboxColor, surfaceDepth.handle, volResolvedHandle)
                                           : skyboxColor;
             // Snapshot the pre-transparent scene (opaque + fog) into the per-view refraction backdrop so glass
@@ -912,10 +944,10 @@ namespace Luth
         }
         else if ((shadeMode == ShadeMode::VolumetricDensity ||
                   shadeMode == ShadeMode::VolumetricInScatter) &&
-                 volumetricEnabled && m_CurrentViewResources)
+                 volResolvedHandle.IsValid() && m_CurrentViewResources)
         {
             const u32 vizMode = (shadeMode == ShadeMode::VolumetricDensity) ? 0u : 1u;
-            ldrOutput = m_Volumetric.AddVizPass(rg, ldrOutput, injectOut.density, volResolvedHandle, surfaceDepth.handle, vizMode);
+            ldrOutput = m_Volumetric.AddVizPass(rg, ldrOutput, fogDensity.handle, volResolvedHandle, surfaceDepth.handle, vizMode);
         }
         else if (shadeMode == ShadeMode::RestirGiReservoir && m_RestirGi.IsEnabled() && m_CurrentViewResources)
         {

@@ -6,6 +6,7 @@
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/resources/Texture.h"
 #include "luth/renderer/features/FogViewState.h"
+#include "luth/renderer/features/FogComputeBindings.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 #include "luth/renderer/backend/vulkan/VulkanPipeline.h"
 
@@ -17,6 +18,8 @@
 
 namespace Luth
 {
+    struct FrameDebugger;
+    struct CameraParams;
     class FrameTargets;
     class RenderPipeline;
     struct ViewResources;
@@ -51,6 +54,13 @@ namespace Luth
         void Shutdown();
         std::shared_ptr<FogViewState> EnsureView(RenderViewId, FrameTargets&, VolumetricSettings::Quality);
         void ReleaseView(RenderViewId);
+        FogComputeBindings PrepareComputeBindings(FogViewState&, u32 frameAbs, const CameraParams&,
+            VkDescriptorSet global, bool enabled, bool rtShadows, const RtSubsystem*,
+            const Memory::GPUSubRegion& volumes, const Memory::GPUSubRegion& lights,
+            const Memory::GPUSubRegion& grid, const Memory::GPUSubRegion& indices);
+        static std::array<GraphTextureRef, 3> AddComputePasses(RG::RenderGraph&, const FogComputeBindings&,
+            RG::BufferHandle volumes, RG::BufferHandle lights, RG::BufferHandle grid,
+            RG::BufferHandle indices, const ShadowCascadeRefs*, FrameDebugger*);
 
         bool OnShaderReloaded(const std::string& name, const std::vector<u32>& spv);
 
@@ -69,7 +79,7 @@ namespace Luth
         void WriteInjectDensityView(FogViewState& vr);
 
         // Per-frame rewrite of the density set's FogVolume SSBO (b1) against this frame's tagged-heap region.
-        void WriteInjectDensityPerFrame(const Memory::GPUSubRegion& fogVolumeRegion);
+        void WriteInjectDensityPerFrame(FogViewState& vr, u32 frameAbs, const Memory::GPUSubRegion& fogVolumeRegion);
 
         // Stable per-view writes for the scatter pass: b0 (volDensity sampler3D), b1 (volInScatter
         // storage), b5 (shadow array sampler). SSBO bindings b2-b4 rewrite per-frame.
@@ -77,39 +87,13 @@ namespace Luth
 
         // Per-frame rewrite of the scatter set's SSBO bindings (Light b2, ClusterGrid b3,
         // LightIndex b4). b0/b1/b5 are stable (WriteInjectScatterView).
-        void WriteInjectScatterPerFrame(const Memory::GPUSubRegion& lightSSBORegion,
+        void WriteInjectScatterPerFrame(FogViewState& vr, u32 frameAbs, const Memory::GPUSubRegion& lightSSBORegion,
                                         const Memory::GPUSubRegion& clusterGridRegion,
                                         const Memory::GPUSubRegion& lightIndexRegion);
-
-        // Inject pass outputs: handles threaded into downstream passes so RG resolves barriers on
-        // the same ResourceNode (re-import hazard: no fresh ImportResource). Scatter reads density via
-        // the handle returned by AddInjectDensityPass; integrate consumes both density + scatter.
-        struct InjectOutputs
-        {
-            RG::ResourceHandle density;
-            RG::ResourceHandle inScatter;
-        };
-
-        // Density pass: per-voxel density + tint accumulation + noise modulation. Async-compute.
-        // Returns the volDensity handle (scatter pass reads it, integrate reads it).
-        RG::ResourceHandle AddInjectDensityPass(RG::RenderGraph& rg);
-
-        // Scatter pass: reads volDensity (via density handle) and writes volInScatter. Sun-ray
-        // absorption samples the density atlas along the ray. Takes per-cascade shadow handles so
-        // RG transitions them to SHADER_READ_ONLY before sampling (binding 5). Returns inScatter
-        // handle for integrate; InjectOutputs is reassembled by the caller for AddIntegratePass.
-        RG::ResourceHandle AddInjectScatterPass(RG::RenderGraph& rg,
-                                                RG::ResourceHandle density,
-                                                const RG::ResourceHandle (&shadowHandles)[k_ShadowCascadeCount]);
 
         // Stable per-view writes for the integrate pass: both b0 (density sampler) and b1
         // (in-scatter storage write target = volInScatter scratch) are stable. No per-frame.
         void WriteIntegrateView(FogViewState& vr);
-
-        // Compute pass: front-to-back ray march; reads volDensity + volInScatter (pre-integrate),
-        // writes accumulated transmittance + in-scatter back to volInScatter (in-place). Returns
-        // post-integrate handle that the resolve pass consumes.
-        RG::ResourceHandle AddIntegratePass(RG::RenderGraph& rg, InjectOutputs injectOut);
 
         // Stable per-view writes for the resolve pass: only b0 (volInScatter scratch sampler) is
         // stable. b1 (prev history sampler) + b2 (curr history storage write target) parity-rewrite
@@ -118,13 +102,7 @@ namespace Luth
 
         // Per-frame rewrite of resolve b1 + b2: parity picks (HistA, HistB) vs (HistB, HistA)
         // for (read prev, write curr).
-        void WriteResolvePerFrame(ViewResources& vr, u32 frameAbs);
-
-        // Compute pass: temporal accumulation. Reads scratch (this frame's post-integrate) + prev
-        // resolved (reprojected via prevViewProjection), applies Karis 3x3x3 min/max clamp on the
-        // 27 scratch neighbors, blends with temporalAlpha, writes curr resolved. Returns curr
-        // resolved handle so composite + viz can declare reads.
-        RG::ResourceHandle AddResolvePass(RG::RenderGraph& rg, RG::ResourceHandle scratchInScatter);
+        void WriteResolvePerFrame(FogViewState& vr, u32 frameAbs);
 
         // Stable per-view writes for the composite pass: only b0 (sceneDepth sampler) is stable.
         // b1 (resolved sampler3D) parity-cycles HistA / HistB.
