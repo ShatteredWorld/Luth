@@ -5,6 +5,7 @@
 #include "luth/renderer/lighting/LightTypes.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/resources/Texture.h"
+#include "luth/renderer/features/FogViewState.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 #include "luth/renderer/backend/vulkan/VulkanPipeline.h"
 
@@ -41,13 +42,15 @@ namespace Luth
     // The viz pass (Vol Density / Vol In-Scatter ShadeMode) samples density + the resolved atlas
     // for diagnostic overlays.
     //
-    // Atlases live on ViewResources (persistent VMA). Per-frame FogVolume SSBO routes through
+    // Atlases and descriptor pools belong to this domain (persistent VMA). Per-frame FogVolume SSBO routes through
     // GPUTaggedPageAllocator, mirroring LightingSubsystem::UploadLightSSBO.
     class VolumetricSubsystem
     {
     public:
         void Init(RenderPipeline& pipeline);
         void Shutdown();
+        std::shared_ptr<FogViewState> EnsureView(RenderViewId, FrameTargets&, VolumetricSettings::Quality);
+        void ReleaseView(RenderViewId);
 
         bool OnShaderReloaded(const std::string& name, const std::vector<u32>& spv);
 
@@ -63,14 +66,14 @@ namespace Luth
 
         // Stable per-view writes for the density pass: b0 (volDensity storage), b2 (noise sampler).
         // b1 (FogVolume SSBO) rewrites per-frame.
-        void WriteInjectDensityView(ViewResources& vr);
+        void WriteInjectDensityView(FogViewState& vr);
 
         // Per-frame rewrite of the density set's FogVolume SSBO (b1) against this frame's tagged-heap region.
         void WriteInjectDensityPerFrame(const Memory::GPUSubRegion& fogVolumeRegion);
 
         // Stable per-view writes for the scatter pass: b0 (volDensity sampler3D), b1 (volInScatter
         // storage), b5 (shadow array sampler). SSBO bindings b2-b4 rewrite per-frame.
-        void WriteInjectScatterView(ViewResources& vr);
+        void WriteInjectScatterView(FogViewState& vr);
 
         // Per-frame rewrite of the scatter set's SSBO bindings (Light b2, ClusterGrid b3,
         // LightIndex b4). b0/b1/b5 are stable (WriteInjectScatterView).
@@ -101,7 +104,7 @@ namespace Luth
 
         // Stable per-view writes for the integrate pass: both b0 (density sampler) and b1
         // (in-scatter storage write target = volInScatter scratch) are stable. No per-frame.
-        void WriteIntegrateView(ViewResources& vr);
+        void WriteIntegrateView(FogViewState& vr);
 
         // Compute pass: front-to-back ray march; reads volDensity + volInScatter (pre-integrate),
         // writes accumulated transmittance + in-scatter back to volInScatter (in-place). Returns
@@ -111,7 +114,7 @@ namespace Luth
         // Stable per-view writes for the resolve pass: only b0 (volInScatter scratch sampler) is
         // stable. b1 (prev history sampler) + b2 (curr history storage write target) parity-rewrite
         // per frame to ping-pong over volInScatterHistA / volInScatterHistB.
-        void WriteResolveView(ViewResources& vr);
+        void WriteResolveView(FogViewState& vr);
 
         // Per-frame rewrite of resolve b1 + b2: parity picks (HistA, HistB) vs (HistB, HistA)
         // for (read prev, write curr).
@@ -125,14 +128,14 @@ namespace Luth
 
         // Stable per-view writes for the composite pass: only b0 (sceneDepth sampler) is stable.
         // b1 (resolved sampler3D) parity-cycles HistA / HistB.
-        void WriteCompositeView(ViewResources& vr, FrameTargets& targets);
+        void WriteCompositeView(FogViewState& vr, FrameTargets& targets);
 
         // Per-frame rewrite of composite b1: samples this frame's resolved history atlas.
         void WriteCompositePerFrame(ViewResources& vr, FrameTargets& targets, u32 frameAbs);
 
         // Stable per-view write of the viz descriptor: b0 (sceneDepth), b1 (volDensity) are stable.
         // b2 (resolved in-scatter sampler) parity-rewrites in WriteVizPerFrame.
-        void WriteVizView(ViewResources& vr, FrameTargets& targets);
+        void WriteVizView(FogViewState& vr, FrameTargets& targets);
         void WriteVizPerFrame(ViewResources& vr, u32 frameAbs);
 
         // Debug graphics pass: blits a heat-mapped density or raw in-scatter radiance over LDR.
@@ -156,6 +159,7 @@ namespace Luth
         VkDescriptorSetLayout       GetVizLayout()            const { return m_VizDescLayout; }
 
     private:
+        FogViewStateStore m_ViewStates;
         RenderPipeline*      m_Pipeline = nullptr;
         VkSampler            m_Sampler  = VK_NULL_HANDLE;
         Memory::GPUSubRegion m_LastFogVolumeRegion{};

@@ -23,11 +23,11 @@ namespace Luth
     // Per-view pool: cycled sets allocate MAX_FRAMES_IN_FLIGHT instances each. Capacity bumped on
     // every subsystem addition; silent vkAllocateDescriptorSets failure on overflow returns
     // VK_NULL_HANDLE handles and skips the draw with no log. Bump generously; pool memory is cheap.
-    static constexpr u32 k_ViewPoolMaxSets              = 205 - MAX_FRAMES_IN_FLIGHT - 2;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale + bloom pyramid sets
+    static constexpr u32 k_ViewPoolMaxSets              = 205 - 7 * MAX_FRAMES_IN_FLIGHT - 2;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale + bloom pyramid sets
     static constexpr u32 k_ViewPoolUniformBufferCount   = 48 - MAX_FRAMES_IN_FLIGHT;
-    static constexpr u32 k_ViewPoolStorageImageCount    = 248 - MAX_FRAMES_IN_FLIGHT - 2;  // + DiSpecular SVGF + restir Set 2 b8 + GI upscale b3 + DI upscale x2 + refl upscale b3 + bloom pyramid mips
-    static constexpr u32 k_ViewPoolStorageBufferCount   = 126;  // + Transparency b2 OIT nodes x3
-    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - MAX_FRAMES_IN_FLIGHT - 3;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels + Transparency b3 refraction backdrop x3
+    static constexpr u32 k_ViewPoolStorageImageCount    = 248 - 5 * MAX_FRAMES_IN_FLIGHT - 2;  // + DiSpecular SVGF + restir Set 2 b8 + GI upscale b3 + DI upscale x2 + refl upscale b3 + bloom pyramid mips
+    static constexpr u32 k_ViewPoolStorageBufferCount   = 126 - 4 * MAX_FRAMES_IN_FLIGHT;  // + Transparency b2 OIT nodes x3
+    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - 13 * MAX_FRAMES_IN_FLIGHT - 3;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels + Transparency b3 refraction backdrop x3
     static constexpr u32 k_ViewPoolAccelStructCount     = 8;   // Set 0 binding 6 (TLAS) cycled per frame
 
     namespace {
@@ -65,6 +65,10 @@ namespace Luth
         const u32 newW = targets.GetSceneColor()->GetWidth();
         const u32 newH = targets.GetSceneColor()->GetHeight();
         m_GTAO.EnsureView(m_GtaoStates, id, newW, newH, *targets.GetSceneDepth());
+        auto fog = m_Volumetric.EnsureView(id, targets, m_System.GetVolumetricSettings().quality);
+        const bool fogReplaced = vr.fog && vr.fog != fog;
+        vr.fog = std::move(fog);
+        if (fogReplaced) vr.generation = m_System.InvalidateView(id);
 
         if (inserted || vr.descPool == VK_NULL_HANDLE)
         {
@@ -74,7 +78,6 @@ namespace Luth
             AllocateViewResources(vr, targets);
         }
         else if (vr.width != newW || vr.height != newH ||
-                 vr.volQualityCached != static_cast<u32>(m_System.GetVolumetricSettings().quality) ||
                  vr.oitLayersCached != m_System.GetTransparencySettings().avgLayersBudget ||
                  vr.giHalfCached != (m_System.GetRestirGiSettings().halfResolution ? 1u : 0u) ||
                  vr.diHalfCached != (m_System.GetRestirSettings().halfResolution ? 1u : 0u) ||
@@ -91,14 +94,6 @@ namespace Luth
             m_PostProcess.WriteTaaResolveView(vr, targets);
             m_EditorOverlays.WriteOutlineView(vr, targets);
             m_EditorOverlays.WriteGridView(vr, targets);
-            // sceneDepth + atlases are per-view + recreated on resize/quality change, so re-bind
-            // the inject/integrate/composite/viz descriptors that reference them.
-            m_Volumetric.WriteInjectDensityView(vr);
-            m_Volumetric.WriteInjectScatterView(vr);
-            m_Volumetric.WriteIntegrateView(vr);
-            m_Volumetric.WriteResolveView(vr);
-            m_Volumetric.WriteCompositeView(vr, targets);
-            m_Volumetric.WriteVizView(vr, targets);
             m_Transparency.WriteOitView(vr);        // re-bind Set 6 b1/b2 + resolve set to the new heads image + pool
             m_Rt.WriteShadowPassView(vr, targets);  // re-bind binding 2 (mask storage) to the new viewport-sized image
             m_Restir.WriteView(vr, targets);        // re-bind Set 2 depth/normal + reservoir + new DI image
@@ -127,6 +122,7 @@ namespace Luth
     {
         const auto id = m_System.GetViews().Find(&targets);
         if (m_GtaoPipeline) m_GtaoPipeline->ReleaseView(id);
+        m_Volumetric.ReleaseView(id);
         auto it = m_ViewResources.find(id.value);
         if (it == m_ViewResources.end()) return;
         DestroyViewResources(it->second);
@@ -241,12 +237,6 @@ namespace Luth
         allocCycled(m_Lighting.GetClusterBuildLayout(),  vr.clusterBuildDescSet,  "View.ClusterBuild");
         allocCycled(m_Lighting.GetLightAssignLayout(),   vr.lightAssignDescSet,   "View.LightAssign");
         allocSingle(m_Lighting.GetClusterVizLayout(),    vr.clusterVizDescSet,    "View.ClusterViz");
-        allocCycled(m_Volumetric.GetInjectDensityLayout(), vr.volInjectDensityDescSet, "View.VolInjectDensity");
-        allocCycled(m_Volumetric.GetInjectScatterLayout(), vr.volInjectScatterDescSet, "View.VolInjectScatter");
-        allocCycled(m_Volumetric.GetIntegrateLayout(),     vr.volIntegrateDescSet,     "View.VolIntegrate");
-        allocCycled(m_Volumetric.GetResolveLayout(),     vr.volResolveDescSet,    "View.VolResolve");
-        allocCycled(m_Volumetric.GetCompositeLayout(),   vr.volCompositeDescSet,  "View.VolComposite");
-        allocCycled(m_Volumetric.GetVizLayout(),         vr.volVizDescSet,        "View.VolViz");
         allocCycled(m_Transparency.GetSetLayout(),       vr.transparentDescSet,   "View.Transparent");
         allocCycled(m_PostProcess.GetTaaResolveDescSetLayout(), vr.taaResolveDescSet, "View.TaaResolve");
         allocSingle(m_Transparency.GetResolveSetLayout(), vr.oitResolveDescSet,   "View.OitResolve");
@@ -272,12 +262,6 @@ namespace Luth
         m_EditorOverlays.WriteGridView(vr, targets);
         m_Lighting.WriteShadowView(vr);
         m_Lighting.WriteClusterVizView(vr, targets);
-        m_Volumetric.WriteInjectDensityView(vr);
-        m_Volumetric.WriteInjectScatterView(vr);
-        m_Volumetric.WriteIntegrateView(vr);
-        m_Volumetric.WriteResolveView(vr);
-        m_Volumetric.WriteCompositeView(vr, targets);
-        m_Volumetric.WriteVizView(vr, targets);
         m_Transparency.WriteOitView(vr);
         m_Rt.WriteShadowPassView(vr, targets);
         m_Restir.WriteView(vr, targets);
@@ -300,7 +284,7 @@ namespace Luth
     {
         // Half-res GI (RestirGiSettings::halfResolution): GI reservoirs + restirGiDI + svgfGi* history
         // allocate at half extent; svgfGiDenoised stays full (the bilateral-upscale output). giHalfCached
-        // lets EnsureViewResources detect a runtime toggle and realloc (mirrors volQualityCached).
+        // lets EnsureViewResources detect a runtime toggle and realloc (like other allocation settings).
         const bool giHalf = m_System.GetRestirGiSettings().halfResolution;
         const u32  giW    = giHalf ? halfW : fullW;
         const u32  giH    = giHalf ? halfH : fullH;
@@ -531,29 +515,11 @@ namespace Luth
         vr.oitNodes = Memory::GPUTaggedPageAllocator::Get().AllocateLargeTaggedDeviceLocal(
             vr.oitNodesTag, 16ull + static_cast<u64>(fullW) * static_cast<u64>(fullH) * oitBudget * 16ull, 16);
 
-        // Volumetric fog atlas dims from current quality preset (Low / Medium / High). View-aligned
-        // but dimensions are independent of viewport pixels; they don't scale with halfW/halfH.
-        // Cached on vr so EnsureViewResources can detect runtime quality changes.
-        const auto quality = m_System.GetVolumetricSettings().quality;
-        const auto dims    = Volumetric::GetAtlasDims(quality);
-        vr.volDimX = dims.x; vr.volDimY = dims.y; vr.volDimZ = dims.z;
-        vr.volQualityCached = static_cast<u32>(quality);
-        auto makeVolume = [&dims](TextureFormat fmt) {
-            return std::make_shared<VKTexture>(dims.x, dims.y, dims.z, fmt, VK_IMAGE_USAGE_STORAGE_BIT);
-        };
-        vr.volDensity          = makeVolume(TextureFormat::RGBA16F);
-        vr.volInScatter        = makeVolume(TextureFormat::RGBA16F);
-        vr.volInScatterHistA   = makeVolume(TextureFormat::RGBA16F);
-        vr.volInScatterHistB   = makeVolume(TextureFormat::RGBA16F);
-
         // Bootstrap clear: freshly-allocated VMA storage images have UNDEFINED layout and undefined
-        // pixel content. The volumetric resolve samples volInScatterHist{A,B} and the SVGF reproject
+        // pixel content. The SVGF reproject
         // imageLoads its prev history on frame 0; without this clear the first read is NaN-prone garbage
         // (and imageLoad needs GENERAL). One-shot submit per view-resize only.
-        VkImage clearTargets[36] = {
-            std::static_pointer_cast<VKTexture>(vr.volInScatter)->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.volInScatterHistA)->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.volInScatterHistB)->GetImage(),
+        VkImage clearTargets[33] = {
             std::static_pointer_cast<VKTexture>(vr.svgfColorHist[0])->GetImage(),
             std::static_pointer_cast<VKTexture>(vr.svgfColorHist[1])->GetImage(),
             std::static_pointer_cast<VKTexture>(vr.svgfMoments[0])->GetImage(),
@@ -592,7 +558,7 @@ namespace Luth
             std::static_pointer_cast<VKTexture>(vr.svgfDiSpecAtrous[0])->GetImage(),
             std::static_pointer_cast<VKTexture>(vr.svgfDiSpecAtrous[1])->GetImage(),
         };
-        constexpr u32 kClearCount = 36;
+        constexpr u32 kClearCount = 33;
         VulkanContext::Get().ImmediateSubmit([&](VkCommandBuffer cmd) {
             VkImageMemoryBarrier toDst[kClearCount]{};
             for (u32 i = 0; i < kClearCount; ++i)
@@ -657,10 +623,7 @@ namespace Luth
     {
         // Pool destruction frees every descriptor set allocated from it.
         for (auto& mip : vr.bloomMip) mip.reset();
-        vr.volDensity.reset();
-        vr.volInScatter.reset();
-        vr.volInScatterHistA.reset();
-        vr.volInScatterHistB.reset();
+        vr.fog.reset();
         vr.taaHistoryA.reset();
         vr.refractionBackdrop.reset();
         vr.taaHistoryB.reset();

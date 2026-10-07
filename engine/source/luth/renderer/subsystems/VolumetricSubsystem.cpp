@@ -583,9 +583,39 @@ namespace Luth
         }
     }
 
+    std::shared_ptr<FogViewState> VolumetricSubsystem::EnsureView(RenderViewId id,
+        FrameTargets& targets, VolumetricSettings::Quality quality)
+    {
+        const auto depth = targets.GetSceneDepth();
+        if (!depth) throw std::invalid_argument("Fog: view requires depth");
+        auto config = FogViewState::Config(depth->GetWidth(), depth->GetHeight(), quality);
+        // Replacing a physical depth image requires fresh stable descriptors, even at
+        // the same extent. This identity is native, never a reusable graph handle.
+        config.resourceGeneration = reinterpret_cast<u64>(static_cast<VKTexture*>(depth.get())->GetImageView());
+        return m_ViewStates.Ensure(id, config, [&](const ViewStateConfig& requested) {
+            auto state = FogViewState::Create(id, requested, {
+                m_InjectDensityDescLayout, m_InjectScatterDescLayout, m_IntegrateDescLayout,
+                m_ResolveDescLayout, m_CompositeDescLayout, m_VizDescLayout});
+            state->depthSource = depth;
+            WriteInjectDensityView(*state);
+            WriteInjectScatterView(*state);
+            WriteIntegrateView(*state);
+            WriteResolveView(*state);
+            WriteCompositeView(*state, targets);
+            WriteVizView(*state, targets);
+            return state;
+        }, [] { Renderer::WaitForGPU(); });
+    }
+
+    void VolumetricSubsystem::ReleaseView(RenderViewId id)
+    {
+        m_ViewStates.Release(id, [] { Renderer::WaitForGPU(); });
+    }
+
     void VolumetricSubsystem::Shutdown()
     {
         LH_PROFILE_FUNCTION();
+        m_ViewStates.ReleaseAll([] { Renderer::WaitForGPU(); });
         VkDevice device = VulkanContext::Get().GetDevice();
         m_InjectDensityPipeline.reset();
         m_InjectScatterPipeline.reset();
@@ -755,7 +785,7 @@ namespace Luth
         return region;
     }
 
-    void VolumetricSubsystem::WriteInjectDensityView(ViewResources& vr)
+    void VolumetricSubsystem::WriteInjectDensityView(FogViewState& vr)
     {
         LH_PROFILE_FUNCTION();
         // Stable across frames: b0 (volDensity storage write), b2 (3D noise sampler).
@@ -814,12 +844,12 @@ namespace Luth
         const u32 slot     = frameAbs % MAX_FRAMES_IN_FLIGHT;
 
         ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-        if (!vr || vr->volInjectDensityDescSet[slot] == VK_NULL_HANDLE) return;
+        if (!vr || !vr->fog || vr->fog->volInjectDensityDescSet[slot] == VK_NULL_HANDLE) return;
         if (!fogVolumeRegion.buffer) return;
 
         VkDescriptorBufferInfo fogBi{ fogVolumeRegion.buffer, fogVolumeRegion.offset, fogVolumeRegion.size };
         VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        write.dstSet          = vr->volInjectDensityDescSet[slot];
+        write.dstSet          = vr->fog->volInjectDensityDescSet[slot];
         write.dstBinding      = 1;
         write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         write.descriptorCount = 1;
@@ -827,7 +857,7 @@ namespace Luth
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 1, &write, 0, nullptr);
     }
 
-    void VolumetricSubsystem::WriteInjectScatterView(ViewResources& vr)
+    void VolumetricSubsystem::WriteInjectScatterView(FogViewState& vr)
     {
         LH_PROFILE_FUNCTION();
         // Stable across frames: b0 (volDensity sampler3D, read), b1 (volInScatter storage write),
@@ -904,7 +934,7 @@ namespace Luth
         const u32 slot     = frameAbs % MAX_FRAMES_IN_FLIGHT;
 
         ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-        if (!vr || vr->volInjectScatterDescSet[slot] == VK_NULL_HANDLE) return;
+        if (!vr || !vr->fog || vr->fog->volInjectScatterDescSet[slot] == VK_NULL_HANDLE) return;
         if (!lightSSBORegion.buffer || !clusterGridRegion.buffer || !lightIndexRegion.buffer) return;
 
         VkDescriptorBufferInfo lightBi{ lightSSBORegion.buffer,   lightSSBORegion.offset,   lightSSBORegion.size   };
@@ -916,7 +946,7 @@ namespace Luth
         for (u32 i = 0; i < 3; ++i)
         {
             writes[i] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            writes[i].dstSet          = vr->volInjectScatterDescSet[slot];
+            writes[i].dstSet          = vr->fog->volInjectScatterDescSet[slot];
             writes[i].dstBinding      = 2 + i;
             writes[i].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].descriptorCount = 1;
@@ -925,7 +955,7 @@ namespace Luth
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 3, writes, 0, nullptr);
     }
 
-    void VolumetricSubsystem::WriteIntegrateView(ViewResources& vr)
+    void VolumetricSubsystem::WriteIntegrateView(FogViewState& vr)
     {
         LH_PROFILE_FUNCTION();
         // Both b0 (density sampler) and b1 (in-scatter storage R/W = scratch atlas) are stable.
@@ -971,7 +1001,7 @@ namespace Luth
         vkUpdateDescriptorSets(device, w, writes, 0, nullptr);
     }
 
-    void VolumetricSubsystem::WriteResolveView(ViewResources& vr)
+    void VolumetricSubsystem::WriteResolveView(FogViewState& vr)
     {
         LH_PROFILE_FUNCTION();
         // Only b0 (scratch sampler) is stable. b1 (prev resolved sampler) + b2 (curr resolved
@@ -1008,17 +1038,17 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         if (m_ResolveDescLayout == VK_NULL_HANDLE) return;
-        if (!vr.volInScatterHistA || !vr.volInScatterHistB) return;
+        if (!vr.fog || !vr.fog->volInScatterHistA || !vr.fog->volInScatterHistB) return;
 
         const u32 slot    = frameAbs % MAX_FRAMES_IN_FLIGHT;
         const bool parity = (frameAbs & 1u) != 0u;
-        if (vr.volResolveDescSet[slot] == VK_NULL_HANDLE) return;
+        if (vr.fog->volResolveDescSet[slot] == VK_NULL_HANDLE) return;
 
         // parity=0: read HistA as prev, write HistB as curr. parity=1: swap.
         auto vkPrev = std::static_pointer_cast<VKTexture>(
-            parity ? vr.volInScatterHistB : vr.volInScatterHistA);
+            parity ? vr.fog->volInScatterHistB : vr.fog->volInScatterHistA);
         auto vkCurr = std::static_pointer_cast<VKTexture>(
-            parity ? vr.volInScatterHistA : vr.volInScatterHistB);
+            parity ? vr.fog->volInScatterHistA : vr.fog->volInScatterHistB);
 
         VkDescriptorImageInfo prevInfo{};
         prevInfo.imageView   = vkPrev->GetImageView();
@@ -1031,13 +1061,13 @@ namespace Luth
 
         VkWriteDescriptorSet writes[2]{};
         writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[0].dstSet          = vr.volResolveDescSet[slot];
+        writes[0].dstSet          = vr.fog->volResolveDescSet[slot];
         writes[0].dstBinding      = 1;
         writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         writes[0].descriptorCount = 1;
         writes[0].pImageInfo      = &prevInfo;
         writes[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[1].dstSet          = vr.volResolveDescSet[slot];
+        writes[1].dstSet          = vr.fog->volResolveDescSet[slot];
         writes[1].dstBinding      = 2;
         writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         writes[1].descriptorCount = 1;
@@ -1045,7 +1075,7 @@ namespace Luth
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 2, writes, 0, nullptr);
     }
 
-    void VolumetricSubsystem::WriteCompositeView(ViewResources& vr, FrameTargets& targets)
+    void VolumetricSubsystem::WriteCompositeView(FogViewState& vr, FrameTargets& targets)
     {
         LH_PROFILE_FUNCTION();
         // b0 (sceneDepth) + b2 (blueNoise) are stable per-view. b1 (in-scatter sampler) rewrites
@@ -1103,15 +1133,15 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         if (m_CompositeDescLayout == VK_NULL_HANDLE) return;
-        if (!vr.volInScatterHistA || !vr.volInScatterHistB) return;
+        if (!vr.fog || !vr.fog->volInScatterHistA || !vr.fog->volInScatterHistB) return;
 
         const u32 slot    = frameAbs % MAX_FRAMES_IN_FLIGHT;
         const bool parity = (frameAbs & 1u) != 0u;
-        if (vr.volCompositeDescSet[slot] == VK_NULL_HANDLE) return;
+        if (vr.fog->volCompositeDescSet[slot] == VK_NULL_HANDLE) return;
 
         // Sample the resolve pass's curr-frame output (same parity rule as resolve's b2 write).
         auto vkScat = std::static_pointer_cast<VKTexture>(
-            parity ? vr.volInScatterHistA : vr.volInScatterHistB);
+            parity ? vr.fog->volInScatterHistA : vr.fog->volInScatterHistB);
 
         VkDescriptorImageInfo scatInfo{};
         scatInfo.imageView   = vkScat->GetImageView();
@@ -1119,7 +1149,7 @@ namespace Luth
         scatInfo.sampler     = m_Sampler;
 
         VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        write.dstSet          = vr.volCompositeDescSet[slot];
+        write.dstSet          = vr.fog->volCompositeDescSet[slot];
         write.dstBinding      = 1;
         write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         write.descriptorCount = 1;
@@ -1165,7 +1195,7 @@ namespace Luth
                     { "volumetric_composite", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, false });
 
                 const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                if (!m_CompositePipeline || vr->volCompositeDescSet[slot] == VK_NULL_HANDLE)
+                if (!m_CompositePipeline || vr->fog->volCompositeDescSet[slot] == VK_NULL_HANDLE)
                 {
                     sys.GetFrameDebugger().EndCapturePass();
                     return;
@@ -1176,7 +1206,7 @@ namespace Luth
 
                 VkDescriptorSet sets[2] = {
                     vr->globalDescriptorSet[slot],
-                    vr->volCompositeDescSet[slot],
+                    vr->fog->volCompositeDescSet[slot],
                 };
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                     m_CompositePipeline->GetLayout(), 0, 2, sets, 0, nullptr);
@@ -1235,7 +1265,7 @@ namespace Luth
                 const u32 frameAbs = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
                 const u32 slot     = frameAbs % MAX_FRAMES_IN_FLIGHT;
 
-                if (!m_IntegratePipeline || vr->volIntegrateDescSet[slot] == VK_NULL_HANDLE)
+                if (!m_IntegratePipeline || vr->fog->volIntegrateDescSet[slot] == VK_NULL_HANDLE)
                 {
                     sys.GetFrameDebugger().EndCapturePass();
                     return;
@@ -1243,18 +1273,18 @@ namespace Luth
 
                 m_IntegratePipeline->Bind(cmd);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    m_IntegratePipeline->GetLayout(), 0, 1, &vr->volIntegrateDescSet[slot], 0, nullptr);
+                    m_IntegratePipeline->GetLayout(), 0, 1, &vr->fog->volIntegrateDescSet[slot], 0, nullptr);
 
                 IntegratePC pc{};
                 pc.nearFarPad = Vec4(m_Pipeline->GetCurrentView()->camera.nearZ,
                                      m_Pipeline->GetCurrentView()->camera.farZ, 0.0f, 0.0f);
-                pc.volDimX = vr->volDimX; pc.volDimY = vr->volDimY; pc.volDimZ = vr->volDimZ;
+                pc.volDimX = vr->fog->volDimX; pc.volDimY = vr->fog->volDimY; pc.volDimZ = vr->fog->volDimZ;
                 vkCmdPushConstants(cmd, m_IntegratePipeline->GetLayout(),
                     VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(IntegratePC), &pc);
 
                 // 2D dispatch over (x, y); each thread walks the full Z column.
-                const u32 groupX = (vr->volDimX + 7) / 8;
-                const u32 groupY = (vr->volDimY + 7) / 8;
+                const u32 groupX = (vr->fog->volDimX + 7) / 8;
+                const u32 groupY = (vr->fog->volDimY + 7) / 8;
                 vkCmdDispatch(cmd, groupX, groupY, 1);
 
                 sys.GetFrameDebugger().CaptureComputeDispatch("VolumetricIntegrate",
@@ -1289,12 +1319,12 @@ namespace Luth
                 // history sampled at reprojected coord; curr history written at current voxel.
                 // Separate physical atlases keep the read + write hazard-free.
                 auto vkCurr = std::static_pointer_cast<VKTexture>(
-                    parity ? vr->volInScatterHistA : vr->volInScatterHistB);
+                    parity ? vr->fog->volInScatterHistA : vr->fog->volInScatterHistB);
 
                 RG::TextureDesc desc;
                 desc.name   = parity ? "VolInScatterHistA[curr]" : "VolInScatterHistB[curr]";
-                desc.width  = vr->volDimX;
-                desc.height = vr->volDimY;
+                desc.width  = vr->fog->volDimX;
+                desc.height = vr->fog->volDimY;
                 desc.format = RG::TextureFormat::RGBA16_Float;
                 data.resolved = rg.ImportResource(desc,
                     (void*)vkCurr->GetImage(), (void*)vkCurr->GetImageView(),
@@ -1315,7 +1345,7 @@ namespace Luth
                 const u32 frameAbs = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
                 const u32 slot     = frameAbs % MAX_FRAMES_IN_FLIGHT;
 
-                if (!m_ResolvePipeline || vr->volResolveDescSet[slot] == VK_NULL_HANDLE)
+                if (!m_ResolvePipeline || vr->fog->volResolveDescSet[slot] == VK_NULL_HANDLE)
                 {
                     sys.GetFrameDebugger().EndCapturePass();
                     return;
@@ -1324,20 +1354,20 @@ namespace Luth
                 m_ResolvePipeline->Bind(cmd);
                 VkDescriptorSet sets[2] = {
                     vr->globalDescriptorSet[slot],
-                    vr->volResolveDescSet[slot],
+                    vr->fog->volResolveDescSet[slot],
                 };
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                     m_ResolvePipeline->GetLayout(), 0, 2, sets, 0, nullptr);
 
                 ResolvePC pc{};
                 pc.invView = Math::Inverse(m_Pipeline->GetCurrentView()->camera.view);
-                pc.volDimX = vr->volDimX; pc.volDimY = vr->volDimY; pc.volDimZ = vr->volDimZ;
+                pc.volDimX = vr->fog->volDimX; pc.volDimY = vr->fog->volDimY; pc.volDimZ = vr->fog->volDimZ;
                 vkCmdPushConstants(cmd, m_ResolvePipeline->GetLayout(),
                     VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ResolvePC), &pc);
 
-                const u32 groupX = (vr->volDimX + 7) / 8;
-                const u32 groupY = (vr->volDimY + 7) / 8;
-                const u32 groupZ = (vr->volDimZ + 3) / 4;
+                const u32 groupX = (vr->fog->volDimX + 7) / 8;
+                const u32 groupY = (vr->fog->volDimY + 7) / 8;
+                const u32 groupZ = (vr->fog->volDimZ + 3) / 4;
                 vkCmdDispatch(cmd, groupX, groupY, groupZ);
 
                 sys.GetFrameDebugger().CaptureComputeDispatch("VolumetricResolve",
@@ -1362,10 +1392,10 @@ namespace Luth
                 ViewResources* vr = m_Pipeline->GetCurrentViewResources();
                 RG::TextureDesc descD;
                 descD.name   = "VolDensity";
-                descD.width  = vr->volDimX;
-                descD.height = vr->volDimY;
+                descD.width  = vr->fog->volDimX;
+                descD.height = vr->fog->volDimY;
                 descD.format = RG::TextureFormat::RGBA16_Float;
-                auto vkDens  = std::static_pointer_cast<VKTexture>(vr->volDensity);
+                auto vkDens  = std::static_pointer_cast<VKTexture>(vr->fog->volDensity);
                 data.density = rg.ImportResource(descD,
                     (void*)vkDens->GetImage(), (void*)vkDens->GetImageView(),
                     RG::ResourceState::Undefined);
@@ -1385,7 +1415,7 @@ namespace Luth
                 const u32 frameAbs = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
                 const u32 slot     = frameAbs % MAX_FRAMES_IN_FLIGHT;
 
-                if (!m_InjectDensityPipeline || vr->volInjectDensityDescSet[slot] == VK_NULL_HANDLE)
+                if (!m_InjectDensityPipeline || vr->fog->volInjectDensityDescSet[slot] == VK_NULL_HANDLE)
                 {
                     sys.GetFrameDebugger().EndCapturePass();
                     return;
@@ -1394,20 +1424,20 @@ namespace Luth
                 m_InjectDensityPipeline->Bind(cmd);
                 VkDescriptorSet sets[2] = {
                     vr->globalDescriptorSet[slot],
-                    vr->volInjectDensityDescSet[slot],
+                    vr->fog->volInjectDensityDescSet[slot],
                 };
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                     m_InjectDensityPipeline->GetLayout(), 0, 2, sets, 0, nullptr);
 
                 InjectPC pc{};
                 pc.invView = Math::Inverse(m_Pipeline->GetCurrentView()->camera.view);
-                pc.volDimX = vr->volDimX; pc.volDimY = vr->volDimY; pc.volDimZ = vr->volDimZ;
+                pc.volDimX = vr->fog->volDimX; pc.volDimY = vr->fog->volDimY; pc.volDimZ = vr->fog->volDimZ;
                 vkCmdPushConstants(cmd, m_InjectDensityPipeline->GetLayout(),
                     VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(InjectPC), &pc);
 
-                const u32 groupX = (vr->volDimX + 7) / 8;
-                const u32 groupY = (vr->volDimY + 7) / 8;
-                const u32 groupZ = (vr->volDimZ + 3) / 4;
+                const u32 groupX = (vr->fog->volDimX + 7) / 8;
+                const u32 groupY = (vr->fog->volDimY + 7) / 8;
+                const u32 groupZ = (vr->fog->volDimZ + 3) / 4;
                 vkCmdDispatch(cmd, groupX, groupY, groupZ);
 
                 sys.GetFrameDebugger().CaptureComputeDispatch("VolumetricInjectDensity",
@@ -1447,10 +1477,10 @@ namespace Luth
 
                 RG::TextureDesc descS;
                 descS.name   = "VolInScatter";
-                descS.width  = vr->volDimX;
-                descS.height = vr->volDimY;
+                descS.width  = vr->fog->volDimX;
+                descS.height = vr->fog->volDimY;
                 descS.format = RG::TextureFormat::RGBA16_Float;
-                auto vkScat    = std::static_pointer_cast<VKTexture>(vr->volInScatter);
+                auto vkScat    = std::static_pointer_cast<VKTexture>(vr->fog->volInScatter);
                 data.inScatter = rg.ImportResource(descS,
                     (void*)vkScat->GetImage(), (void*)vkScat->GetImageView(),
                     RG::ResourceState::Undefined);
@@ -1478,7 +1508,7 @@ namespace Luth
                 const u32 frameAbs = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
                 const u32 slot     = frameAbs % MAX_FRAMES_IN_FLIGHT;
 
-                if (!m_InjectScatterPipeline || vr->volInjectScatterDescSet[slot] == VK_NULL_HANDLE)
+                if (!m_InjectScatterPipeline || vr->fog->volInjectScatterDescSet[slot] == VK_NULL_HANDLE)
                 {
                     sys.GetFrameDebugger().EndCapturePass();
                     return;
@@ -1507,7 +1537,7 @@ namespace Luth
                 // dispatch even when RT fog is off (validation requires bound sets for static references).
                 VkDescriptorSet sets01[2] = {
                     vr->globalDescriptorSet[slot],
-                    vr->volInjectScatterDescSet[slot],
+                    vr->fog->volInjectScatterDescSet[slot],
                 };
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                     m_InjectScatterPipeline->GetLayout(), 0, 2, sets01, 0, nullptr);
@@ -1520,14 +1550,14 @@ namespace Luth
 
                 InjectPC pc{};
                 pc.invView      = Math::Inverse(m_Pipeline->GetCurrentView()->camera.view);
-                pc.volDimX = vr->volDimX; pc.volDimY = vr->volDimY; pc.volDimZ = vr->volDimZ;
+                pc.volDimX = vr->fog->volDimX; pc.volDimY = vr->fog->volDimY; pc.volDimZ = vr->fog->volDimZ;
                 pc.geomTableBDA = m_Pipeline->GetRt().GetGeometryTableBDA();
                 vkCmdPushConstants(cmd, m_InjectScatterPipeline->GetLayout(),
                     VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(InjectPC), &pc);
 
-                const u32 groupX = (vr->volDimX + 7) / 8;
-                const u32 groupY = (vr->volDimY + 7) / 8;
-                const u32 groupZ = (vr->volDimZ + 3) / 4;
+                const u32 groupX = (vr->fog->volDimX + 7) / 8;
+                const u32 groupY = (vr->fog->volDimY + 7) / 8;
+                const u32 groupZ = (vr->fog->volDimZ + 3) / 4;
                 vkCmdDispatch(cmd, groupX, groupY, groupZ);
 
                 sys.GetFrameDebugger().CaptureComputeDispatch("VolumetricInjectScatter",
@@ -1537,7 +1567,7 @@ namespace Luth
         return outputHandle;
     }
 
-    void VolumetricSubsystem::WriteVizView(ViewResources& vr, FrameTargets& targets)
+    void VolumetricSubsystem::WriteVizView(FogViewState& vr, FrameTargets& targets)
     {
         LH_PROFILE_FUNCTION();
         // Stable: b0 (sceneDepth sampler), b1 (volDensity sampler). b2 (volInScatter) follows
@@ -1587,15 +1617,15 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         if (m_VizDescLayout == VK_NULL_HANDLE) return;
-        if (!vr.volInScatterHistA || !vr.volInScatterHistB) return;
+        if (!vr.fog || !vr.fog->volInScatterHistA || !vr.fog->volInScatterHistB) return;
 
         const u32 slot    = frameAbs % MAX_FRAMES_IN_FLIGHT;
         const bool parity = (frameAbs & 1u) != 0u;
-        if (vr.volVizDescSet[slot] == VK_NULL_HANDLE) return;
+        if (vr.fog->volVizDescSet[slot] == VK_NULL_HANDLE) return;
 
         // Same parity rule as composite: sample the resolved atlas this frame.
         auto vkScat = std::static_pointer_cast<VKTexture>(
-            parity ? vr.volInScatterHistA : vr.volInScatterHistB);
+            parity ? vr.fog->volInScatterHistA : vr.fog->volInScatterHistB);
 
         VkDescriptorImageInfo scatInfo{};
         scatInfo.imageView   = vkScat->GetImageView();
@@ -1603,7 +1633,7 @@ namespace Luth
         scatInfo.sampler     = m_Sampler;
 
         VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        write.dstSet          = vr.volVizDescSet[slot];
+        write.dstSet          = vr.fog->volVizDescSet[slot];
         write.dstBinding      = 2;
         write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         write.descriptorCount = 1;
@@ -1653,7 +1683,7 @@ namespace Luth
                     { "volumetric_viz", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, false });
 
                 const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                if (!vr || vr->volVizDescSet[slot] == VK_NULL_HANDLE ||
+                if (!vr || !vr->fog || vr->fog->volVizDescSet[slot] == VK_NULL_HANDLE ||
                     vr->globalDescriptorSet[slot] == VK_NULL_HANDLE)
                 {
                     sys.GetFrameDebugger().EndCapturePass();
@@ -1664,7 +1694,7 @@ namespace Luth
                 m_VizPipeline->Bind(cmd);
                 VkDescriptorSet sets[2] = {
                     vr->globalDescriptorSet[slot],
-                    vr->volVizDescSet[slot],
+                    vr->fog->volVizDescSet[slot],
                 };
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                     m_VizPipeline->GetLayout(), 0, 2, sets, 0, nullptr);

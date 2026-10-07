@@ -84,7 +84,7 @@ namespace Luth
 
 namespace Luth::Volumetric
 {
-    // Resolves the 3D atlas dimensions for a given quality preset. Used by ViewResources for the
+    // Resolves the 3D atlas dimensions for a given quality preset. Used by FogViewState for the
     // atlas allocations and by the subsystem for dispatch dims.
     struct AtlasDims { u32 x, y, z; };
     inline AtlasDims GetAtlasDims(VolumetricSettings::Quality q)

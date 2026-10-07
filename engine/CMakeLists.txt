@@ -53,6 +53,7 @@ add_library(Luth STATIC
     source/luth/renderer/features/ClusteredLightingFeature.cpp
     source/luth/renderer/features/SkyFeature.cpp
     source/luth/renderer/features/ForwardOpaqueFeature.cpp
+    source/luth/renderer/features/FogViewState.cpp
     source/luth/renderer/features/GtaoViewState.cpp
     source/luth/renderer/features/RenderPipelineCompiler.cpp
 

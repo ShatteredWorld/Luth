@@ -269,7 +269,7 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         if (m_TransparentSetLayout == VK_NULL_HANDLE) return;
-        if (!vr.volInScatterHistA || !vr.volInScatterHistB) return;
+        if (!vr.fog || !vr.fog->volInScatterHistA || !vr.fog->volInScatterHistB) return;
 
         const u32  slot   = frameAbs % MAX_FRAMES_IN_FLIGHT;
         const bool parity = (frameAbs & 1u) != 0u;
@@ -277,7 +277,7 @@ namespace Luth
 
         // Same parity rule as the volumetric composite's b1: sample this frame's resolved atlas.
         auto vkScat = std::static_pointer_cast<VKTexture>(
-            parity ? vr.volInScatterHistA : vr.volInScatterHistB);
+            parity ? vr.fog->volInScatterHistA : vr.fog->volInScatterHistB);
 
         VkDescriptorImageInfo scatInfo{};
         scatInfo.imageView   = vkScat->GetImageView();

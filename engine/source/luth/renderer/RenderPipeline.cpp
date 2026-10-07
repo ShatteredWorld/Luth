@@ -1273,10 +1273,10 @@ namespace Luth
         if (auto it = m_ViewResources.find(m_System.GetViews().Find(&m_System.GetSceneTargets()).value); it != m_ViewResources.end()) {
             for (u32 i = 0; i < ViewResources::kBloomMipCount; ++i)
                 if (it->second.bloomMip[i]) m_NamedTextures["BloomMip" + std::to_string(i)] = it->second.bloomMip[i];
-            if (it->second.volDensity)          m_NamedTextures["VolDensity"]           = it->second.volDensity;
-            if (it->second.volInScatter)        m_NamedTextures["VolInScatter"]         = it->second.volInScatter;
-            if (it->second.volInScatterHistA)   m_NamedTextures["VolInScatterHistA"]   = it->second.volInScatterHistA;
-            if (it->second.volInScatterHistB)   m_NamedTextures["VolInScatterHistB"]   = it->second.volInScatterHistB;
+            if (it->second.fog && it->second.fog->volDensity)          m_NamedTextures["VolDensity"]           = it->second.fog->volDensity;
+            if (it->second.fog && it->second.fog->volInScatter)        m_NamedTextures["VolInScatter"]         = it->second.fog->volInScatter;
+            if (it->second.fog && it->second.fog->volInScatterHistA)   m_NamedTextures["VolInScatterHistA"]   = it->second.fog->volInScatterHistA;
+            if (it->second.fog && it->second.fog->volInScatterHistB)   m_NamedTextures["VolInScatterHistB"]   = it->second.fog->volInScatterHistB;
             if (it->second.reflRadiance)        m_NamedTextures["Reflections"]         = it->second.reflRadiance;
         }
         if (m_Lighting.GetIrradianceMap())  m_NamedTextures["IrradianceMap"]  = m_Lighting.GetIrradianceMap();
