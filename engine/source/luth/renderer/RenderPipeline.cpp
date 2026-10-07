@@ -1,6 +1,7 @@
 #include "luthpch.h"
 #include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/features/GTAOFeature.h"
+#include "luth/renderer/features/DeformationFeature.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
 #include "luth/renderer/debug/FrameDebuggerContext.h"
 #include "luth/scene/systems/RenderingSystem.h"
@@ -118,7 +119,14 @@ namespace Luth
         m_DenoiseGi->Init(*this);
         m_DenoiseRefl->Init(*this);
         m_DenoiseDiSpec->Init(*this);
-        m_Skinning.Init(*this);
+        m_Skinning.Init();
+        RenderPipelineDefinition deformationDefinition;
+        deformationDefinition.AddFeature<DeformationFeature>(m_Skinning);
+        PipelineInputContract deformationInputs;
+        deformationInputs.resources = {{DeformationResources::Parameters}};
+        auto deformationCompiled = RenderPipelineCompiler{}.Compile(std::move(deformationDefinition), {}, deformationInputs);
+        if (!deformationCompiled.ReplaceIfValid(m_DeformationPipeline))
+            throw std::runtime_error("Deformation feature definition failed semantic validation");
 
         // Shader hot-reload callback: pulls fresh SPIR-V into the cached blob and rebuilds pipelines that use it.
         // Fires after ShaderLibrary::Reload has already recompiled and re-reflected the single-stage shader.
@@ -217,6 +225,7 @@ namespace Luth
 
         // Subsystems own their layouts/pools/samplers/pipelines.
         m_Transparency.Shutdown();
+        m_DeformationPipeline.reset();
         m_Skinning.Shutdown();
         m_DenoiseDiSpec->Shutdown();
         m_DenoiseRefl->Shutdown();
@@ -284,7 +293,21 @@ namespace Luth
         // Deform: per-frame compute skinning into each mesh's deformed buffer, as the FIRST graphics
         // pass so raster geometry (gA) reads the current-frame deformation. Decoupled from needTlas:
         // raster always needs it, even when no RT consumer builds a TLAS this frame.
-        m_Skinning.AddDeformPass(rg);
+        const DeformationParameters deformationParams{s.GetWindSettings(), Time::GetTime()};
+        const std::array deformationBindings{RenderInputBinding::Present(DeformationResources::Parameters, deformationParams)};
+        FrameRenderInputs deformationFrame;
+        deformationFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+        deformationFrame.snapshot = &s.GetActiveSnapshot();
+        deformationFrame.resources = deformationBindings;
+        ViewRenderInputs deformationView;
+        deformationView.id = view.id;
+        const auto deformationBuild = m_DeformationPipeline->Build(rg, deformationFrame, deformationView, s.GetFrameAllocator());
+        if (!deformationBuild.success)
+        {
+            for (const auto& diagnostic : deformationBuild.diagnostics)
+                LH_LOG(Renderer, error, "Deformation composition: {}", diagnostic.message);
+            return false;
+        }
 
         // PathTrace replaces the entire real-time pipeline: its megakernel output feeds the post chain via
         // hdrForPost below. These passes can't be dead-pass-culled in PT (GeometryPass is alive via its
