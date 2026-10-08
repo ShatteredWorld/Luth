@@ -238,9 +238,9 @@ namespace Luth
             if (auto* state = m_Pipeline->GetViewResources(v.targets))
             {
                 state->cameraHistory.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
-                if (state->taaRecorded)
-                    state->taaHistory.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
-                else state->taaHistory.Invalidate();
+                if (state->taa && state->taa->recorded)
+                    state->taa->history.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
+                else if (state->taa) state->taa->history.Invalidate();
             }
             ++viewSlot;
         }
@@ -252,9 +252,9 @@ namespace Luth
         if (auto* state = m_Pipeline->GetViewResources(sceneView.targets))
         {
             state->cameraHistory.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
-            if (state->taaRecorded)
-                state->taaHistory.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
-            else state->taaHistory.Invalidate();
+            if (state->taa && state->taa->recorded)
+                state->taa->history.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
+            else if (state->taa) state->taa->history.Invalidate();
         }
     }
 

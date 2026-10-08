@@ -148,8 +148,6 @@ namespace Luth
         // independent. Identity-initialized, so frame 0 has nonsense motion; settles by frame 1.
         Mat4 prevViewProj{ 1.0f };
         ViewHistoryState cameraHistory;
-        ViewHistoryState taaHistory;
-        bool taaRecorded = false;
         // Per-view previous-frame camera position; feeds ubo.prevCameraPos for DI temporal BASIC's
         // view-dependent spec target. Per-view for the same multi-view reason as prevViewProj.
         Vec3 prevCameraPos{ 0.0f };
@@ -162,20 +160,15 @@ namespace Luth
         f32 prevNearZ = 0.0f;
         f32 prevFarZ  = 0.0f;
 
-        // TAA history (Karis14 YCoCg-clip recipe). Viewport-sized RGBA16F, persistent across frames,
-        // ping-pong via frameAbs parity matching volInScatterHistA/B shape. Bootstrap-cleared at
-        // resize so frame 0 history read is well-defined. currentJitter / prevJitter are NDC-space
-        // sub-pixel offsets stored on the view because GlobalSubsystem is shared across views.
+        // TAA owns histories and descriptors. Camera jitter remains in the legacy view bridge.
+        std::shared_ptr<TaaViewState> taa; // Borrowed postprocessing domain state.
         Vec2 currentJitter{ 0.0f, 0.0f };
         Vec2 prevJitter{ 0.0f, 0.0f };
-        std::shared_ptr<Texture> taaHistoryA;
-        std::shared_ptr<Texture> taaHistoryB;
-        std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT> taaResolveDescSet{};
 
 
         // RT sun-shadow mask: viewport-sized R8 storage image, written by raygen on
         // AsyncCompute and sampled by pbr.frag (Set 3 binding 4) when ShadowingMode::RtShadows is
-        // active. Lifetime mirrors taaHistoryA/B: persistent, recreated on resize. The cycled
+        // active. Like TAA histories, lifetime is: persistent, recreated on resize. The cycled
         // descriptor set carries the pass-local bindings (SceneDepth + slimNormal + mask storage).
         std::shared_ptr<Texture> sunShadowMask;
         std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT> rtShadowPassDescSet{};

@@ -372,7 +372,7 @@ namespace Luth
     void RenderPipeline::PrepareForTargets(FrameTargets& targets)
     {
         m_CurrentViewResources = &EnsureViewResources(targets);
-        m_CurrentViewResources->taaRecorded = false;
+        if (m_CurrentViewResources->taa) m_CurrentViewResources->taa->recorded = false;
     }
 
     void RenderPipeline::ExecuteMinimal()

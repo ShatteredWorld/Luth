@@ -4,6 +4,7 @@
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/backend/vulkan/VulkanPipeline.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
+#include "luth/renderer/features/TaaViewState.h"
 
 #include <memory>
 #include <string>
@@ -23,6 +24,8 @@ namespace Luth
     public:
         void Init(RenderPipeline& pipeline);
         void Shutdown();
+        std::shared_ptr<TaaViewState> EnsureTaaView(RenderViewId, FrameTargets&);
+        void ReleaseTaaView(RenderViewId);
 
         bool OnShaderReloaded(const std::string& name, const std::vector<u32>& spv);
 
@@ -38,7 +41,7 @@ namespace Luth
 
         // Stable per-view writes for the TAA resolve set (bindings 0/1/3: sceneColor / motion /
         // sceneDepth). Binding 2 (history-prev sampler) is rebound per-frame in WriteTaaResolvePerFrame.
-        void WriteTaaResolveView(ViewResources& vr, FrameTargets& targets);
+        void WriteTaaResolveView(TaaViewState& state, FrameTargets& targets);
         void WriteTaaResolvePerFrame(ViewResources& vr, u32 frameAbs);
 
         // Per-frame rebind of bloom-prefilter + composite binding 0 to track the TAA chain. When
@@ -77,6 +80,7 @@ namespace Luth
                                  const void* pc, u32 pcSize, u32 dstW, u32 dstH, const char* label, const char* shader);
 
         RenderPipeline* m_Pipeline = nullptr;
+        TaaViewStateStore m_TaaStates;
 
         VkSampler             m_Sampler                 = VK_NULL_HANDLE;
         VkSampler             m_NearestSampler          = VK_NULL_HANDLE; // for integer slim matID binding

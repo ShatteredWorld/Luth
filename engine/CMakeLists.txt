@@ -56,6 +56,8 @@ add_library(Luth STATIC
     source/luth/renderer/features/TransparencyFeature.cpp
     source/luth/renderer/subsystems/TransparencyOit.cpp
     source/luth/renderer/subsystems/TransparencySorted.cpp
+    source/luth/renderer/features/TaaViewState.cpp
+    source/luth/renderer/subsystems/PostProcessTaaState.cpp
     source/luth/renderer/features/TransparencyViewState.cpp
     source/luth/renderer/features/RefractionBackdropFeature.cpp
     source/luth/renderer/subsystems/TransparencyBackdrop.cpp

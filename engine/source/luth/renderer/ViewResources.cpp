@@ -23,11 +23,11 @@ namespace Luth
     // Per-view pool: cycled sets allocate MAX_FRAMES_IN_FLIGHT instances each. Capacity bumped on
     // every subsystem addition; silent vkAllocateDescriptorSets failure on overflow returns
     // VK_NULL_HANDLE handles and skips the draw with no log. Bump generously; pool memory is cheap.
-    static constexpr u32 k_ViewPoolMaxSets              = 205 - 8 * MAX_FRAMES_IN_FLIGHT - 3;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale + bloom pyramid sets
-    static constexpr u32 k_ViewPoolUniformBufferCount   = 48 - MAX_FRAMES_IN_FLIGHT;
+    static constexpr u32 k_ViewPoolMaxSets              = 205 - 9 * MAX_FRAMES_IN_FLIGHT - 3;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale + bloom pyramid sets
+    static constexpr u32 k_ViewPoolUniformBufferCount   = 48 - 2 * MAX_FRAMES_IN_FLIGHT;
     static constexpr u32 k_ViewPoolStorageImageCount    = 248 - 6 * MAX_FRAMES_IN_FLIGHT - 3;  // + DiSpecular SVGF + restir Set 2 b8 + GI upscale b3 + DI upscale x2 + refl upscale b3 + bloom pyramid mips
     static constexpr u32 k_ViewPoolStorageBufferCount   = 126 - 5 * MAX_FRAMES_IN_FLIGHT - 1;
-    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - 15 * MAX_FRAMES_IN_FLIGHT - 3;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels
+    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - 19 * MAX_FRAMES_IN_FLIGHT - 3;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels
     static constexpr u32 k_ViewPoolAccelStructCount     = 8;   // Set 0 binding 6 (TLAS) cycled per frame
 
     namespace {
@@ -74,6 +74,11 @@ namespace Luth
         vr.transparency = std::move(transparency);
         if (transparencyReplaced) vr.generation = m_System.InvalidateView(id);
 
+        auto taa = m_PostProcess.EnsureTaaView(id, targets);
+        const bool taaReplaced = vr.taa && vr.taa != taa;
+        vr.taa = std::move(taa);
+        if (taaReplaced) vr.generation = m_System.InvalidateView(id);
+
         if (inserted || vr.descPool == VK_NULL_HANDLE)
         {
             // Borrow the owner's identity; native allocation does not mint a new view.
@@ -94,7 +99,6 @@ namespace Luth
             RecreateViewTextures(vr, newW, newH, halfW, halfH);
             m_PostProcess.WriteView(vr, targets);
             m_PostProcess.WriteBloomView(vr);
-            m_PostProcess.WriteTaaResolveView(vr, targets);
             m_EditorOverlays.WriteOutlineView(vr, targets);
             m_EditorOverlays.WriteGridView(vr, targets);
             m_Rt.WriteShadowPassView(vr, targets);  // re-bind binding 2 (mask storage) to the new viewport-sized image
@@ -126,6 +130,7 @@ namespace Luth
         if (m_GtaoPipeline) m_GtaoPipeline->ReleaseView(id);
         m_Volumetric.ReleaseView(id);
         m_Transparency.ReleaseView(id);
+        m_PostProcess.ReleaseTaaView(id);
         auto it = m_ViewResources.find(id.value);
         if (it == m_ViewResources.end()) return;
         DestroyViewResources(it->second);
@@ -240,7 +245,6 @@ namespace Luth
         allocCycled(m_Lighting.GetClusterBuildLayout(),  vr.clusterBuildDescSet,  "View.ClusterBuild");
         allocCycled(m_Lighting.GetLightAssignLayout(),   vr.lightAssignDescSet,   "View.LightAssign");
         allocSingle(m_Lighting.GetClusterVizLayout(),    vr.clusterVizDescSet,    "View.ClusterViz");
-        allocCycled(m_PostProcess.GetTaaResolveDescSetLayout(), vr.taaResolveDescSet, "View.TaaResolve");
         allocCycled(m_Rt.GetShadowPassLayout(),          vr.rtShadowPassDescSet,  "View.RtShadowPass");
         allocCycled(m_Restir.GetSetLayout(),             vr.restirDescSet,        "View.Restir");
         allocCycled(m_RestirGi.GetSetLayout(),           vr.restirGiDescSet,      "View.RestirGi");
@@ -258,7 +262,6 @@ namespace Luth
 
         m_PostProcess.WriteView(vr, targets);
         m_PostProcess.WriteBloomView(vr);
-        m_PostProcess.WriteTaaResolveView(vr, targets);
         m_EditorOverlays.WriteOutlineView(vr, targets);
         m_EditorOverlays.WriteGridView(vr, targets);
         m_Lighting.WriteShadowView(vr);
@@ -319,12 +322,6 @@ namespace Luth
                 VK_IMAGE_USAGE_STORAGE_BIT);
         }
 
-        // TAA history (Karis14 YCoCg-clip recipe): viewport-sized RGBA16F HDR. Persistent across
-        // frames; ping-pong via frameAbs parity. SAMPLED for the resolve's history read; COLOR
-        // attachment for the resolve's write. Invalid history is rejected explicitly by
-        // the resolve shader before sampling, independently of camera motion.
-        vr.taaHistoryA = Texture::Create(fullW, fullH, TextureFormat::RGBA16F);
-        vr.taaHistoryB = Texture::Create(fullW, fullH, TextureFormat::RGBA16F);
 
 
         // RT sun-shadow mask: viewport-sized R8 storage. Written by rt_sun_shadows.comp on
@@ -582,8 +579,7 @@ namespace Luth
         for (auto& mip : vr.bloomMip) mip.reset();
         vr.fog.reset();
         vr.transparency.reset();
-        vr.taaHistoryA.reset();
-        vr.taaHistoryB.reset();
+        vr.taa.reset();
         vr.sunShadowMask.reset();
         vr.restirDI.reset();
         vr.restirDISpec.reset();

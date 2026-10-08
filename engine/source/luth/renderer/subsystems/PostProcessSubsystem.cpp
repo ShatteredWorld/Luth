@@ -157,7 +157,7 @@ namespace Luth
         // TAA Resolve descriptor set layout (Karis14 YCoCg-clip recipe).
         //   0 = sceneColor (sampler2D, current HDR after volumetric composite)
         //   1 = motion vectors (sampler2D, RG16F NDC delta from SlimGBufferPass)
-        //   2 = history-prev (sampler2D, cycled UAB; parity-picked taaHistoryA/B each frame)
+        //   2 = history-prev (sampler2D, cycled UAB; parity-picked taa->historyA/B each frame)
         //   3 = sceneDepth (sampler2D, for closest-depth velocity dilation in resolve)
         //   4 = PP UBO (shared with bloom/composite sets; rewritten per render-stage)
         // All bindings UAB so binding 2's per-frame parity-rewrite is race-safe.
@@ -283,6 +283,7 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         VkDevice device = VulkanContext::Get().GetDevice();
+        m_TaaStates.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_TaaResolvePipeline.reset();
         m_SlimVizPipeline.reset();
         m_PostProcessPipeline.reset();
@@ -785,13 +786,13 @@ namespace Luth
         return outputHandle;
     }
 
-    void PostProcessSubsystem::WriteTaaResolveView(ViewResources& vr, FrameTargets& targets)
+    void PostProcessSubsystem::WriteTaaResolveView(TaaViewState& state, FrameTargets& targets)
     {
         LH_PROFILE_FUNCTION();
         // Bindings 0/1/3 are stable per-view-resize; write once across all cycled slots.
         // Binding 2 (history-prev sampler) cycles per-frame in WriteTaaResolvePerFrame.
         // Binding 4 (UBO) is declared in the layout but unused by the current shader.
-        if (vr.taaResolveDescSet[0] == VK_NULL_HANDLE) return;
+        if (state.resolveSets[0] == VK_NULL_HANDLE) return;
 
         auto sceneTex  = std::static_pointer_cast<VKTexture>(targets.GetSceneColor());
         auto motionTex = std::static_pointer_cast<VKTexture>(targets.GetSlimMotion());
@@ -825,9 +826,9 @@ namespace Luth
         };
         for (u32 s = 0; s < MAX_FRAMES_IN_FLIGHT; ++s)
         {
-            addImg(vr.taaResolveDescSet[s], 0, &sceneInfo);
-            addImg(vr.taaResolveDescSet[s], 1, &motionInfo);
-            addImg(vr.taaResolveDescSet[s], 3, &depthInfo);
+            addImg(state.resolveSets[s], 0, &sceneInfo);
+            addImg(state.resolveSets[s], 1, &motionInfo);
+            addImg(state.resolveSets[s], 3, &depthInfo);
         }
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), idx, writes, 0, nullptr);
     }
@@ -843,7 +844,7 @@ namespace Luth
         // Path-traced reference mode takes priority: bloom + composite sample the PT display image
         // (ptColor), the megakernel's HDR output, in place of the raster sceneColor / TAA.
         const bool ptOn  = m_Pipeline->GetSystem().GetRenderMode() == RenderMode::PathTrace && vr.ptColor;
-        const bool taaOn = !ptOn && pps.taaEnabled && vr.taaHistoryA && vr.taaHistoryB;
+        const bool taaOn = !ptOn && pps.taaEnabled && vr.taa && vr.taa->historyA && vr.taa->historyB;
 
         VkImageView srcView = VK_NULL_HANDLE;
         if (ptOn)
@@ -852,11 +853,11 @@ namespace Luth
         }
         else if (taaOn)
         {
-            // Parity rule matches AddTaaResolvePass: parity=0 writes taaHistoryA, =1 writes B.
+            // Parity rule matches AddTaaResolvePass: parity=0 writes taa->historyA, =1 writes B.
             // Bloom + grid + composite all read the same VkImage; RG inserts barriers so bloom
             // sees the pre-grid version and composite sees the post-grid version.
             const bool parity = (frameAbs & 1u) != 0u;
-            auto historyCurr = parity ? vr.taaHistoryB : vr.taaHistoryA;
+            auto historyCurr = parity ? vr.taa->historyB : vr.taa->historyA;
             srcView = std::static_pointer_cast<VKTexture>(historyCurr)->GetImageView();
         }
         else
@@ -893,12 +894,12 @@ namespace Luth
         // Binding 2 = history-prev sampler. Parity-pick: even frame reads HistA + writes HistB;
         // odd frame reads HistB + writes HistA. The write target is bound as a color attachment
         // via the RG (not in this descriptor set), so we only rebind the READ side here.
-        if (!vr.taaHistoryA || !vr.taaHistoryB) return;
+        if (!vr.taa || !vr.taa->historyA || !vr.taa->historyB) return;
         const u32 slot = frameAbs % MAX_FRAMES_IN_FLIGHT;
-        if (vr.taaResolveDescSet[slot] == VK_NULL_HANDLE) return;
+        if (vr.taa->resolveSets[slot] == VK_NULL_HANDLE) return;
 
         const bool parity = (frameAbs & 1u) != 0u;
-        auto vkPrev = std::static_pointer_cast<VKTexture>(parity ? vr.taaHistoryA : vr.taaHistoryB);
+        auto vkPrev = std::static_pointer_cast<VKTexture>(parity ? vr.taa->historyA : vr.taa->historyB);
 
         VkDescriptorImageInfo prevInfo{};
         prevInfo.sampler     = m_Sampler;
@@ -906,7 +907,7 @@ namespace Luth
         prevInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        write.dstSet          = vr.taaResolveDescSet[slot];
+        write.dstSet          = vr.taa->resolveSets[slot];
         write.dstBinding      = 2;
         write.descriptorCount = 1;
         write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -920,14 +921,14 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-        if (!m_TaaResolvePipeline || !vr || !vr->taaHistoryA || !vr->taaHistoryB)
+        if (!m_TaaResolvePipeline || !vr || !vr->taa || !vr->taa->historyA || !vr->taa->historyB)
             return sceneColor;
-        vr->taaRecorded = true;
+        vr->taa->recorded = true;
 
         const u64 frameAbs = Renderer::GetFrameData()->GetRenderFrameIndex();
         const bool parity  = (frameAbs & 1u) != 0u;
         // Output target: opposite of what WriteTaaResolvePerFrame picked as "prev".
-        auto historyCurrTex = parity ? vr->taaHistoryB : vr->taaHistoryA;
+        auto historyCurrTex = parity ? vr->taa->historyB : vr->taa->historyA;
         auto historyCurrVk  = std::static_pointer_cast<VKTexture>(historyCurrTex);
         const u32 w = historyCurrTex->GetWidth();
         const u32 h = historyCurrTex->GetHeight();
@@ -963,7 +964,7 @@ namespace Luth
             {
                 auto& sys = m_Pipeline->GetSystem();
                 ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                if (!vr) return;
+                if (!vr || !vr->taa) return;
 
                 sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "TaaResolve", "TaaCurrent", false,
                     { "taa_resolve", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, false });
@@ -972,7 +973,7 @@ namespace Luth
                 VkCommandBuffer cmd = ctx.commandBuffer;
                 m_TaaResolvePipeline->Bind(cmd);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_TaaResolvePipeline->GetLayout(), 0, 1, &vr->taaResolveDescSet[slot], 0, nullptr);
+                    m_TaaResolvePipeline->GetLayout(), 0, 1, &vr->taa->resolveSets[slot], 0, nullptr);
 
                 // Motion carries pure scene displacement (source-side de-jitter in slim_gbuffer.slang);
                 // skyReproj covers depth == 1, where nothing rasterized a motion vector.
@@ -980,7 +981,7 @@ namespace Luth
                 pc.skyReproj     = m_Pipeline->GetGlobal().GetCachedSkyReproj();
                 // Negative alpha is an ABI-compatible bootstrap sentinel: skip history
                 // after resize, re-enable or a visibility gap.
-                pc.temporalAlpha = vr->taaHistory.CanReuse(Renderer::GetFrameData()->GetRenderFrameIndex(), vr->generation)
+                pc.temporalAlpha = vr->taa->history.CanReuse(Renderer::GetFrameData()->GetRenderFrameIndex(), vr->generation)
                     ? sys.GetPostProcessSettings().taaTemporalAlpha : -1.0f;
                 vkCmdPushConstants(cmd, m_TaaResolvePipeline->GetLayout(),
                     VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
