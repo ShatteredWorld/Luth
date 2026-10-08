@@ -159,7 +159,11 @@ namespace Luth
                 if (auto rs = SystemRegistry::GetSystem<RenderingSystem>())
                 {
                     const auto& snap = rs->GetGraphSnapshot();
-                    m_GPUFrameTimeMs = snap.totalGpuTimeMs;
+                    m_GPUFrameTimeMs = snap.profilingAvailable ? snap.totalGpuTimeMs : -1.0f;
+                    if (!snap.profilingAvailable || m_ProfileViewId != snap.profileViewId
+                        || m_ProfileTopologyGeneration != snap.profileTopologyGeneration) m_PassEma.clear();
+                    m_ProfileViewId = snap.profileViewId;
+                    m_ProfileTopologyGeneration = snap.profileTopologyGeneration;
                     m_TriangleCount  = rs->GetTriangleCount();
                     u32 draws = 0;
                     for (const auto& p : snap.passes) if (!p.culled) draws += p.drawCalls;
@@ -218,7 +222,8 @@ namespace Luth
 
         // CPU/GPU-bound badge derived from the two frame times.
         const char* bound; ImU32 bbg, bfg;
-        if (m_GPUFrameTimeMs > m_FrameTime * 1.15f)      { bound = "GPU-bound"; bbg = IM_COL32(80, 60, 30, 255);  bfg = IM_COL32(240, 190, 110, 255); }
+        if (m_GPUFrameTimeMs < 0) { bound = "GPU unavailable"; bbg = IM_COL32(55, 55, 55, 255); bfg = IM_COL32(180, 180, 180, 255); }
+        else if (m_GPUFrameTimeMs > m_FrameTime * 1.15f)      { bound = "GPU-bound"; bbg = IM_COL32(80, 60, 30, 255);  bfg = IM_COL32(240, 190, 110, 255); }
         else if (m_FrameTime > m_GPUFrameTimeMs * 1.15f) { bound = "CPU-bound"; bbg = IM_COL32(30, 55, 80, 255);  bfg = IM_COL32(120, 180, 240, 255); }
         else                                             { bound = "balanced "; bbg = IM_COL32(55, 55, 55, 255);  bfg = IM_COL32(180, 180, 180, 255); }
 
@@ -242,9 +247,10 @@ namespace Luth
         const float barW = std::max(40.0f, ImGui::GetContentRegionAvail().x - lblW - valW);
         char cpuBuf[24], gpuBuf[24];
         snprintf(cpuBuf, sizeof(cpuBuf), "%.1f ms", m_FrameTime);
-        snprintf(gpuBuf, sizeof(gpuBuf), "%.1f ms", m_GPUFrameTimeMs);
+        if (m_GPUFrameTimeMs < 0) snprintf(gpuBuf, sizeof(gpuBuf), "N/A");
+        else snprintf(gpuBuf, sizeof(gpuBuf), "%.1f ms", m_GPUFrameTimeMs);
         UI::StatBar("CPU", m_FrameTime / scale,      FrameColorU32(m_FrameTime, m_FrameBudgetMs),     cpuBuf, lblW, tick, barW, valW);
-        UI::StatBar("GPU", m_GPUFrameTimeMs / scale, FrameColorU32(m_GPUFrameTimeMs, m_FrameBudgetMs), gpuBuf, lblW, tick, barW, valW);
+        UI::StatBar("GPU", std::max(0.0f, m_GPUFrameTimeMs) / scale, FrameColorU32(m_GPUFrameTimeMs, m_FrameBudgetMs), gpuBuf, lblW, tick, barW, valW);
 
         ImGui::PlotLines("##FrameTimes", m_FrameTimeHistory.data(), (int)m_FrameTimeHistory.size(),
             0, nullptr, 0.0f, m_FrameBudgetMs * 2.0f, ImVec2(ImGui::GetContentRegionAvail().x, 38));
@@ -474,13 +480,19 @@ namespace Luth
         auto rs = SystemRegistry::GetSystem<RenderingSystem>();
 
         char m0[20], m1[20];
-        snprintf(m0, sizeof(m0), "%.1f ms", m_GPUFrameTimeMs);
+        if (m_GPUFrameTimeMs < 0) snprintf(m0, sizeof(m0), "Unavailable");
+        else snprintf(m0, sizeof(m0), "%.1f ms", m_GPUFrameTimeMs);
         snprintf(m1, sizeof(m1), "%s", FormatCount(m_TriangleCount).c_str());
         char m2[16]; snprintf(m2, sizeof(m2), "%u", m_DrawCalls);
         int passCount = rs ? (int)rs->GetGraphSnapshot().passes.size() : 0;
         char m3[16]; snprintf(m3, sizeof(m3), "%d", passCount);
         const float gap = 10.0f, cardW = std::floor((ImGui::GetContentRegionAvail().x - gap * 3.0f - 2.0f) / 4.0f);
-        UI::MetricCard("GPU time", m0, cardW);  ImGui::SameLine(0, gap);
+        UI::MetricCard("GPU time", m0, cardW);
+        if (rs && rs->GetGraphSnapshot().profilingAvailable && ImGui::IsItemHovered())
+            ImGui::SetTooltip("View %llu, render frame %llu",
+                (unsigned long long)rs->GetGraphSnapshot().profileViewId,
+                (unsigned long long)rs->GetGraphSnapshot().profileRenderFrameIndex);
+        ImGui::SameLine(0, gap);
         UI::MetricCard("triangles", m1, cardW); ImGui::SameLine(0, gap);
         UI::MetricCard("draw calls", m2, cardW);ImGui::SameLine(0, gap);
         UI::MetricCard("passes", m3, cardW);

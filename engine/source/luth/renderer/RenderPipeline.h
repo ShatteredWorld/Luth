@@ -12,7 +12,6 @@
 #include "luth/renderer/backend/vulkan/VulkanPipeline.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 #include "luth/renderer/backend/vulkan/VulkanBuffer.h"
-#include "luth/renderer/backend/vulkan/GPUTimerPool.h"
 #include "luth/renderer/pipeline/PipelineManager.h"
 #include "luth/renderer/resources/Texture.h"
 #include "luth/renderer/shader/ShaderWatcher.h"
@@ -521,7 +520,6 @@ namespace Luth
     private:
         // ---- GPU timers + named-texture registry ----
 
-        GPUTimerPool            m_GPUTimers;
         std::unordered_map<std::string, std::shared_ptr<Texture>> m_NamedTextures;
 
         // ---- Shader hot-reload (engine + project dirs) ----

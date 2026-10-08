@@ -8,6 +8,7 @@
 #include "luth/renderer/debug/FrameDebuggerContext.h"
 #include "luth/renderer/debug/CaptureFinalization.h"
 #include "luth/renderer/debug/GraphInstrumentation.h"
+#include "luth/renderer/debug/ViewGpuProfiler.h"
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
 #include "luth/renderer/backend/vulkan/VulkanBackend.h"
 #include "luth/assets/FileSystem.h"
@@ -25,6 +26,7 @@ namespace Luth
         m_FrameAllocator = std::make_unique<Memory::LinearAllocator>(1 * Memory::MB);
         m_Pipeline       = std::make_unique<RenderPipeline>(*this);
         m_Pipeline->Initialize(viewportWidth, viewportHeight);
+        m_GpuProfiler = std::make_unique<ViewGpuProfiler>();
         m_CaptureContext = std::make_unique<FrameDebuggerContext>(*this, m_Pipeline->GetGeometry(),
             m_Pipeline->GetLighting(), m_Pipeline->GetPostProcess(), m_Pipeline->GetEditorOverlays());
     }
@@ -35,6 +37,7 @@ namespace Luth
         // after completion, while those dependencies and the Vulkan device are alive.
         m_Pipeline->GetShaderWatcher().Stop();
         Renderer::WaitForGPU();
+        m_GpuProfiler->Shutdown();
         m_CaptureContext->Shutdown();
         m_FrameDebugger.Shutdown(VulkanContext::Get().GetDevice());
         m_CaptureContext.reset();
@@ -72,6 +75,17 @@ namespace Luth
         return m_GraphSnapshot;
     }
 
+    GPUTimerPool* RenderingSystem::PrepareViewProfiling(RenderViewId id, u64 generation, u64 frame,
+        const RG::RenderGraph& graph, RG::RenderGraphSnapshot& snapshot, bool applyPrevious)
+    {
+        m_Profiling.Prepare(id, generation, frame, graph);
+        return m_GpuProfiler->Prepare(*m_Profiling.Find(id), snapshot, applyPrevious);
+    }
+
+    void RenderingSystem::SubmitViewProfiling(RenderViewId id, u64 frame, SubmissionCompletionToken token)
+    {
+        if (m_Profiling.Submit(id, frame, token)) m_GpuProfiler->Submit(id, frame, token);
+    }
     void RenderingSystem::BeginViewCapture(const RenderView& view)
     {
         if (!view.captureRequested || m_FrameDebugger.state != DebuggerState::CaptureRequested) return;
@@ -272,7 +286,7 @@ namespace Luth
         {
             QueueRecorders r = Renderer::BeginPrimaryCmd(frameIndex, viewSlot);
             const bool hasCompute = RecordView(v, r);
-            m_Profiling.Submit(v.id, Renderer::GetFrameData()->GetRenderFrameIndex(), Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/false));
+            SubmitViewProfiling(v.id, Renderer::GetFrameData()->GetRenderFrameIndex(), Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/false));
             if (auto* state = m_Pipeline->GetViewResources(v.targets))
             {
                 state->cameraHistory.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
@@ -286,7 +300,7 @@ namespace Luth
 
         QueueRecorders r = Renderer::BeginPrimaryCmd(frameIndex, viewSlot);
         const bool hasCompute = RecordView(sceneView, r);
-        m_Profiling.Submit(sceneView.id, Renderer::GetFrameData()->GetRenderFrameIndex(), Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/true));
+        SubmitViewProfiling(sceneView.id, Renderer::GetFrameData()->GetRenderFrameIndex(), Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/true));
         if (auto* state = m_Pipeline->GetViewResources(sceneView.targets))
         {
             state->cameraHistory.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
@@ -372,6 +386,7 @@ namespace Luth
         auto* targets = static_cast<FrameTargets*>(const_cast<void*>(registered->targets));
         m_Pipeline->ReleaseViewResources(*targets);
         std::erase_if(m_QueuedViews, [id](const RenderView& view) { return view.id == id; });
+        m_GpuProfiler->Release(id);
         m_Profiling.Release(id);
         m_Views.Release(id);
     }

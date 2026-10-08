@@ -382,7 +382,6 @@ namespace Luth
         // Queues background-thread detections for main-thread Poll at the top of Execute.
         m_ShaderWatcher.Start(FileSystem::EngineAssetsPath("shaders"));
 
-        m_GPUTimers.Init(256);   // headroom over the current ~70-pass RT graph; see ReadResults overflow warn
         RegisterNamedTextures();
     }
 
@@ -393,7 +392,6 @@ namespace Luth
 
         m_ShaderWatcher.Stop();
         ShaderLibrary::SetReloadCallback(nullptr);
-        m_GPUTimers.Shutdown();
 
         BoneMatrixBuffer::Shutdown();
 
@@ -1270,45 +1268,8 @@ namespace Luth
 
         // Capture render graph snapshot for Frame Debugger panel
         auto& graphSnapshot = m_System.CaptureGraphSnapshot(rg);
-        m_System.PrepareViewProfiling(view.id, m_CurrentViewResources->generation,
-            Renderer::GetFrameData()->GetRenderFrameIndex(), rg);
-
-        // Read GPU timing + pipeline stats from completed frames and fill snapshot. ReadStats must run
-        // BEFORE ReadResults; they share the frame counter that ReadResults advances.
-        std::vector<float> gpuTimes;
-        std::vector<RG::GpuPipelineStats> gpuStats;
-        u32 nonCulledCount = 0;
-        for (auto& p : graphSnapshot.passes)
-            if (!p.culled) nonCulledCount++;
-
-        m_GPUTimers.ReadStats(nonCulledCount, gpuStats);
-        m_GPUTimers.ReadResults(nonCulledCount, gpuTimes);
-        float totalMs = 0.0f;
-        RG::GpuPipelineStats total{};
-        u32 timerIdx = 0;
-        for (auto& p : graphSnapshot.passes)
-        {
-            if (p.culled) continue;
-            if (timerIdx < (u32)gpuTimes.size())
-            {
-                p.gpuTimeMs = gpuTimes[timerIdx];
-                if (gpuTimes[timerIdx] > 0.0f) totalMs += gpuTimes[timerIdx];
-            }
-            if (timerIdx < (u32)gpuStats.size() && gpuStats[timerIdx].valid)
-            {
-                p.stats = gpuStats[timerIdx];
-                total.inputVertices   += p.stats.inputVertices;
-                total.inputPrimitives += p.stats.inputPrimitives;
-                total.vsInvocations   += p.stats.vsInvocations;
-                total.clipInvocations += p.stats.clipInvocations;
-                total.clipPrimitives  += p.stats.clipPrimitives;
-                total.fsInvocations   += p.stats.fsInvocations;
-                total.valid = true;
-            }
-            timerIdx++;
-        }
-        graphSnapshot.totalGpuTimeMs = totalMs;
-        graphSnapshot.totalStats = total;
+        auto* timers = m_System.PrepareViewProfiling(view.id, m_CurrentViewResources->generation,
+            Renderer::GetFrameData()->GetRenderFrameIndex(), rg, graphSnapshot, !view.captureRequested);
 
         m_System.BeginViewCapture(view);
 
@@ -1318,7 +1279,7 @@ namespace Luth
             CaptureRecordingSession recording(m_System.GetFrameDebugger(), rg, view.id,
                 m_CurrentViewResources ? m_CurrentViewResources->generation : 0, view.captureRequested);
             recordedSource = recording.Source();
-            hasComputeWork = Renderer::RecordGraph(recorders, rg, &m_GPUTimers);
+            hasComputeWork = Renderer::RecordGraph(recorders, rg, timers);
         }
         // Non-primary views: transition LDR -> SHADER_READ so the scene view's ImGui pass can sample it (scene
         // view's RG already does this via ImGuiPass's builder.Read(sceneColor)).

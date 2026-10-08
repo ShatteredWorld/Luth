@@ -33,6 +33,7 @@
 
 namespace Luth
 {
+    class GPUTimerPool;
     class Texture;
     class FrameDebuggerContext;
     struct CaptureFinalizationInputs;
@@ -311,8 +312,9 @@ namespace Luth
         void BeginViewCapture(const RenderView& view);
         bool FinalizeViewCapture(const CaptureFinalizationInputs&, const RG::RenderGraphSnapshot&);
         RG::RenderGraphSnapshot& CaptureGraphSnapshot(const RG::RenderGraph&);
-        void PrepareViewProfiling(RenderViewId id, u64 generation, u64 renderFrame, const RG::RenderGraph& graph)
-        { m_Profiling.Prepare(id, generation, renderFrame, graph); }
+        GPUTimerPool* PrepareViewProfiling(RenderViewId, u64 generation, u64 renderFrame,
+            const RG::RenderGraph&, RG::RenderGraphSnapshot&, bool applyPrevious);
+        void SubmitViewProfiling(RenderViewId, u64 renderFrame, SubmissionCompletionToken);
         const ProfileSubmissionProvenance* GetViewProfiling(RenderViewId id) const { return m_Profiling.Find(id); }
         void ResetPreviewCacheKeys();
         DebuggerState GetDebuggerState() const { return m_FrameDebugger.state; }
@@ -375,6 +377,7 @@ namespace Luth
         std::unique_ptr<FrameDebuggerContext> m_CaptureContext;
         RG::RenderGraphSnapshot m_GraphSnapshot;
         ProfilingProvenance m_Profiling;
+        std::unique_ptr<class ViewGpuProfiler> m_GpuProfiler;
 
         // Editor-facing state.
         PostProcessSettings  m_PostProcessSettings;

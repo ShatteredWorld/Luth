@@ -44,7 +44,7 @@ namespace Luth
             }
         }
 
-        m_FrameCounter = 0;
+        m_RecordingSlot = 0;
         m_Initialized = true;
         LH_LOG(Renderer, info, "GPUTimerPool initialized: {} max passes, {:.2f} ns/tick", maxPasses, m_TimestampPeriod);
     }
@@ -74,7 +74,7 @@ namespace Luth
     {
         if (!m_Initialized) return;
 
-        u32 poolIndex = (u32)(m_FrameCounter % MAX_FRAMES_IN_FLIGHT);
+        u32 poolIndex = m_RecordingSlot;
         vkCmdResetQueryPool(cmd, m_Pools[poolIndex], 0, m_MaxPasses * 2);
         if (m_StatsSupported)
             vkCmdResetQueryPool(cmd, m_StatsPools[poolIndex], 0, m_MaxPasses);
@@ -85,7 +85,7 @@ namespace Luth
         if (!m_Initialized) return;
         if (passIndex >= m_MaxPasses) return;
 
-        u32 poolIndex  = (u32)(m_FrameCounter % MAX_FRAMES_IN_FLIGHT);
+        u32 poolIndex  = m_RecordingSlot;
         u32 queryIndex = passIndex * 2 + (isBegin ? 0 : 1);
 
         VkPipelineStageFlagBits2 stage = isBegin
@@ -95,95 +95,45 @@ namespace Luth
         vkCmdWriteTimestamp2(cmd, stage, m_Pools[poolIndex], queryIndex);
     }
 
-    void GPUTimerPool::ReadResults(u32 passCount, std::vector<float>& outTimesMs)
+    void GPUTimerPool::ReadResults(u32 slot, u32 passCount, std::vector<float>& outTimesMs)
     {
-        outTimesMs.clear();
-
-        if (!m_Initialized || m_FrameCounter < MAX_FRAMES_IN_FLIGHT)
+        outTimesMs.assign(passCount, -1.0f);
+        if (!m_Initialized || slot >= MAX_FRAMES_IN_FLIGHT || !passCount || passCount > m_MaxPasses) return;
+        const u32 queryCount = passCount * 2;
+        // Availability is checked even after completion; query errors remain explicitly unavailable.
+        std::vector<u64> raw(queryCount * 2);
+        const VkResult result = vkGetQueryPoolResults(VulkanContext::Get().GetDevice(), m_Pools[slot],
+            0, queryCount, raw.size() * sizeof(u64), raw.data(), 2 * sizeof(u64),
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if (result != VK_SUCCESS && result != VK_NOT_READY) return;
+        for (u32 i = 0; i < passCount; ++i)
         {
-            // Not enough frames have elapsed to have completed results
-            outTimesMs.resize(passCount, -1.0f);
-            m_FrameCounter++;
-            return;
+            if (!raw[i * 4 + 1] || !raw[i * 4 + 3]) continue;
+            outTimesMs[i] = static_cast<float>((raw[i * 4 + 2] - raw[i * 4]) * (double)m_TimestampPeriod / 1e6);
         }
-
-        // Read from the pool that was used 2 frames ago (GPU N-2 guaranteed complete)
-        u32 readPoolIndex = (u32)((m_FrameCounter - 2) % MAX_FRAMES_IN_FLIGHT);
-        u32 queryCount = passCount * 2;
-
-        if (queryCount == 0 || passCount > m_MaxPasses)
-        {
-            if (passCount > m_MaxPasses)
-            {
-                static bool warned = false;
-                if (!warned)
-                {
-                    LH_LOG(Renderer, warn, "GPUTimerPool: pass count {} exceeds maxPasses {} - raise GPUTimerPool::Init(). "
-                                 "GPU per-pass timing + pipeline stats are off until then.", passCount, m_MaxPasses);
-                    warned = true;
-                }
-            }
-            outTimesMs.resize(passCount, -1.0f);
-            m_FrameCounter++;
-            return;
-        }
-
-        std::vector<u64> timestamps(queryCount);
-        VkResult result = vkGetQueryPoolResults(
-            VulkanContext::Get().GetDevice(),
-            m_Pools[readPoolIndex],
-            0, queryCount,
-            queryCount * sizeof(u64),
-            timestamps.data(),
-            sizeof(u64),
-            VK_QUERY_RESULT_64_BIT
-        );
-
-        outTimesMs.resize(passCount);
-        if (result == VK_SUCCESS)
-        {
-            for (u32 i = 0; i < passCount; i++)
-            {
-                u64 begin = timestamps[i * 2];
-                u64 end   = timestamps[i * 2 + 1];
-                // Convert ticks to milliseconds: ticks * ns_per_tick / 1e6
-                outTimesMs[i] = static_cast<float>((end - begin) * (double)m_TimestampPeriod / 1e6);
-            }
-        }
-        else
-        {
-            // Results not ready or error: fill with -1
-            for (u32 i = 0; i < passCount; i++)
-                outTimesMs[i] = -1.0f;
-        }
-
-        m_FrameCounter++;
     }
-
     void GPUTimerPool::BeginStats(VkCommandBuffer cmd, u32 passIndex)
     {
         if (!m_StatsSupported || passIndex >= m_MaxPasses) return;
-        u32 slot = (u32)(m_FrameCounter % MAX_FRAMES_IN_FLIGHT);
+        u32 slot = m_RecordingSlot;
         vkCmdBeginQuery(cmd, m_StatsPools[slot], passIndex, 0);
     }
 
     void GPUTimerPool::EndStats(VkCommandBuffer cmd, u32 passIndex)
     {
         if (!m_StatsSupported || passIndex >= m_MaxPasses) return;
-        u32 slot = (u32)(m_FrameCounter % MAX_FRAMES_IN_FLIGHT);
+        u32 slot = m_RecordingSlot;
         vkCmdEndQuery(cmd, m_StatsPools[slot], passIndex);
     }
 
-    // Reads the N-2 slot using the current frame counter; caller MUST invoke this before ReadResults,
-    // which owns the counter increment. Per-query availability flags compute passes / disabled frames.
-    void GPUTimerPool::ReadStats(u32 passCount, std::vector<RG::GpuPipelineStats>& out)
+    // Reads a completed slot using frozen recording metadata.
+    // Per-query availability flags compute passes / disabled frames.
+    void GPUTimerPool::ReadStats(u32 readSlot, u32 passCount, bool recorded, std::vector<RG::GpuPipelineStats>& out)
     {
         out.assign(passCount, {});
-        if (!m_StatsSupported || !StatsEnabled()) return;
-        if (m_FrameCounter < MAX_FRAMES_IN_FLIGHT)  return;
+        if (!m_StatsSupported || !recorded || readSlot >= MAX_FRAMES_IN_FLIGHT) return;
         if (passCount == 0 || passCount > m_MaxPasses) return;
 
-        u32 readSlot = (u32)((m_FrameCounter - 2) % MAX_FRAMES_IN_FLIGHT);
         const u32 stride = k_StatsValues + 1;  // + availability word
         std::vector<u64> raw(passCount * stride);
         VkResult result = vkGetQueryPoolResults(

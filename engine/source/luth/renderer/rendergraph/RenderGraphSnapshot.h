@@ -94,6 +94,8 @@ namespace Luth::RG
         std::vector<PassSnapshot>     passes;
         std::vector<ResourceSnapshot> resources;
         float totalGpuTimeMs = 0.0f;
+        bool profilingAvailable = false;
+        u64 profileViewId = 0, profileRenderFrameIndex = 0, profileTopologyGeneration = 0;
         GpuPipelineStats totalStats;   // summed over graphics passes (valid when stats capture is on)
 
         // Solved barriers (populated when barrier capture is on; empty otherwise)

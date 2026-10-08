@@ -1060,7 +1060,7 @@ namespace Luth::RG
 
                 // Pipeline-stats query (graphics only) brackets the render pass from OUTSIDE it, spanning
                 // the secondary via inheritedQueries. Gated by the runtime toggle; off costs nothing.
-                const bool doStats = timers && timers->StatsSupported() && GPUTimerPool::StatsEnabled();
+                const bool doStats = timers && timers->StatsSupported() && timers->RecordingStatsEnabled();
                 if (doStats) timers->BeginStats(primaryCmd, timerPassIdx);
 
                 DynamicRendering::BeginRendering(primaryCmd, rpInfo);
