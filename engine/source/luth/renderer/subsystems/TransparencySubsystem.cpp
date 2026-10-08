@@ -193,6 +193,7 @@ namespace Luth
     void TransparencySubsystem::Shutdown()
     {
         LH_PROFILE_FUNCTION();
+        m_ViewStates.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_SortedPm.Shutdown();
         m_SortedSkinnedPm.Shutdown();
         m_OitPm.Shutdown();
@@ -265,11 +266,11 @@ namespace Luth
         return false;
     }
 
-    void TransparencySubsystem::WritePerFrame(ViewResources& vr, u32 frameAbs)
+    void TransparencySubsystem::WritePerFrame(TransparencyViewState& vr, const std::shared_ptr<FogViewState>& fog, VkSampler fogSampler, u32 frameAbs)
     {
         LH_PROFILE_FUNCTION();
         if (m_TransparentSetLayout == VK_NULL_HANDLE) return;
-        if (!vr.fog || !vr.fog->volInScatterHistA || !vr.fog->volInScatterHistB) return;
+        if (!fog || !fog->volInScatterHistA || !fog->volInScatterHistB) return;
 
         const u32  slot   = frameAbs % MAX_FRAMES_IN_FLIGHT;
         const bool parity = (frameAbs & 1u) != 0u;
@@ -277,12 +278,12 @@ namespace Luth
 
         // Same parity rule as the volumetric composite's b1: sample this frame's resolved atlas.
         auto vkScat = std::static_pointer_cast<VKTexture>(
-            parity ? vr.fog->volInScatterHistA : vr.fog->volInScatterHistB);
+            parity ? fog->volInScatterHistA : fog->volInScatterHistB);
 
         VkDescriptorImageInfo scatInfo{};
         scatInfo.imageView   = vkScat->GetImageView();
         scatInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        scatInfo.sampler     = m_Pipeline->GetVolumetric().GetSampler();
+        scatInfo.sampler     = fogSampler;
 
         VkDescriptorImageInfo backdropInfo{};
         VkWriteDescriptorSet  writes[2]{};
@@ -312,9 +313,10 @@ namespace Luth
             ++count;
         }
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), count, writes, 0, nullptr);
+        vr.fogBindings[slot] = fog;
     }
 
-    void TransparencySubsystem::WriteOitView(ViewResources& vr)
+    void TransparencySubsystem::WriteOitView(TransparencyViewState& vr)
     {
         LH_PROFILE_FUNCTION();
         if (m_TransparentSetLayout == VK_NULL_HANDLE) return;
@@ -399,10 +401,10 @@ namespace Luth
         LH_PROFILE_FUNCTION();
         auto& sys = m_Pipeline->GetSystem();
         ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-        if (!vr || !vr->oitHeads || vr->oitNodes.buffer == VK_NULL_HANDLE || !m_ResolvePipeline)
+        if (!vr || !vr->transparency || !vr->transparency->oitHeads || vr->transparency->oitNodes.buffer == VK_NULL_HANDLE || !m_ResolvePipeline)
             return AddSortedPass(rg, sceneColor, entityID, sceneDepth, fogResolved, refractionBackdrop, indirectBufferHandle);
 
-        auto vkHeads = std::static_pointer_cast<VKTexture>(vr->oitHeads);
+        auto vkHeads = std::static_pointer_cast<VKTexture>(vr->transparency->oitHeads);
 
         // Import in the end-of-frame state (GENERAL + fragment read) so the clear's barrier orders
         // after LAST frame's resolve reads; an Undefined import would carry srcStage TOP and let
@@ -418,11 +420,11 @@ namespace Luth
 
         RG::BufferDesc nodesDesc;
         nodesDesc.name = "OITNodes";
-        nodesDesc.size = vr->oitNodes.size;
+        nodesDesc.size = vr->transparency->oitNodes.size;
         RG::BufferHandle nodesHandle = rg.ImportBuffer(nodesDesc,
-            (void*)vr->oitNodes.buffer, RG::ResourceState::FragmentStorageRead);
+            (void*)vr->transparency->oitNodes.buffer, RG::ResourceState::FragmentStorageRead);
 
-        const u32 nodeCapacity = static_cast<u32>((vr->oitNodes.size - 16ull) / 16ull);
+        const u32 nodeCapacity = static_cast<u32>((vr->transparency->oitNodes.size - 16ull) / 16ull);
 
         // OITClear: heads -> OIT_EMPTY, node-count header -> 0 (node payloads stay stale; the
         // cleared heads make them unreachable). Transfer ops on the graphics primary.
@@ -440,13 +442,13 @@ namespace Luth
             [this](ClearData&, RG::RenderPassContext& ctx)
             {
                 ViewResources* view = m_Pipeline->GetCurrentViewResources();
-                auto heads = std::static_pointer_cast<VKTexture>(view->oitHeads);
+                auto heads = std::static_pointer_cast<VKTexture>(view->transparency->oitHeads);
                 VkClearColorValue clearVal{};
                 clearVal.uint32[0] = 0xFFFFFFFFu;
                 VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
                 vkCmdClearColorImage(ctx.commandBuffer, heads->GetImage(),
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearVal, 1, &range);
-                vkCmdFillBuffer(ctx.commandBuffer, view->oitNodes.buffer, view->oitNodes.offset, 16, 0u);
+                vkCmdFillBuffer(ctx.commandBuffer, view->transparency->oitNodes.buffer, view->transparency->oitNodes.offset, 16, 0u);
             });
 
         // OITStore: depth-tested transparent draws shade once and push onto the per-pixel list.
@@ -508,7 +510,7 @@ namespace Luth
                     m_Pipeline->GetLighting().GetLightDescSet(slot),
                     BoneMatrixBuffer::GetDescriptorSet(slot),
                     geo.GetObjectSSBODescSet(slot),
-                    m_Pipeline->GetCurrentViewResources()->transparentDescSet[slot],
+                    m_Pipeline->GetCurrentViewResources()->transparency->transparentDescSet[slot],
                 };
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                     pipeline->GetLayout(), 0, 7, sets, 0, nullptr);
@@ -621,7 +623,7 @@ namespace Luth
                 m_ResolvePipeline->Bind(cmd);
                 ViewResources* view = m_Pipeline->GetCurrentViewResources();
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_ResolvePipeline->GetLayout(), 0, 1, &view->oitResolveDescSet, 0, nullptr);
+                    m_ResolvePipeline->GetLayout(), 0, 1, &view->transparency->oitResolveDescSet, 0, nullptr);
                 vkCmdPushConstants(cmd, m_ResolvePipeline->GetLayout(), VK_SHADER_STAGE_FRAGMENT_BIT,
                     0, sizeof(u32), &data.maxK);
 
@@ -732,7 +734,7 @@ namespace Luth
                     m_Pipeline->GetLighting().GetLightDescSet(slot),
                     BoneMatrixBuffer::GetDescriptorSet(slot),
                     geo.GetObjectSSBODescSet(slot),
-                    m_Pipeline->GetCurrentViewResources()->transparentDescSet[slot],
+                    m_Pipeline->GetCurrentViewResources()->transparency->transparentDescSet[slot],
                 };
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                     pipeline->GetLayout(), 0, 7, sets, 0, nullptr);

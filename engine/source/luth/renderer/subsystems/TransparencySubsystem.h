@@ -3,6 +3,7 @@
 #include "luth/core/types/LuthTypes.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/features/RefractionBackdropBindings.h"
+#include "luth/renderer/features/TransparencyViewState.h"
 #include "luth/renderer/pipeline/PipelineManager.h"
 
 #include <memory>
@@ -33,15 +34,17 @@ namespace Luth
         bool OnShaderReloaded(const std::string& name, const std::vector<u32>& spv);
 
         // Set 6 b0 <- parity-picked resolved fog atlas (the volumetric composite's b1 rule).
-        void WritePerFrame(ViewResources& vr, u32 frameAbs);
+        void WritePerFrame(TransparencyViewState&, const std::shared_ptr<FogViewState>&, VkSampler fogSampler, u32 frameAbs);
+        std::shared_ptr<TransparencyViewState> EnsureView(RenderViewId, u32 width, u32 height, u32 layers);
+        void ReleaseView(RenderViewId);
 
         // Set 6 b1/b2 (heads + nodes, all cycled slots) + the resolve set <- the view's OIT
         // resources. Called from AllocateViewResources + on resize/budget reallocation.
-        void WriteOitView(ViewResources& vr);
+        void WriteOitView(TransparencyViewState& vr);
 
         // Reserved Garlic tag range for per-view OIT node pools: disjoint from ReSTIR DI
         // (0xFFFF0000+) and GI (0xFFFF8000+); outside the per-frame FreeTag(N-2) sweep.
-        u32 NextNodePoolTag() { return m_NextNodePoolTag++; }
+        u32 NextNodePoolTag();
 
         // Contributes the transparent pass(es) after the volumetric composite. sceneColor/entityID/
         // sceneDepth are GeometryPass-chain handles (same nodes; never re-imported); fogResolved is
@@ -94,6 +97,7 @@ namespace Luth
         };
         static_assert(sizeof(TransparentPC) == 16, "must match the shader push-constant block");
 
+        TransparencyViewStateStore m_ViewStates;
         RenderPipeline* m_Pipeline = nullptr;
 
         // Set 6 (transparent pass-local): b0 fog atlas sampler3D (UAB, parity rewrite), b1 OIT heads

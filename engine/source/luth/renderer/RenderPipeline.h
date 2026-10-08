@@ -136,20 +136,7 @@ namespace Luth
         // alloc time, propagates to all slots. b0/b1/b2 rebound each frame by UploadLightingResources.
         std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT> lightDescSet{};
 
-        // Set 6 (transparent pass-local). Cycled: b0 (fog atlas sampler3D) parity-rewrites per
-        // frame like volCompositeDescSet's b1; b1/b2 (OIT heads + nodes) written when the PPLL lands.
-        std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT> transparentDescSet{};
-
-        // PPLL OIT. heads: R32_Uint storage image (per-pixel list head; cleared per frame by
-        // OITClear, so no bootstrap clear). nodes: Garlic device-local large-tagged buffer
-        // `{count, pad[3], OITNode[W*H*budget]}` with ReSTIR-reservoir lifecycle (reserved tag, freed
-        // only on resize / budget change / release). oitLayersCached records the allocation budget so a
-        // runtime budget change reallocates. Resolve set: b0 heads + b1 nodes (single, stable).
-        std::shared_ptr<Texture> oitHeads;
-        Memory::GPUSubRegion     oitNodes{};
-        u32                      oitNodesTag = 0;
-        u32                      oitLayersCached = ~0u;
-        VkDescriptorSet          oitResolveDescSet = VK_NULL_HANDLE;
+        std::shared_ptr<TransparencyViewState> transparency; // Borrowed domain state during migration.
 
         // Cluster debug viz: single set, 1 binding = SceneDepth sampler. Stable per-view; written
         // by WriteClusterVizView at AllocateViewResources time.
@@ -185,10 +172,6 @@ namespace Luth
         std::shared_ptr<Texture> taaHistoryB;
         std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT> taaResolveDescSet{};
 
-        // Screen-space refraction backdrop: viewport-sized RGBA16F snapshot of the pre-transparent scene
-        // (opaque + fog), copied each frame before the transparent pass so glass can sample the refracted
-        // background (Set 6 b3). Persistent, recreated on resize like taaHistoryA/B.
-        std::shared_ptr<Texture> refractionBackdrop;
 
         // RT sun-shadow mask: viewport-sized R8 storage image, written by raygen on
         // AsyncCompute and sampled by pbr.frag (Set 3 binding 4) when ShadowingMode::RtShadows is

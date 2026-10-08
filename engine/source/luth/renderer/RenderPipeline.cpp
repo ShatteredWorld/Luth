@@ -887,7 +887,7 @@ namespace Luth
             // can sample the refracted background. RG orders the copy after the composite (reads fogColor as
             // TransferSrc) and before the transparent pass's Set 6 b3 sample (declared Read there). Skipped
             // when the transparent bucket is empty (matches AddPasses' own early-out).
-            const auto backdropNative = m_Transparency.PrepareBackdropBindings(m_CurrentViewResources->refractionBackdrop,
+            const auto backdropNative = m_Transparency.PrepareBackdropBindings(m_CurrentViewResources->transparency->refractionBackdrop,
                 !m_System.GetDrawList().transparent.empty());
             const RefractionBackdropBindingRef backdropBinding{&backdropNative};
             const std::array backdropResources{RenderInputBinding::Present(RenderResources::FoggedHDR, foggedOutput),
@@ -911,7 +911,8 @@ namespace Luth
             if (m_CurrentViewResources)
             {
                 const u32 frameAbsT = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
-                m_Transparency.WritePerFrame(*m_CurrentViewResources, frameAbsT);
+                m_Transparency.WritePerFrame(*m_CurrentViewResources->transparency, m_CurrentViewResources->fog,
+                    m_Volumetric.GetSampler(), frameAbsT);
                 transparentColor = m_Transparency.AddPasses(rg, fogColor, geoOutput.entityID, geoOutput.depth,
                     volumetricEnabled ? volResolvedHandle : RG::ResourceHandle{}, backdropHandle, hIndirectBuf);
             }

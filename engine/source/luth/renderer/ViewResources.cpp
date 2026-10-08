@@ -23,11 +23,11 @@ namespace Luth
     // Per-view pool: cycled sets allocate MAX_FRAMES_IN_FLIGHT instances each. Capacity bumped on
     // every subsystem addition; silent vkAllocateDescriptorSets failure on overflow returns
     // VK_NULL_HANDLE handles and skips the draw with no log. Bump generously; pool memory is cheap.
-    static constexpr u32 k_ViewPoolMaxSets              = 205 - 7 * MAX_FRAMES_IN_FLIGHT - 2;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale + bloom pyramid sets
+    static constexpr u32 k_ViewPoolMaxSets              = 205 - 8 * MAX_FRAMES_IN_FLIGHT - 3;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale + bloom pyramid sets
     static constexpr u32 k_ViewPoolUniformBufferCount   = 48 - MAX_FRAMES_IN_FLIGHT;
-    static constexpr u32 k_ViewPoolStorageImageCount    = 248 - 5 * MAX_FRAMES_IN_FLIGHT - 2;  // + DiSpecular SVGF + restir Set 2 b8 + GI upscale b3 + DI upscale x2 + refl upscale b3 + bloom pyramid mips
-    static constexpr u32 k_ViewPoolStorageBufferCount   = 126 - 4 * MAX_FRAMES_IN_FLIGHT;  // + Transparency b2 OIT nodes x3
-    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - 13 * MAX_FRAMES_IN_FLIGHT - 3;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels + Transparency b3 refraction backdrop x3
+    static constexpr u32 k_ViewPoolStorageImageCount    = 248 - 6 * MAX_FRAMES_IN_FLIGHT - 3;  // + DiSpecular SVGF + restir Set 2 b8 + GI upscale b3 + DI upscale x2 + refl upscale b3 + bloom pyramid mips
+    static constexpr u32 k_ViewPoolStorageBufferCount   = 126 - 5 * MAX_FRAMES_IN_FLIGHT - 1;
+    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - 15 * MAX_FRAMES_IN_FLIGHT - 3;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels
     static constexpr u32 k_ViewPoolAccelStructCount     = 8;   // Set 0 binding 6 (TLAS) cycled per frame
 
     namespace {
@@ -69,6 +69,10 @@ namespace Luth
         const bool fogReplaced = vr.fog && vr.fog != fog;
         vr.fog = std::move(fog);
         if (fogReplaced) vr.generation = m_System.InvalidateView(id);
+        auto transparency = m_Transparency.EnsureView(id, newW, newH, m_System.GetTransparencySettings().avgLayersBudget);
+        const bool transparencyReplaced = vr.transparency && vr.transparency != transparency;
+        vr.transparency = std::move(transparency);
+        if (transparencyReplaced) vr.generation = m_System.InvalidateView(id);
 
         if (inserted || vr.descPool == VK_NULL_HANDLE)
         {
@@ -78,7 +82,6 @@ namespace Luth
             AllocateViewResources(vr, targets);
         }
         else if (vr.width != newW || vr.height != newH ||
-                 vr.oitLayersCached != m_System.GetTransparencySettings().avgLayersBudget ||
                  vr.giHalfCached != (m_System.GetRestirGiSettings().halfResolution ? 1u : 0u) ||
                  vr.diHalfCached != (m_System.GetRestirSettings().halfResolution ? 1u : 0u) ||
                  vr.reflHalfCached != (m_System.GetReflectionsSettings().halfResolution ? 1u : 0u))
@@ -94,7 +97,6 @@ namespace Luth
             m_PostProcess.WriteTaaResolveView(vr, targets);
             m_EditorOverlays.WriteOutlineView(vr, targets);
             m_EditorOverlays.WriteGridView(vr, targets);
-            m_Transparency.WriteOitView(vr);        // re-bind Set 6 b1/b2 + resolve set to the new heads image + pool
             m_Rt.WriteShadowPassView(vr, targets);  // re-bind binding 2 (mask storage) to the new viewport-sized image
             m_Restir.WriteView(vr, targets);        // re-bind Set 2 depth/normal + reservoir + new DI image
             m_RestirGi.WriteView(vr, targets);      // re-bind GI Set 2 depth/normal + reservoir + new GI image
@@ -123,6 +125,7 @@ namespace Luth
         const auto id = m_System.GetViews().Find(&targets);
         if (m_GtaoPipeline) m_GtaoPipeline->ReleaseView(id);
         m_Volumetric.ReleaseView(id);
+        m_Transparency.ReleaseView(id);
         auto it = m_ViewResources.find(id.value);
         if (it == m_ViewResources.end()) return;
         DestroyViewResources(it->second);
@@ -237,9 +240,7 @@ namespace Luth
         allocCycled(m_Lighting.GetClusterBuildLayout(),  vr.clusterBuildDescSet,  "View.ClusterBuild");
         allocCycled(m_Lighting.GetLightAssignLayout(),   vr.lightAssignDescSet,   "View.LightAssign");
         allocSingle(m_Lighting.GetClusterVizLayout(),    vr.clusterVizDescSet,    "View.ClusterViz");
-        allocCycled(m_Transparency.GetSetLayout(),       vr.transparentDescSet,   "View.Transparent");
         allocCycled(m_PostProcess.GetTaaResolveDescSetLayout(), vr.taaResolveDescSet, "View.TaaResolve");
-        allocSingle(m_Transparency.GetResolveSetLayout(), vr.oitResolveDescSet,   "View.OitResolve");
         allocCycled(m_Rt.GetShadowPassLayout(),          vr.rtShadowPassDescSet,  "View.RtShadowPass");
         allocCycled(m_Restir.GetSetLayout(),             vr.restirDescSet,        "View.Restir");
         allocCycled(m_RestirGi.GetSetLayout(),           vr.restirGiDescSet,      "View.RestirGi");
@@ -262,7 +263,6 @@ namespace Luth
         m_EditorOverlays.WriteGridView(vr, targets);
         m_Lighting.WriteShadowView(vr);
         m_Lighting.WriteClusterVizView(vr, targets);
-        m_Transparency.WriteOitView(vr);
         m_Rt.WriteShadowPassView(vr, targets);
         m_Restir.WriteView(vr, targets);
         m_RestirGi.WriteView(vr, targets);
@@ -326,10 +326,6 @@ namespace Luth
         vr.taaHistoryA = Texture::Create(fullW, fullH, TextureFormat::RGBA16F);
         vr.taaHistoryB = Texture::Create(fullW, fullH, TextureFormat::RGBA16F);
 
-        // Screen-space refraction backdrop: pre-transparent scene-color copy target. Same RGBA16F color
-        // format as SceneColor (vkCmdCopyImage is layout-compatible); the default usage carries TRANSFER_DST
-        // for the copy + SAMPLED for the transparent fragment read. WritePerFrame rebinds it (Set 6 b3).
-        vr.refractionBackdrop = Texture::Create(fullW, fullH, TextureFormat::RGBA16F);
 
         // RT sun-shadow mask: viewport-sized R8 storage. Written by rt_sun_shadows.comp on
         // AsyncCompute, sampled by pbr.frag (Set 3 binding 4) when ShadowingMode == RtShadows.
@@ -495,26 +491,6 @@ namespace Luth
         vr.restirGiSpatial = Memory::GPUTaggedPageAllocator::Get().AllocateLargeTaggedDeviceLocal(
             vr.restirGiSpatialTag, static_cast<u64>(giW) * static_cast<u64>(giH) * 64u, 16);
 
-        // PPLL OIT heads: R32_Uint storage, cleared by OITClear each frame (no bootstrap clear;
-        // the per-frame Undefined import + transfer clear defines layout and content together).
-        vr.oitHeads = std::make_shared<VKTexture>(
-            fullW, fullH, TextureFormat::R32_Uint,
-            /*arrayLayers*/ 1, /*createFlags*/ 0u, /*mipLevels*/ 1,
-            VK_IMAGE_USAGE_STORAGE_BIT);
-
-        // PPLL OIT node pool: `{count, pad[3], OITNode[W*H*budget]}`, 16 B/node, Garlic device-local
-        // with a reserved tag (reservoir lifecycle: freed only here on realloc, or on view release).
-        if (vr.oitNodesTag != 0)
-        {
-            Memory::GPUTaggedPageAllocator::Get().FreeTagAndDestroy(vr.oitNodesTag);
-            vr.oitNodes = {};
-        }
-        const u32 oitBudget = m_System.GetTransparencySettings().avgLayersBudget;
-        vr.oitLayersCached  = oitBudget;
-        vr.oitNodesTag      = m_Transparency.NextNodePoolTag();
-        vr.oitNodes = Memory::GPUTaggedPageAllocator::Get().AllocateLargeTaggedDeviceLocal(
-            vr.oitNodesTag, 16ull + static_cast<u64>(fullW) * static_cast<u64>(fullH) * oitBudget * 16ull, 16);
-
         // Bootstrap clear: freshly-allocated VMA storage images have UNDEFINED layout and undefined
         // pixel content. The SVGF reproject
         // imageLoads its prev history on frame 0; without this clear the first read is NaN-prone garbage
@@ -581,41 +557,22 @@ namespace Luth
             for (u32 i = 0; i < kClearCount; ++i)
                 vkCmdClearColorImage(cmd, clearTargets[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &range);
 
-            // OIT heads: uint image, separate clear value (OIT_EMPTY = 0xFFFFFFFF). Bootstrapping to
-            // GENERAL here makes the per-frame import's claimed initial state (FragmentStorageRead)
-            // true on frame 0; the cross-frame WAR ordering relies on that claimed src stage.
-            VkImage headsImg = std::static_pointer_cast<VKTexture>(vr.oitHeads)->GetImage();
-            VkImageMemoryBarrier headsToDst{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-            headsToDst.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
-            headsToDst.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            headsToDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            headsToDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            headsToDst.image               = headsImg;
-            headsToDst.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-            headsToDst.srcAccessMask       = 0;
-            headsToDst.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
-            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                 0, 0, nullptr, 0, nullptr, 1, &headsToDst);
-            VkClearColorValue headsClear{};
-            headsClear.uint32[0] = 0xFFFFFFFFu;
-            vkCmdClearColorImage(cmd, headsImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &headsClear, 1, &range);
-
-            VkImageMemoryBarrier toGen[kClearCount + 1]{};
-            for (u32 i = 0; i < kClearCount + 1; ++i)
+            VkImageMemoryBarrier toGen[kClearCount]{};
+            for (u32 i = 0; i < kClearCount; ++i)
             {
                 toGen[i].sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
                 toGen[i].oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
                 toGen[i].newLayout           = VK_IMAGE_LAYOUT_GENERAL;
                 toGen[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 toGen[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                toGen[i].image               = (i < kClearCount) ? clearTargets[i] : headsImg;
+                toGen[i].image               = clearTargets[i];
                 toGen[i].subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
                 toGen[i].srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
                 toGen[i].dstAccessMask       = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
             }
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                 0, 0, nullptr, 0, nullptr, kClearCount + 1, toGen);
+                                 0, 0, nullptr, 0, nullptr, kClearCount, toGen);
         });
     }
 
@@ -624,8 +581,8 @@ namespace Luth
         // Pool destruction frees every descriptor set allocated from it.
         for (auto& mip : vr.bloomMip) mip.reset();
         vr.fog.reset();
+        vr.transparency.reset();
         vr.taaHistoryA.reset();
-        vr.refractionBackdrop.reset();
         vr.taaHistoryB.reset();
         vr.sunShadowMask.reset();
         vr.restirDI.reset();
@@ -674,16 +631,6 @@ namespace Luth
         }
         vr.svgfDiSpecAtrous[0].reset();
         vr.svgfDiSpecAtrous[1].reset();
-        vr.oitHeads.reset();
-
-        // OIT node-pool reserved tag: same deferred-destroy path as the reservoir tags below.
-        if (vr.oitNodesTag != 0)
-        {
-            Memory::GPUTaggedPageAllocator::Get().FreeTagAndDestroy(vr.oitNodesTag);
-            vr.oitNodesTag = 0;
-            vr.oitNodes = {};
-        }
-
         // Release the reservoir reserved-range tags. The buffers are destroyed (deferred N+2), not
         // recycled (they're resize-sized); the high tags keep them out of the per-frame FreeTag(N-2) sweep.
         if (vr.restirReservoirTag != 0)

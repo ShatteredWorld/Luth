@@ -1,9 +1,32 @@
 #include "luthpch.h"
+#include <limits>
 #include "luth/renderer/subsystems/TransparencySubsystem.h"
 #include "luth/renderer/backend/vulkan/VulkanTexture.h"
+#include "luth/renderer/Renderer.h"
 
 namespace Luth
 {
+    std::shared_ptr<TransparencyViewState> TransparencySubsystem::EnsureView(RenderViewId id,
+        u32 width, u32 height, u32 layers)
+    {
+        const auto config = TransparencyViewState::Config(width, height, layers);
+        return m_ViewStates.Ensure(id, config, [&](const ViewStateConfig& requested) {
+            auto state = TransparencyViewState::Create(id, requested,
+                {m_TransparentSetLayout, m_ResolveSetLayout}, NextNodePoolTag());
+            WriteOitView(*state);
+            return state;
+        }, [] { Renderer::WaitForGPU(); });
+    }
+    void TransparencySubsystem::ReleaseView(RenderViewId id)
+    {
+        m_ViewStates.Release(id, [] { Renderer::WaitForGPU(); });
+    }
+    u32 TransparencySubsystem::NextNodePoolTag()
+    {
+        if (m_NextNodePoolTag == std::numeric_limits<u32>::max())
+            throw std::runtime_error("Transparency: reserved node tag range exhausted");
+        return m_NextNodePoolTag++;
+    }
     RefractionBackdropBindings TransparencySubsystem::PrepareBackdropBindings(
         const std::shared_ptr<Texture>& texture, bool enabled)
     {
