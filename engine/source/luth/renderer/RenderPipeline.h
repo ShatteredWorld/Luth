@@ -103,7 +103,7 @@ namespace Luth
         std::shared_ptr<FogViewState> fog;
 
         // Composite remains cycled; UpdateUBO rebinds its per-frame uniform slot.
-        std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT>   compositeDescSet{};
+        std::shared_ptr<CompositeViewState> composite;
 
 
         // Editor overlays: allocated for every view, bound only by the scene view

@@ -249,6 +249,7 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         VkDevice device = VulkanContext::Get().GetDevice();
+        m_CompositeStates.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_TaaStates.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_BloomStates.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_TaaResolvePipeline.reset();
@@ -302,7 +303,7 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-        if (!vr || vr->compositeDescSet[0] == VK_NULL_HANDLE) return;
+        if (!vr || !vr->composite || vr->composite->sets[0] == VK_NULL_HANDLE) return;
 
         const auto& s = m_Pipeline->GetSystem().GetPostProcessSettings();
         PostProcessUBO ubo{};
@@ -346,9 +347,9 @@ namespace Luth
         bi.offset = region.offset;
         bi.range  = region.size;
 
-        if (vr->compositeDescSet[slot] == VK_NULL_HANDLE) return;
+        if (vr->composite->sets[slot] == VK_NULL_HANDLE) return;
         VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        write.dstSet          = vr->compositeDescSet[slot];
+        write.dstSet          = vr->composite->sets[slot];
         write.dstBinding      = 2;
         write.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         write.descriptorCount = 1;
@@ -359,45 +360,7 @@ namespace Luth
     void PostProcessSubsystem::WriteView(ViewResources& vr, FrameTargets& targets)
     {
         LH_PROFILE_FUNCTION();
-        if (!vr.bloom || vr.compositeDescSet[0] == VK_NULL_HANDLE) return;
-
         VkDevice device = VulkanContext::Get().GetDevice();
-
-        auto sceneVk = std::static_pointer_cast<VKTexture>(targets.GetSceneColor());
-        auto mip0Vk  = std::static_pointer_cast<VKTexture>(vr.bloom->mips[0]);
-
-        auto makeImg = [&](VkImageView v) {
-            VkDescriptorImageInfo info{};
-            info.sampler     = m_Sampler;
-            info.imageView   = v;
-            info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            return info;
-        };
-
-        // Composite: b0 = HDR source (default; rebound per frame by PrepareBloomBindings),
-        // b1 = bloom pyramid mip0 (the accumulated bloom). Both stable across cycled slots.
-        VkDescriptorImageInfo compImg0 = makeImg(sceneVk->GetImageView());
-        VkDescriptorImageInfo compImg1 = makeImg(mip0Vk->GetImageView());
-
-        VkWriteDescriptorSet writes[2 * MAX_FRAMES_IN_FLIGHT] = {};
-        u32 idx = 0;
-        auto addImg = [&](VkDescriptorSet set, u32 binding, VkDescriptorImageInfo* imgInfo) {
-            writes[idx] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            writes[idx].dstSet          = set;
-            writes[idx].dstBinding      = binding;
-            writes[idx].descriptorCount = 1;
-            writes[idx].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[idx].pImageInfo      = imgInfo;
-            ++idx;
-        };
-
-        for (u32 s = 0; s < MAX_FRAMES_IN_FLIGHT; ++s)
-        {
-            addImg(vr.compositeDescSet[s], 0, &compImg0);
-            addImg(vr.compositeDescSet[s], 1, &compImg1);
-        }
-
-        vkUpdateDescriptorSets(device, idx, writes, 0, nullptr);
 
         // Slim viz set: 4 stable bindings into the per-view slim attachments. Written once per resize.
         // Binding 3 (R16_UINT matID) uses m_NearestSampler; integer formats don't support LINEAR filtering (VUID 04553).
@@ -537,7 +500,7 @@ namespace Luth
                 VkCommandBuffer cmd = ctx.commandBuffer;
                 m_PostProcessPipeline->Bind(cmd);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_PostProcessPipeline->GetLayout(), 0, 1, &vr->compositeDescSet[slot], 0, nullptr);
+                    m_PostProcessPipeline->GetLayout(), 0, 1, &vr->composite->sets[slot], 0, nullptr);
 
                 u32 w = v->targets->GetLDROutput()->GetWidth();
                 u32 h = v->targets->GetLDROutput()->GetHeight();
@@ -673,15 +636,15 @@ namespace Luth
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), idx, writes, 0, nullptr);
     }
 
-    void PostProcessSubsystem::UpdateCompositeInput(ViewResources& vr, TextureBindingRef source, u64 frameAbs)
+    void PostProcessSubsystem::UpdateCompositeInput(CompositeViewState& state, TextureBindingRef source, u64 frameAbs)
     {
         const u32 slot = frameAbs % MAX_FRAMES_IN_FLIGHT;
-        if (!vr.compositeDescSet[slot]) return;
+        if (!state.sets[slot]) return;
         if (!source.texture) throw std::invalid_argument("PostProcess: missing resolved HDR binding");
         VkDescriptorImageInfo image{m_Sampler, static_cast<const VKTexture*>(source.texture)->GetImageView(),
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        write.dstSet = vr.compositeDescSet[slot]; write.dstBinding = 0; write.descriptorCount = 1;
+        write.dstSet = state.sets[slot]; write.dstBinding = 0; write.descriptorCount = 1;
         write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; write.pImageInfo = &image;
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 1, &write, 0, nullptr);
     }

@@ -23,11 +23,11 @@ namespace Luth
     // Per-view pool: cycled sets allocate MAX_FRAMES_IN_FLIGHT instances each. Capacity bumped on
     // every subsystem addition; silent vkAllocateDescriptorSets failure on overflow returns
     // VK_NULL_HANDLE handles and skips the draw with no log. Bump generously; pool memory is cheap.
-    static constexpr u32 k_ViewPoolMaxSets              = 205 - 10 * MAX_FRAMES_IN_FLIGHT - 13;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale
-    static constexpr u32 k_ViewPoolUniformBufferCount   = 48 - 2 * MAX_FRAMES_IN_FLIGHT;
+    static constexpr u32 k_ViewPoolMaxSets              = 205 - 11 * MAX_FRAMES_IN_FLIGHT - 13;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale
+    static constexpr u32 k_ViewPoolUniformBufferCount   = 48 - 3 * MAX_FRAMES_IN_FLIGHT;
     static constexpr u32 k_ViewPoolStorageImageCount    = 248 - 7 * MAX_FRAMES_IN_FLIGHT - 13;  // + DiSpecular SVGF + restir Set 2 b8 + GI upscale b3 + DI upscale x2 + refl upscale b3
     static constexpr u32 k_ViewPoolStorageBufferCount   = 126 - 5 * MAX_FRAMES_IN_FLIGHT - 1;
-    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - 20 * MAX_FRAMES_IN_FLIGHT - 13;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels
+    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - 22 * MAX_FRAMES_IN_FLIGHT - 13;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels
     static constexpr u32 k_ViewPoolAccelStructCount     = 8;   // Set 0 binding 6 (TLAS) cycled per frame
 
     namespace {
@@ -83,6 +83,10 @@ namespace Luth
         const bool bloomReplaced = vr.bloom && vr.bloom != bloom;
         vr.bloom = std::move(bloom);
         if (bloomReplaced) vr.generation = m_System.InvalidateView(id);
+        auto composite = m_PostProcess.EnsureCompositeView(id, targets, vr.bloom);
+        const bool compositeReplaced = vr.composite && vr.composite != composite;
+        vr.composite = std::move(composite);
+        if (compositeReplaced) vr.generation = m_System.InvalidateView(id);
 
         if (inserted || vr.descPool == VK_NULL_HANDLE)
         {
@@ -135,6 +139,7 @@ namespace Luth
         m_Volumetric.ReleaseView(id);
         m_Transparency.ReleaseView(id);
         m_PostProcess.ReleaseTaaView(id);
+        m_PostProcess.ReleaseCompositeView(id);
         m_PostProcess.ReleaseBloomView(id);
         auto it = m_ViewResources.find(id.value);
         if (it == m_ViewResources.end()) return;
@@ -230,9 +235,9 @@ namespace Luth
             }
         };
 
-        const VkDescriptorSetLayout ppLayout    = m_PostProcess.GetDescSetLayout();
+
         allocCycled(m_Global.GetSetLayout(),             vr.globalDescriptorSet,   "View.Global");
-        allocCycled(ppLayout,                            vr.compositeDescSet,      "View.Composite");
+
         allocSingle(m_EditorOverlays.GetOutlineLayout(), vr.outlineDescSet,       "View.Outline");
         allocCycled(m_EditorOverlays.GetGridLayout(),    vr.gridDescSet,          "View.Grid");
         allocSingle(m_PostProcess.GetSlimVizDescSetLayout(), vr.slimVizDescSet,   "View.SlimViz");
@@ -553,6 +558,7 @@ namespace Luth
     void RenderPipeline::DestroyViewResources(ViewResources& vr)
     {
         // Pool destruction frees every descriptor set allocated from it.
+        vr.composite.reset();
         vr.bloom.reset();
         vr.fog.reset();
         vr.transparency.reset();

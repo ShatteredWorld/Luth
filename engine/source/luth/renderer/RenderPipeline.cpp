@@ -1012,7 +1012,7 @@ namespace Luth
         const TextureBindingRef postSource = ptActive ? TextureBindingRef{m_CurrentViewResources->ptColor.get()}
             : resolvedHdr.binding;
         if (m_CurrentViewResources)
-            m_PostProcess.UpdateCompositeInput(*m_CurrentViewResources, postSource,
+            m_PostProcess.UpdateCompositeInput(*m_CurrentViewResources->composite, postSource,
                 Renderer::GetFrameData()->GetRenderFrameIndex());
         // HDR source for the post chain: the PT megakernel output replaces the raster sceneColor when PT
         // is active (the realtime chain is not registered). Grid is editor-overlay-only -> off in PT.

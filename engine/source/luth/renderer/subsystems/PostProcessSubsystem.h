@@ -7,6 +7,7 @@
 #include "luth/renderer/features/TaaViewState.h"
 #include "luth/renderer/features/TaaBindings.h"
 #include "luth/renderer/features/BloomBindings.h"
+#include "luth/renderer/features/CompositeViewState.h"
 
 #include <memory>
 #include <string>
@@ -31,6 +32,9 @@ namespace Luth
         void ReleaseTaaView(RenderViewId);
         std::shared_ptr<BloomViewState> EnsureBloomView(RenderViewId, u32 width, u32 height);
         void ReleaseBloomView(RenderViewId);
+        std::shared_ptr<CompositeViewState> EnsureCompositeView(RenderViewId, FrameTargets&, const std::shared_ptr<BloomViewState>&);
+        void ReleaseCompositeView(RenderViewId);
+        void WriteCompositeView(CompositeViewState&);
         void InvalidateTaaView(RenderViewId);
         TaaBindings PrepareTaaBindings(const std::shared_ptr<TaaViewState>&, u64 frame,
             u64 generation, const Mat4& skyReproj, float alpha, bool enabled);
@@ -40,7 +44,7 @@ namespace Luth
         // Per-render-stage rebind of the shared PostProcess UBO (binding 2 of all 4 PP sets).
         void UpdateUBO();
 
-        // Stable per-view writes (sceneColor + composite bloom binding); UBO at binding 2 is rebound by UpdateUBO.
+        // Stable slim visualization bindings; composite bindings belong to CompositeViewState.
         void WriteView(ViewResources& vr, FrameTargets& targets);
 
         // Stable per-view writes for the bloom pyramid down/up sets (source mip -> b0, dest mip -> b1).
@@ -53,7 +57,7 @@ namespace Luth
         void WriteTaaResolvePerFrame(TaaViewState& state, u64 frameAbs);
 
         // Rebind downstream descriptors to the actual HDR stage selected by composition.
-        void UpdateCompositeInput(ViewResources& vr, TextureBindingRef source, u64 frameAbs);
+        void UpdateCompositeInput(CompositeViewState& state, TextureBindingRef source, u64 frameAbs);
 
         // Render-graph contributions.
         BloomBindings PrepareBloomBindings(const std::shared_ptr<BloomViewState>&, TextureBindingRef source,
@@ -72,7 +76,6 @@ namespace Luth
         RG::ResourceHandle AddSlimVizPass(RG::RenderGraph& rg, RG::ResourceHandle ldrInput,
                                           const SlimGBufferOutput& slimGB, u32 mode, float scale);
 
-        VkDescriptorSetLayout GetDescSetLayout()           const { return m_DescSetLayout; }
         VkDescriptorSetLayout GetBloomComputeLayout()      const { return m_BloomComputeLayout; }
         VkDescriptorSetLayout GetSlimVizDescSetLayout()    const { return m_SlimVizDescSetLayout; }
         VkDescriptorSetLayout GetTaaResolveDescSetLayout() const { return m_TaaResolveDescSetLayout; }
@@ -84,6 +87,7 @@ namespace Luth
         RenderPipeline* m_Pipeline = nullptr;
         TaaViewStateStore m_TaaStates;
         BloomViewStateStore m_BloomStates;
+        CompositeViewStateStore m_CompositeStates;
         u64 m_TaaShaderGeneration = 1;
 
         VkSampler             m_Sampler                 = VK_NULL_HANDLE;

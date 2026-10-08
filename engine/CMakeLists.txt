@@ -60,6 +60,8 @@ add_library(Luth STATIC
     source/luth/renderer/subsystems/PostProcessBloom.cpp
     source/luth/renderer/features/TaaFeature.cpp
     source/luth/renderer/subsystems/PostProcessTaa.cpp
+    source/luth/renderer/features/CompositeViewState.cpp
+    source/luth/renderer/subsystems/PostProcessCompositeState.cpp
     source/luth/renderer/features/BloomViewState.cpp
     source/luth/renderer/subsystems/PostProcessBloomState.cpp
     source/luth/renderer/features/TaaViewState.cpp
