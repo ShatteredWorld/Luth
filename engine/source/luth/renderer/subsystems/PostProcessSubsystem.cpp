@@ -1,6 +1,6 @@
 #include "luthpch.h"
 #include "luth/renderer/subsystems/PostProcessSubsystem.h"
-#include "luth/renderer/RenderPipeline.h"
+
 #include "luth/renderer/Renderer.h"
 #include "luth/renderer/FrameTargets.h"
 #include "luth/renderer/material/Material.h"
@@ -104,8 +104,8 @@ namespace Luth
         vkCreateDescriptorSetLayout(device, &bloomLayoutInfo, nullptr, &m_BloomComputeLayout);
 
         // Slim viz descriptor set layout: 4 sampler bindings (normal/roughness/motion/matID).
-        // Stable per-view; written once at AllocateViewResources time. No UAB needed since the
-        // slim attachment views only change on resize (which destroys + recreates the descPool).
+        // Written once on domain state creation. Replacement waits for GPU completion;
+        // stable bindings need no UAB and retire with their local descriptor pool.
         VkDescriptorSetLayoutBinding slimBindings[4] = {};
         for (u32 i = 0; i < 4; ++i)
         {
@@ -248,6 +248,7 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         VkDevice device = VulkanContext::Get().GetDevice();
+        m_SlimVizStates.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_CompositeStates.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_TaaStates.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_BloomStates.ReleaseAll([] { Renderer::WaitForGPU(); });
@@ -298,49 +299,24 @@ namespace Luth
         return name != "fullscreen.slang";
     }
 
-    void PostProcessSubsystem::WriteView(ViewResources& vr, FrameTargets& targets)
+    void PostProcessSubsystem::WriteSlimVizView(SlimVizViewState& state)
     {
-        LH_PROFILE_FUNCTION();
-        VkDevice device = VulkanContext::Get().GetDevice();
-
-        // Slim viz set: 4 stable bindings into the per-view slim attachments. Written once per resize.
-        // Binding 3 (R16_UINT matID) uses m_NearestSampler; integer formats don't support LINEAR filtering (VUID 04553).
-        if (vr.slimVizDescSet != VK_NULL_HANDLE)
+        for (const auto& source : state.sources)
+            if (!source) throw std::invalid_argument("SlimViz: missing stable source");
+        if (!state.set || !m_Sampler || !m_NearestSampler) return;
+        std::array<VkDescriptorImageInfo, 4> infos{};
+        std::array<VkWriteDescriptorSet, 4> writes{};
+        for (u32 i = 0; i < 4; ++i)
         {
-            auto slimN = std::static_pointer_cast<VKTexture>(targets.GetSlimNormal());
-            auto slimR = std::static_pointer_cast<VKTexture>(targets.GetSlimRoughness());
-            auto slimM = std::static_pointer_cast<VKTexture>(targets.GetSlimMotion());
-            auto slimID = std::static_pointer_cast<VKTexture>(targets.GetSlimMaterialID());
-            if (slimN && slimR && slimM && slimID)
-            {
-                auto makeImgWithSampler = [](VkImageView v, VkSampler s) {
-                    VkDescriptorImageInfo info{};
-                    info.sampler     = s;
-                    info.imageView   = v;
-                    info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                    return info;
-                };
-                VkDescriptorImageInfo slimInfos[4] = {
-                    makeImgWithSampler(slimN->GetImageView(),  m_Sampler),
-                    makeImgWithSampler(slimR->GetImageView(),  m_Sampler),
-                    makeImgWithSampler(slimM->GetImageView(),  m_Sampler),
-                    makeImgWithSampler(slimID->GetImageView(), m_NearestSampler),
-                };
-                VkWriteDescriptorSet slimWrites[4] = {};
-                for (u32 b = 0; b < 4; ++b)
-                {
-                    slimWrites[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                    slimWrites[b].dstSet          = vr.slimVizDescSet;
-                    slimWrites[b].dstBinding      = b;
-                    slimWrites[b].descriptorCount = 1;
-                    slimWrites[b].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                    slimWrites[b].pImageInfo      = &slimInfos[b];
-                }
-                vkUpdateDescriptorSets(device, 4, slimWrites, 0, nullptr);
-            }
+            const auto texture = std::static_pointer_cast<VKTexture>(state.sources[i]);
+            infos[i].sampler = i == 3 ? m_NearestSampler : m_Sampler;
+            infos[i].imageView = texture->GetImageView(); infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}; writes[i].dstSet = state.set;
+            writes[i].dstBinding = i; writes[i].descriptorCount = 1;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[i].pImageInfo = &infos[i];
         }
+        vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 4, writes.data(), 0, nullptr);
     }
-
     void PostProcessSubsystem::WriteBloomView(BloomViewState& state)
     {
         LH_PROFILE_FUNCTION();

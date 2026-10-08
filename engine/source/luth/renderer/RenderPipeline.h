@@ -112,7 +112,7 @@ namespace Luth
 
         // Slim G-buffer live viz (ShadeMode toggle). Single set, written once at AllocateViewResources
         // time pointing at the 4 slim FrameTargets. Bindings: 0=normal, 1=roughness, 2=motion, 3=matID.
-        VkDescriptorSet slimVizDescSet = VK_NULL_HANDLE;
+        std::shared_ptr<SlimVizViewState> slimViz; // Borrowed postprocess domain state.
 
         // Forward+ cluster compute descriptor sets. Cycled: each frame the cluster AABB + grid
         // tagged-heap regions get rewritten into the slot's bindings before dispatch.

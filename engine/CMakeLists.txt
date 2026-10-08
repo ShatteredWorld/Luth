@@ -60,6 +60,8 @@ add_library(Luth STATIC
     source/luth/renderer/subsystems/PostProcessBloom.cpp
     source/luth/renderer/features/TaaFeature.cpp
     source/luth/renderer/subsystems/PostProcessTaa.cpp
+    source/luth/renderer/features/SlimVizViewState.cpp
+    source/luth/renderer/subsystems/PostProcessSlimVizState.cpp
     source/luth/renderer/features/SlimVizFeature.cpp
     source/luth/renderer/subsystems/PostProcessSlimViz.cpp
     source/luth/renderer/features/OutlineFeature.cpp

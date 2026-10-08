@@ -29,7 +29,7 @@ namespace Luth
         GraphTextureRef output = input;
         if (packet->enabled && packet->pipeline)
         {
-            if (!packet->layout || !packet->set || packet->parameters.mode > 3 || !std::isfinite(packet->parameters.scale))
+            if (!packet->layout || !packet->set || !packet->state || packet->set != packet->state->set || packet->parameters.mode > 3 || !std::isfinite(packet->parameters.scale))
                 throw std::invalid_argument("SlimViz: incomplete frozen native bindings or invalid mode/scale");
             const std::array refs{ctx.resources.TryGet(RenderResources::Normal), ctx.resources.TryGet(RenderResources::Roughness),
                 ctx.resources.TryGet(RenderResources::MotionVectors), ctx.resources.TryGet(RenderResources::MaterialID)};
@@ -38,7 +38,7 @@ namespace Luth
             std::array<RG::ResourceHandle, 4> handles;
             for (size_t i = 0; i < refs.size(); ++i)
             {
-                if (!refs[i] || !valid(*refs[i], formats[i]) || packet->sources[i].get() != refs[i]->binding.texture ||
+                if (!refs[i] || !valid(*refs[i], formats[i]) || packet->state->sources[i].get() != refs[i]->binding.texture ||
                     input.handle.index == refs[i]->handle.index || input.binding.texture == refs[i]->binding.texture)
                     throw std::invalid_argument("SlimViz: missing or incompatible G-buffer source");
                 for (size_t j = 0; j < i; ++j)

@@ -19,8 +19,9 @@ namespace
             bindings.enabled = true; bindings.pipeline = Native<VkPipeline>(1);
             bindings.layout = Native<VkPipelineLayout>(2); bindings.set = Native<VkDescriptorSet>(3);
             bindings.parameters = {0, 20.0f};
+            bindings.state = std::make_shared<SlimVizViewState>(); bindings.state->set = bindings.set;
             for (u32 i = 0; i < 4; ++i)
-                bindings.sources[i] = std::shared_ptr<Texture>(Native<Texture*>(10 + i), [](Texture*){});
+                bindings.state->sources[i] = std::shared_ptr<Texture>(Native<Texture*>(10 + i), [](Texture*){});
             RenderPipelineDefinition definition; definition.AddFeature<SlimVizFeature>(native);
             PipelineInputContract inputs; inputs.resources = {{RenderResources::TonemappedLDR}, {SlimVizResources::Bindings},
                 {RenderResources::Normal, ResourceOutputPresence::Optional}, {RenderResources::Roughness, ResourceOutputPresence::Optional},
@@ -84,7 +85,7 @@ TEST_CASE("SlimVizFeature: all decoding modes reuse LDR and G-buffer imports [re
 TEST_CASE("SlimVizFeature: disabled PT and cold pipeline publish graph-local LDR aliases [renderfeatures]")
 {
     Fixture f; bool present = true;
-    SUBCASE("disabled") { f.bindings.enabled = false; f.bindings.sources = {}; }
+    SUBCASE("disabled") { f.bindings.enabled = false; f.bindings.state.reset(); }
     SUBCASE("PT without G-buffer") { f.bindings.enabled = false; present = false; }
     SUBCASE("cold") { f.bindings.pipeline = VK_NULL_HANDLE; }
     for (u32 i = 0; i < 2; ++i)
@@ -100,9 +101,11 @@ TEST_CASE("SlimVizFeature: invalid native inputs and numerical contracts reject 
     SUBCASE("packet") { packet = false; }
     SUBCASE("layout") { f.bindings.layout = VK_NULL_HANDLE; }
     SUBCASE("set") { f.bindings.set = VK_NULL_HANDLE; }
+    SUBCASE("descriptor ownership") { f.bindings.state->set = VK_NULL_HANDLE; }
+    SUBCASE("state") { f.bindings.state.reset(); }
     SUBCASE("missing sources") { present = false; }
-    SUBCASE("source owner") { f.bindings.sources[2].reset(); }
-    SUBCASE("source mismatch") { f.bindings.sources[1] = f.bindings.sources[0]; }
+    SUBCASE("source owner") { f.bindings.state->sources[2].reset(); }
+    SUBCASE("source mismatch") { f.bindings.state->sources[1] = f.bindings.state->sources[0]; }
     SUBCASE("extent") { width = 641; }
     SUBCASE("integer material format") { wrongFormat = true; }
     SUBCASE("mode") { f.bindings.parameters.mode = 4; }
@@ -113,24 +116,25 @@ TEST_CASE("SlimVizFeature: invalid native inputs and numerical contracts reject 
 }
 TEST_CASE("SlimVizFeature: frozen jobs retain sources and read producer versions with barriers [renderfeatures]")
 {
-    Fixture f; std::weak_ptr<Texture> retained = f.bindings.sources[3];
+    Fixture f; std::weak_ptr<Texture> retained = f.bindings.state->sources[3];
+    std::weak_ptr<SlimVizViewState> retainedState = f.bindings.state;
     {
         Memory::LinearAllocator scratch(64 * 1024); RG::RenderGraph graph(scratch); GraphTextureRef output;
-        REQUIRE(f.Build(graph, scratch, output, true, true, 640, true).success); f.bindings.sources = {};
-        CHECK_FALSE(retained.expired()); REQUIRE(graph.GetPasses().size() == 2);
+        REQUIRE(f.Build(graph, scratch, output, true, true, 640, true).success); f.bindings.state.reset();
+        CHECK_FALSE(retained.expired()); CHECK_FALSE(retainedState.expired()); REQUIRE(graph.GetPasses().size() == 2);
         for (const auto& read : graph.GetPasses()[1].reads) CHECK(read.version == 1);
         graph.Compile(); CHECK_FALSE(graph.GetPasses()[0].culled); CHECK_FALSE(graph.GetPasses()[1].culled);
         u32 transitions = 0; for (const auto& barrier : graph.GetPasses()[1].preBarriers)
             if (barrier.resource.index > 1 && barrier.after == RG::ResourceState::ShaderResource) ++transitions;
         CHECK(transitions == 4);
     }
-    CHECK(retained.expired());
+    CHECK(retained.expired()); CHECK(retainedState.expired());
 }
 TEST_CASE("SlimVizFeature: disabled and cold preparation need no native device [renderfeatures]")
 {
     PostProcessSubsystem native;
-    const auto disabled = native.PrepareSlimVizBindings(VK_NULL_HANDLE, {}, 99, 20, false);
-    CHECK_FALSE(disabled.enabled); CHECK_FALSE(disabled.pipeline); CHECK_FALSE(disabled.sources[0]);
-    const auto cold = native.PrepareSlimVizBindings(VK_NULL_HANDLE, {}, 0, 20, true);
-    CHECK(cold.enabled); CHECK_FALSE(cold.pipeline); CHECK_FALSE(cold.sources[0]);
+    const auto disabled = native.PrepareSlimVizBindings({}, 99, 20, false);
+    CHECK_FALSE(disabled.enabled); CHECK_FALSE(disabled.pipeline); CHECK_FALSE(disabled.state);
+    const auto cold = native.PrepareSlimVizBindings({}, 0, 20, true);
+    CHECK(cold.enabled); CHECK_FALSE(cold.pipeline); CHECK_FALSE(cold.state);
 }

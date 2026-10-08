@@ -1,6 +1,6 @@
 #pragma once
 #include "luth/renderer/features/RenderResource.h"
-#include "luth/renderer/resources/Texture.h"
+#include "luth/renderer/features/SlimVizViewState.h"
 #include <memory>
 #include <vulkan/vulkan.h>
 namespace Luth
@@ -12,7 +12,7 @@ namespace Luth
         VkPipeline pipeline = VK_NULL_HANDLE;
         VkPipelineLayout layout = VK_NULL_HANDLE;
         VkDescriptorSet set = VK_NULL_HANDLE;
-        std::array<std::shared_ptr<Texture>, 4> sources{};
+        std::shared_ptr<SlimVizViewState> state;
         SlimVizPushConstants parameters{};
         bool enabled = false;
     };

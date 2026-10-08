@@ -4,16 +4,15 @@
 #include <cmath>
 namespace Luth
 {
-    SlimVizBindings PostProcessSubsystem::PrepareSlimVizBindings(VkDescriptorSet set,
-        const std::array<std::shared_ptr<Texture>, 4>& sources, u32 mode, float scale, bool enabled) const
+    SlimVizBindings PostProcessSubsystem::PrepareSlimVizBindings(std::shared_ptr<SlimVizViewState> state, u32 mode, float scale, bool enabled) const
     {
         SlimVizBindings packet; packet.enabled = enabled;
         if (!enabled || !m_SlimVizPipeline) return packet;
-        if (!set || mode > 3 || !std::isfinite(scale) ||
-            std::any_of(sources.begin(), sources.end(), [](const auto& source) { return !source; }))
+        if (!state || !state->set || mode > 3 || !std::isfinite(scale) ||
+            std::any_of(state->sources.begin(), state->sources.end(), [](const auto& source) { return !source; }))
             throw std::invalid_argument("SlimViz: incomplete native sources or parameters");
         packet.pipeline = m_SlimVizPipeline->GetHandle(); packet.layout = m_SlimVizPipeline->GetLayout();
-        packet.set = set; packet.sources = sources; packet.parameters = {mode, scale};
+        packet.set = state->set; packet.state = std::move(state); packet.parameters = {mode, scale};
         return packet;
     }
     RG::ResourceHandle PostProcessSubsystem::AddSlimVizPass(RG::RenderGraph& graph, RG::ResourceHandle input,

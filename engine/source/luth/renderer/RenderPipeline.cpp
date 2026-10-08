@@ -1162,10 +1162,7 @@ namespace Luth
         // image). shadeMode was resolved above (hoisted for the bloom gate).
         const bool slimVizEnabled = !ptEnabled && shadeMode >= ShadeMode::SlimNormal && shadeMode <= ShadeMode::SlimMaterialID;
         const u32 slimMode = slimVizEnabled ? static_cast<u32>(shadeMode) - static_cast<u32>(ShadeMode::SlimNormal) : 0;
-        const std::array slimVizSources{view.targets->GetSlimNormal(), view.targets->GetSlimRoughness(),
-            view.targets->GetSlimMotion(), view.targets->GetSlimMaterialID()};
-        const auto slimVizNative = m_PostProcess.PrepareSlimVizBindings(m_CurrentViewResources->slimVizDescSet,
-            slimVizSources, slimMode, 20.0f, slimVizEnabled);
+        const auto slimVizNative = m_PostProcess.PrepareSlimVizBindings(m_CurrentViewResources->slimViz, slimMode, 20.0f, slimVizEnabled);
         const SlimVizBindingRef slimVizBinding{&slimVizNative};
         const auto optionalSlimInput = [](auto key, const GraphTextureRef& ref) {
             return ref.handle.IsValid() ? RenderInputBinding::Present(key, ref) : RenderInputBinding::Absent(key);

@@ -18,7 +18,7 @@ namespace Luth
 {
     class FrameTargets;
 
-    struct ViewResources;
+
 
     struct FrameDebugger;
 
@@ -43,7 +43,9 @@ namespace Luth
         bool OnShaderReloaded(const std::string& name, const std::vector<u32>& spv);
 
         // Stable slim visualization bindings; composite bindings belong to CompositeViewState.
-        void WriteView(ViewResources& vr, FrameTargets& targets);
+        std::shared_ptr<SlimVizViewState> EnsureSlimVizView(RenderViewId, FrameTargets&);
+        void ReleaseSlimVizView(RenderViewId);
+        void WriteSlimVizView(SlimVizViewState&);
 
         // Stable per-view writes for the bloom pyramid down/up sets (source mip -> b0, dest mip -> b1).
         // Written once per resize; the per-mip textures only change when the view resizes.
@@ -72,12 +74,11 @@ namespace Luth
         // scale is motion magnification (unused for other modes). Runs after composite, writes LDR.
         // slimGB carries the producer-side RG handles from SlimGBufferPass; re-importing the same
         // VkImages would create aliased RG resources the barrier solver can't reconcile.
-        SlimVizBindings PrepareSlimVizBindings(VkDescriptorSet,
-            const std::array<std::shared_ptr<Texture>, 4>&, u32 mode, float scale, bool enabled) const;
+        SlimVizBindings PrepareSlimVizBindings(std::shared_ptr<SlimVizViewState>, u32 mode, float scale, bool enabled) const;
         RG::ResourceHandle AddSlimVizPass(RG::RenderGraph&, RG::ResourceHandle input,
             const std::array<RG::ResourceHandle, 4>&, const SlimVizBindings&, FrameDebugger*);
         VkDescriptorSetLayout GetBloomComputeLayout()      const { return m_BloomComputeLayout; }
-        VkDescriptorSetLayout GetSlimVizDescSetLayout()    const { return m_SlimVizDescSetLayout; }
+
         VkDescriptorSetLayout GetTaaResolveDescSetLayout() const { return m_TaaResolveDescSetLayout; }
         const std::vector<u32>& GetFullscreenVertSpv() const { return m_FullscreenVertSpv; }
 
@@ -85,6 +86,7 @@ namespace Luth
         void BuildPipelines();
 
 
+        SlimVizViewStateStore m_SlimVizStates;
         TaaViewStateStore m_TaaStates;
         BloomViewStateStore m_BloomStates;
         CompositeViewStateStore m_CompositeStates;
