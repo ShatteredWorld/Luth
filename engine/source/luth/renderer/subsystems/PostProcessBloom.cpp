@@ -61,7 +61,7 @@ namespace Luth
         const auto extent = [&](u32 mip) { return BloomViewState::MipExtent(config, mip); };
         const auto import = [&](u32 mip, RG::RenderPassBuilder& builder) {
             const auto [width, height] = extent(mip);
-            RG::TextureDesc desc; desc.name = "BloomMip"; desc.width = width; desc.height = height;
+            RG::TextureDesc desc; desc.name = "BloomMip" + std::to_string(mip); desc.width = width; desc.height = height;
             desc.format = RG::TextureFormat::RGBA16_Float;
             return builder.WriteStorageImage(graph.ImportResource(desc, (void*)packet.images[mip],
                 (void*)packet.views[mip], RG::ResourceState::Undefined));

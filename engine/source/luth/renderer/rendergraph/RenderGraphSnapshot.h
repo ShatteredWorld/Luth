@@ -91,6 +91,8 @@ namespace Luth::RG
 
     struct RenderGraphSnapshot
     {
+        // Recording identity, independent of timings read from an older submission.
+        u64 viewId = 0, resourceGeneration = 0;
         std::vector<PassSnapshot>     passes;
         std::vector<ResourceSnapshot> resources;
         float totalGpuTimeMs = 0.0f;

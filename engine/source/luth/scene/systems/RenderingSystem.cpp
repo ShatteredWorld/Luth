@@ -1,4 +1,5 @@
 #include "luthpch.h"
+#include "luth/renderer/debug/NativeDebugOutputs.h"
 #include "luth/renderer/presentation/ViewPresentation.h"
 #include <imgui.h>
 #include "luth/renderer/shader/ShaderReloadCoordinator.h"
@@ -56,17 +57,36 @@ namespace Luth
         m_CaptureContext->Shutdown();
         m_FrameDebugger.Shutdown(VulkanContext::Get().GetDevice());
         m_CaptureContext.reset();
+        m_DebugOutputs.Clear();
         m_Pipeline->Shutdown();
     }
 
     void RenderingSystem::ReloadSkybox(const fs::path& hdrPath)
     {
         m_Pipeline->ReloadSkybox(hdrPath);
+        m_DebugOutputs.ReplaceShared(CollectSharedDebugOutputs(m_Pipeline->GetLighting()));
     }
 
     std::shared_ptr<Texture> RenderingSystem::GetNamedTexture(const std::string& name) const
     {
-        return m_Pipeline->GetNamedTexture(name);
+        const auto* view = m_Views.Get(m_SceneViewId);
+        return view ? GetNamedTexture(view->id, view->generation, name) : nullptr;
+    }
+
+    std::shared_ptr<Texture> RenderingSystem::GetNamedTexture(RenderViewId id, u64 generation, const std::string& name) const
+    {
+        const auto* view = m_Views.Get(id);
+        if (!view || view->generation != generation) return {};
+        return m_DebugOutputs.Find(id, generation, name);
+    }
+
+    void RenderingSystem::RefreshViewDebugOutputs(RenderViewId id, FrameTargets& targets)
+    {
+        const auto* view = m_Views.Get(id);
+        if (!view || view->targets != &targets) throw std::invalid_argument("Debug outputs require the registered view owner");
+        m_DebugOutputs.ReplaceShared(CollectSharedDebugOutputs(m_Pipeline->GetLighting()));
+        m_DebugOutputs.ReplaceView(id, view->generation, CollectViewDebugOutputs(targets,
+            m_Pipeline->GetViewResources(&targets), m_Pipeline->GetGtaoViewState(id)));
     }
 
     void RenderingSystem::ReplayPassUpToDraw(u32 passIdx, u32 localDrawIdx)
@@ -84,9 +104,11 @@ namespace Luth
         return m_GraphSnapshot;
     }
 
-    RG::RenderGraphSnapshot& RenderingSystem::CaptureGraphSnapshot(const RG::RenderGraph& graph)
+    RG::RenderGraphSnapshot& RenderingSystem::CaptureGraphSnapshot(const RG::RenderGraph& graph, RenderViewId id, u64 generation)
     {
         m_GraphSnapshot = Luth::CaptureGraphSnapshot(graph, m_DrawList);
+        m_GraphSnapshot.viewId = id.value;
+        m_GraphSnapshot.resourceGeneration = generation;
         return m_GraphSnapshot;
     }
 
@@ -398,6 +420,7 @@ namespace Luth
     u64 RenderingSystem::InvalidateView(RenderViewId id)
     {
         const u64 generation = m_Views.Invalidate(id);
+        m_DebugOutputs.Release(id);
         if (m_FrameDebugger.capturedFrame.capturedView.id == id) ExitCapture();
         return generation;
     }
@@ -428,6 +451,7 @@ namespace Luth
         std::erase_if(m_QueuedViews, [id](const RenderView& view) { return view.id == id; });
         m_GpuProfiler->Release(id);
         m_Profiling.Release(id);
+        m_DebugOutputs.Release(id);
         m_Views.Release(id);
     }
 }

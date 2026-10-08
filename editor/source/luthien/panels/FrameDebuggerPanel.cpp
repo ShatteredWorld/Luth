@@ -470,7 +470,7 @@ namespace Luth
                     ImGui::TextDisabled("(depth buffer - no preview)");
                 else
                 {
-                    auto tex = m_RS->GetNamedTexture(res.name);
+                    auto tex = m_RS->GetNamedTexture({snapshot.viewId}, snapshot.resourceGeneration, res.name);
                     if (tex)
                     {
                         float panelW = ImGui::GetContentRegionAvail().x;

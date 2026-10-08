@@ -65,6 +65,7 @@ TEST_CASE("BloomFeature: eleven graphics compute passes reuse six physical mip n
     for (u32 i = 0; i < 6; ++i)
     {
         const auto [w, h] = BloomViewState::MipExtent(BloomViewState::Config(801, 601), i);
+        CHECK(graph.GetResources()[i + 1].desc.name == "BloomMip" + std::to_string(i));
         CHECK(graph.GetResources()[i + 1].desc.width == w); CHECK(graph.GetResources()[i + 1].desc.height == h);
         CHECK(graph.GetResources()[i + 1].initialState == RG::ResourceState::Undefined);
     }

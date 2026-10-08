@@ -8,6 +8,7 @@
 #include "luth/renderer/FrameDebugger.h"
 #include "luth/renderer/FrameTargets.h"
 #include "luth/renderer/debug/ProfilingProvenance.h"
+#include "luth/renderer/debug/DebugOutputCatalog.h"
 #include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/draw/DrawList.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
@@ -271,6 +272,8 @@ namespace Luth
 
         const RG::RenderGraphSnapshot& GetGraphSnapshot() const;
         std::shared_ptr<Texture> GetNamedTexture(const std::string& name) const;
+        std::shared_ptr<Texture> GetNamedTexture(RenderViewId, u64 generation, const std::string& name) const;
+        void RefreshViewDebugOutputs(RenderViewId, FrameTargets&);
 
         u32 GetTriangleCount() const { return m_DrawList.visibleTriCount; }
 
@@ -313,7 +316,7 @@ namespace Luth
         void AppendViewPresentation(RG::RenderGraph&, RG::ResourceHandle finalLdr, bool emitImGui);
         void ExecuteMinimal();
         bool FinalizeViewCapture(const CaptureFinalizationInputs&, const RG::RenderGraphSnapshot&);
-        RG::RenderGraphSnapshot& CaptureGraphSnapshot(const RG::RenderGraph&);
+        RG::RenderGraphSnapshot& CaptureGraphSnapshot(const RG::RenderGraph&, RenderViewId, u64 generation);
         GPUTimerPool* PrepareViewProfiling(RenderViewId, u64 generation, u64 renderFrame,
             const RG::RenderGraph&, RG::RenderGraphSnapshot&, bool applyPrevious);
         void SubmitViewProfiling(RenderViewId, u64 renderFrame, SubmissionCompletionToken);
@@ -379,6 +382,7 @@ namespace Luth
         std::unique_ptr<RenderPipeline> m_Pipeline;
         std::unique_ptr<FrameDebuggerContext> m_CaptureContext;
         RG::RenderGraphSnapshot m_GraphSnapshot;
+        DebugOutputCatalog m_DebugOutputs;
         ProfilingProvenance m_Profiling;
         std::unique_ptr<class ViewGpuProfiler> m_GpuProfiler;
         std::unique_ptr<class ShaderReloadCoordinator> m_ShaderReload;

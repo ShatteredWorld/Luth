@@ -121,6 +121,7 @@ add_library(Luth STATIC
     source/luth/renderer/shader/ShaderReloadCoordinator.cpp
     source/luth/renderer/debug/ViewGpuProfiler.cpp
     source/luth/renderer/debug/ProfilingProvenance.cpp
+    source/luth/renderer/debug/NativeDebugOutputs.cpp
     source/luth/renderer/debug/GraphInstrumentation.cpp
     source/luth/renderer/debug/CaptureFinalization.cpp
     source/luth/renderer/debug/CaptureRecordingSession.cpp

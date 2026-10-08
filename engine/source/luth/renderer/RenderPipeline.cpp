@@ -315,7 +315,7 @@ namespace Luth
         auto forwardCompiled = RenderPipelineCompiler{}.Compile(std::move(forwardDefinition), {}, forwardInputs);
         if (!forwardCompiled.ReplaceIfValid(m_ForwardComposition))
             throw std::runtime_error("Forward opaque definition failed semantic validation");
-        RegisterNamedTextures();
+        m_System.RefreshViewDebugOutputs(m_System.GetViews().Find(&m_System.GetSceneTargets()), m_System.GetSceneTargets());
     }
 
     ShaderWatcher& RenderPipeline::GetShaderWatcher()
@@ -423,7 +423,7 @@ namespace Luth
         // Scene-panel resize. FrameTargets is already resized by RenderingSystem::Resize;
         // EnsureViewResources picks up the size change and rebuilds textures + descriptors.
         EnsureViewResources(m_System.GetSceneTargets());
-        RegisterNamedTextures();
+        m_System.RefreshViewDebugOutputs(m_System.GetViews().Find(&m_System.GetSceneTargets()), m_System.GetSceneTargets());
     }
 
     void RenderPipeline::PrepareForTargets(FrameTargets& targets)
@@ -1235,7 +1235,8 @@ namespace Luth
         rg.Compile();
 
         // Capture render graph snapshot for Frame Debugger panel
-        auto& graphSnapshot = m_System.CaptureGraphSnapshot(rg);
+        m_System.RefreshViewDebugOutputs(view.id, *view.targets);
+        auto& graphSnapshot = m_System.CaptureGraphSnapshot(rg, view.id, m_CurrentViewResources->generation);
         auto* timers = m_System.PrepareViewProfiling(view.id, m_CurrentViewResources->generation,
             Renderer::GetFrameData()->GetRenderFrameIndex(), rg, graphSnapshot, !view.captureRequested);
 
@@ -1302,38 +1303,9 @@ namespace Luth
         return hasComputeWork;
     }
 
-    void RenderPipeline::RegisterNamedTextures()
-    {
-        m_NamedTextures.clear();
-        if (m_Lighting.GetShadowMap())                     m_NamedTextures["ShadowMap"]    = m_Lighting.GetShadowMap();
-        if (m_System.GetSceneTargets().GetSceneColor())    m_NamedTextures["SceneColor"]   = m_System.GetSceneTargets().GetSceneColor();
-        if (m_System.GetSceneTargets().GetSceneDepth())    m_NamedTextures["SceneDepth"]   = m_System.GetSceneTargets().GetSceneDepth();
-        if (m_System.GetSceneTargets().GetLDROutput())     m_NamedTextures["LDROutput"]    = m_System.GetSceneTargets().GetLDROutput();
-        if (m_System.GetSceneTargets().GetEntityIDBuffer())m_NamedTextures["EntityID"]     = m_System.GetSceneTargets().GetEntityIDBuffer();
-        // Scene-view bloom textures; Frame Debugger is scene-view-only.
-        if (auto it = m_ViewResources.find(m_System.GetViews().Find(&m_System.GetSceneTargets()).value); it != m_ViewResources.end()) {
-            for (u32 i = 0; i < BloomViewState::kMipCount; ++i)
-                if (it->second.bloom && it->second.bloom->mips[i]) m_NamedTextures["BloomMip" + std::to_string(i)] = it->second.bloom->mips[i];
-            if (it->second.fog && it->second.fog->volDensity)          m_NamedTextures["VolDensity"]           = it->second.fog->volDensity;
-            if (it->second.fog && it->second.fog->volInScatter)        m_NamedTextures["VolInScatter"]         = it->second.fog->volInScatter;
-            if (it->second.fog && it->second.fog->volInScatterHistA)   m_NamedTextures["VolInScatterHistA"]   = it->second.fog->volInScatterHistA;
-            if (it->second.fog && it->second.fog->volInScatterHistB)   m_NamedTextures["VolInScatterHistB"]   = it->second.fog->volInScatterHistB;
-            if (it->second.reflRadiance)        m_NamedTextures["Reflections"]         = it->second.reflRadiance;
-        }
-        if (m_Lighting.GetIrradianceMap())  m_NamedTextures["IrradianceMap"]  = m_Lighting.GetIrradianceMap();
-        if (m_Lighting.GetPrefilteredMap()) m_NamedTextures["PrefilteredMap"] = m_Lighting.GetPrefilteredMap();
-        if (m_Lighting.GetBRDFLut())        m_NamedTextures["BRDF_LUT"]       = m_Lighting.GetBRDFLut();
-        // Slim G-buffer attachments. Empty until SlimGBufferPass writes them.
-        if (m_System.GetSceneTargets().GetSlimNormal())     m_NamedTextures["SlimNormal"]     = m_System.GetSceneTargets().GetSlimNormal();
-        if (m_System.GetSceneTargets().GetSlimRoughness())  m_NamedTextures["SlimRoughness"]  = m_System.GetSceneTargets().GetSlimRoughness();
-        if (m_System.GetSceneTargets().GetSlimMotion())     m_NamedTextures["SlimMotion"]     = m_System.GetSceneTargets().GetSlimMotion();
-        if (m_System.GetSceneTargets().GetSlimMaterialID()) m_NamedTextures["SlimMaterialID"] = m_System.GetSceneTargets().GetSlimMaterialID();
-    }
-
     std::shared_ptr<Texture> RenderPipeline::GetNamedTexture(const std::string& name) const
     {
-        auto it = m_NamedTextures.find(name);
-        return (it != m_NamedTextures.end()) ? it->second : nullptr;
+        return m_System.GetNamedTexture(name);
     }
 
     // ---- Compatibility frame-debugger forwarders into RenderingSystem ----

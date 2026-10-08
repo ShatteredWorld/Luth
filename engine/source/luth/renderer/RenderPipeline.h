@@ -406,7 +406,6 @@ namespace Luth
         const PostProcessSubsystem& GetPostProcess() const { return m_PostProcess; }
 
     private:
-        void RegisterNamedTextures();
 
 
 
@@ -516,9 +515,7 @@ namespace Luth
         const IDenoiser&               GetDenoiseDiSpec()  const { return *m_DenoiseDiSpec; }
 
     private:
-        // ---- GPU timers + named-texture registry ----
-
-        std::unordered_map<std::string, std::shared_ptr<Texture>> m_NamedTextures;
+        // Profiling and named output ownership live in RenderingSystem.
 
         // ---- Shader hot-reload (engine + project dirs) ----
 
