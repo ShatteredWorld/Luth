@@ -62,6 +62,8 @@ add_library(Luth STATIC
     source/luth/renderer/subsystems/PostProcessTaa.cpp
     source/luth/renderer/features/CompositeFeature.cpp
     source/luth/renderer/subsystems/PostProcessComposite.cpp
+    source/luth/renderer/features/EditorOverlayViewState.cpp
+    source/luth/renderer/subsystems/EditorOverlayState.cpp
     source/luth/renderer/features/CompositeViewState.cpp
     source/luth/renderer/subsystems/PostProcessCompositeState.cpp
     source/luth/renderer/features/BloomViewState.cpp

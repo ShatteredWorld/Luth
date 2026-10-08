@@ -319,10 +319,10 @@ namespace Luth
         writes[0].pBufferInfo     = &bi;
 
         u32 n = 1;
-        if (vr->gridDescSet[0] != VK_NULL_HANDLE)
+        if (vr->overlays && vr->overlays->gridSets[slot] != VK_NULL_HANDLE)
         {
             writes[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            writes[1].dstSet          = vr->gridDescSet[slot];
+            writes[1].dstSet          = vr->overlays->gridSets[slot];
             writes[1].dstBinding      = 0;
             writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             writes[1].descriptorCount = 1;

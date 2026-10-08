@@ -257,6 +257,7 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         VkDevice device = VulkanContext::Get().GetDevice();
+        m_ViewStates.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_GridPipeline.reset();
         m_OutlinePipeline.reset();
         m_SelectionMaskSkinnedPipeline.reset();
@@ -300,16 +301,19 @@ namespace Luth
         return true;
     }
 
-    void EditorOverlaysSubsystem::WriteOutlineView(ViewResources& vr, FrameTargets& targets)
+    void EditorOverlaysSubsystem::WriteOutlineView(EditorOverlayViewState& state)
     {
         LH_PROFILE_FUNCTION();
-        if (vr.outlineDescSet == VK_NULL_HANDLE || m_OutlineSampler == VK_NULL_HANDLE) return;
 
+
+        for (const auto& source : state.sources)
+            if (!source) throw std::invalid_argument("Editor overlays: missing stable source");
+        if (state.outlineSet == VK_NULL_HANDLE || m_OutlineSampler == VK_NULL_HANDLE) return;
         VkDevice device = VulkanContext::Get().GetDevice();
 
-        auto vkMask     = std::static_pointer_cast<VKTexture>(targets.GetSelectionMask());
-        auto vkSelDepth = std::static_pointer_cast<VKTexture>(targets.GetSelectionDepth());
-        auto vkScnDepth = std::static_pointer_cast<VKTexture>(targets.GetSceneDepth());
+        auto vkMask     = std::static_pointer_cast<VKTexture>(state.sources[0]);
+        auto vkSelDepth = std::static_pointer_cast<VKTexture>(state.sources[1]);
+        auto vkScnDepth = std::static_pointer_cast<VKTexture>(state.sources[2]);
 
         VkDescriptorImageInfo maskInfo{};
         maskInfo.sampler     = m_OutlineSampler;
@@ -328,7 +332,7 @@ namespace Luth
 
         VkWriteDescriptorSet writes[3] = {};
         writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[0].dstSet          = vr.outlineDescSet;
+        writes[0].dstSet          = state.outlineSet;
         writes[0].dstBinding      = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -343,16 +347,19 @@ namespace Luth
         vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
     }
 
-    void EditorOverlaysSubsystem::WriteGridView(ViewResources& vr, FrameTargets& targets)
+    void EditorOverlaysSubsystem::WriteGridView(EditorOverlayViewState& state)
     {
         LH_PROFILE_FUNCTION();
-        if (vr.gridDescSet[0] == VK_NULL_HANDLE || m_GridDepthSampler == VK_NULL_HANDLE) return;
 
+
+        for (const auto& source : state.sources)
+            if (!source) throw std::invalid_argument("Editor overlays: missing stable source");
+        if (state.gridSets[0] == VK_NULL_HANDLE || m_GridDepthSampler == VK_NULL_HANDLE) return;
         VkDevice device = VulkanContext::Get().GetDevice();
 
         // Binding 0 (per-view GlobalUBO) rewritten per render-stage by GlobalSubsystem::UpdateUBO.
         // Stable depth-sampler binding propagated to every cycled slot.
-        auto vkScnDepth = std::static_pointer_cast<VKTexture>(targets.GetSceneDepth());
+        auto vkScnDepth = std::static_pointer_cast<VKTexture>(state.sources[2]);
         VkDescriptorImageInfo depthInfo{};
         depthInfo.sampler     = m_GridDepthSampler;
         depthInfo.imageView   = vkScnDepth->GetImageView();
@@ -362,7 +369,7 @@ namespace Luth
         for (u32 s = 0; s < MAX_FRAMES_IN_FLIGHT; ++s)
         {
             samplerWrites[s] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            samplerWrites[s].dstSet          = vr.gridDescSet[s];
+            samplerWrites[s].dstSet          = state.gridSets[s];
             samplerWrites[s].dstBinding      = 1;
             samplerWrites[s].descriptorCount = 1;
             samplerWrites[s].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -588,7 +595,7 @@ namespace Luth
                 VkCommandBuffer cmd = ctx.commandBuffer;
                 m_OutlinePipeline->Bind(cmd);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_OutlinePipeline->GetLayout(), 0, 1, &vr->outlineDescSet, 0, nullptr);
+                    m_OutlinePipeline->GetLayout(), 0, 1, &vr->overlays->outlineSet, 0, nullptr);
 
                 u32 w = view->targets->GetLDROutput()->GetWidth();
                 u32 h = view->targets->GetLDROutput()->GetHeight();
@@ -658,7 +665,7 @@ namespace Luth
                 const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
                 m_GridPipeline->Bind(cmd);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_GridPipeline->GetLayout(), 0, 1, &vr->gridDescSet[slot], 0, nullptr);
+                    m_GridPipeline->GetLayout(), 0, 1, &vr->overlays->gridSets[slot], 0, nullptr);
 
                 RG::RenderGraph::ResourceNode* res = (RG::RenderGraph::ResourceNode*)ctx.GetResource(data.colorTex);
                 VkViewport vp{};

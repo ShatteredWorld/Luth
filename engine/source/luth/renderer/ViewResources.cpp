@@ -23,11 +23,11 @@ namespace Luth
     // Per-view pool: cycled sets allocate MAX_FRAMES_IN_FLIGHT instances each. Capacity bumped on
     // every subsystem addition; silent vkAllocateDescriptorSets failure on overflow returns
     // VK_NULL_HANDLE handles and skips the draw with no log. Bump generously; pool memory is cheap.
-    static constexpr u32 k_ViewPoolMaxSets              = 205 - 11 * MAX_FRAMES_IN_FLIGHT - 13;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale
-    static constexpr u32 k_ViewPoolUniformBufferCount   = 48 - 3 * MAX_FRAMES_IN_FLIGHT;
+    static constexpr u32 k_ViewPoolMaxSets              = 205 - 12 * MAX_FRAMES_IN_FLIGHT - 14;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale
+    static constexpr u32 k_ViewPoolUniformBufferCount   = 48 - 4 * MAX_FRAMES_IN_FLIGHT;
     static constexpr u32 k_ViewPoolStorageImageCount    = 248 - 7 * MAX_FRAMES_IN_FLIGHT - 13;  // + DiSpecular SVGF + restir Set 2 b8 + GI upscale b3 + DI upscale x2 + refl upscale b3
     static constexpr u32 k_ViewPoolStorageBufferCount   = 126 - 5 * MAX_FRAMES_IN_FLIGHT - 1;
-    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - 22 * MAX_FRAMES_IN_FLIGHT - 13;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels
+    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - 23 * MAX_FRAMES_IN_FLIGHT - 16;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels
     static constexpr u32 k_ViewPoolAccelStructCount     = 8;   // Set 0 binding 6 (TLAS) cycled per frame
 
     namespace {
@@ -87,6 +87,10 @@ namespace Luth
         const bool compositeReplaced = vr.composite && vr.composite != composite;
         vr.composite = std::move(composite);
         if (compositeReplaced) vr.generation = m_System.InvalidateView(id);
+        auto overlays = m_EditorOverlays.EnsureView(id, targets);
+        const bool overlaysReplaced = vr.overlays && vr.overlays != overlays;
+        vr.overlays = std::move(overlays);
+        if (overlaysReplaced) vr.generation = m_System.InvalidateView(id);
 
         if (inserted || vr.descPool == VK_NULL_HANDLE)
         {
@@ -107,8 +111,8 @@ namespace Luth
             const u32 halfH = std::max(newH / 2, 1u);
             RecreateViewTextures(vr, newW, newH, halfW, halfH);
             m_PostProcess.WriteView(vr, targets);
-            m_EditorOverlays.WriteOutlineView(vr, targets);
-            m_EditorOverlays.WriteGridView(vr, targets);
+
+
             m_Rt.WriteShadowPassView(vr, targets);  // re-bind binding 2 (mask storage) to the new viewport-sized image
             m_Restir.WriteView(vr, targets);        // re-bind Set 2 depth/normal + reservoir + new DI image
             m_RestirGi.WriteView(vr, targets);      // re-bind GI Set 2 depth/normal + reservoir + new GI image
@@ -139,6 +143,7 @@ namespace Luth
         m_Volumetric.ReleaseView(id);
         m_Transparency.ReleaseView(id);
         m_PostProcess.ReleaseTaaView(id);
+        m_EditorOverlays.ReleaseView(id);
         m_PostProcess.ReleaseCompositeView(id);
         m_PostProcess.ReleaseBloomView(id);
         auto it = m_ViewResources.find(id.value);
@@ -238,8 +243,8 @@ namespace Luth
 
         allocCycled(m_Global.GetSetLayout(),             vr.globalDescriptorSet,   "View.Global");
 
-        allocSingle(m_EditorOverlays.GetOutlineLayout(), vr.outlineDescSet,       "View.Outline");
-        allocCycled(m_EditorOverlays.GetGridLayout(),    vr.gridDescSet,          "View.Grid");
+
+
         allocSingle(m_PostProcess.GetSlimVizDescSetLayout(), vr.slimVizDescSet,   "View.SlimViz");
         allocCycled(m_Lighting.GetSetLayout(),           vr.lightDescSet,         "View.Light");
         allocCycled(m_Lighting.GetClusterBuildLayout(),  vr.clusterBuildDescSet,  "View.ClusterBuild");
@@ -261,8 +266,8 @@ namespace Luth
         m_DenoiseDiSpec->AllocateViewSets(vr);
 
         m_PostProcess.WriteView(vr, targets);
-        m_EditorOverlays.WriteOutlineView(vr, targets);
-        m_EditorOverlays.WriteGridView(vr, targets);
+
+
         m_Lighting.WriteShadowView(vr);
         m_Lighting.WriteClusterVizView(vr, targets);
         m_Rt.WriteShadowPassView(vr, targets);
@@ -558,6 +563,7 @@ namespace Luth
     void RenderPipeline::DestroyViewResources(ViewResources& vr)
     {
         // Pool destruction frees every descriptor set allocated from it.
+        vr.overlays.reset();
         vr.composite.reset();
         vr.bloom.reset();
         vr.fog.reset();

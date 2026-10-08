@@ -3,6 +3,7 @@
 #include "luth/core/types/LuthTypes.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/backend/vulkan/VulkanPipeline.h"
+#include "luth/renderer/features/EditorOverlayViewState.h"
 
 #include <entt/entt.hpp>
 #include <memory>
@@ -33,8 +34,10 @@ namespace Luth
         bool OnShaderReloaded(const std::string& name, const std::vector<u32>& spv,
                               const std::vector<VkDescriptorSetLayout>& geoLayouts);
 
-        void WriteOutlineView(ViewResources& vr, FrameTargets& targets);
-        void WriteGridView(ViewResources& vr, FrameTargets& targets);
+        std::shared_ptr<EditorOverlayViewState> EnsureView(RenderViewId, FrameTargets&);
+        void ReleaseView(RenderViewId);
+        void WriteOutlineView(EditorOverlayViewState&);
+        void WriteGridView(EditorOverlayViewState&);
 
         SelectionMaskOutput AddSelectionMaskPass(RG::RenderGraph& rg);
         RG::ResourceHandle  AddOutlinePass(RG::RenderGraph& rg, RG::ResourceHandle ldrOutput,
@@ -44,8 +47,6 @@ namespace Luth
         // Recursively collect entity handles + descendants for the selection mask.
         void CollectSelectedHandles(const std::vector<Entity>& selected, std::unordered_set<entt::entity>& outHandles) const;
 
-        VkDescriptorSetLayout GetOutlineLayout() const { return m_OutlineDescSetLayout; }
-        VkDescriptorSetLayout GetGridLayout()    const { return m_GridDescSetLayout; }
         VKPipeline*           GetSelectionMaskPipeline()        const { return m_SelectionMaskPipeline.get(); }
         VKPipeline*           GetSelectionMaskSkinnedPipeline() const { return m_SelectionMaskSkinnedPipeline.get(); }
 
@@ -56,6 +57,7 @@ namespace Luth
         void BuildGridPipeline();
 
         RenderPipeline* m_Pipeline = nullptr;
+        EditorOverlayViewStateStore m_ViewStates;
 
         // Selection mask (5-set graphics, push-constant per draw).
         std::unique_ptr<VKPipeline> m_SelectionMaskPipeline;

@@ -21,6 +21,7 @@ add_executable(LuthTests
     renderer/BloomFeature.cpp
     renderer/TaaFeature.cpp
     renderer/CompositeFeature.cpp
+    renderer/EditorOverlayViewState.cpp
     renderer/CompositeViewState.cpp
     renderer/BloomViewState.cpp
     renderer/TaaViewState.cpp
