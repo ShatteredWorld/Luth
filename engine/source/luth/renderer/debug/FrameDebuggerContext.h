@@ -14,7 +14,7 @@ namespace Luth
     class PostProcessSubsystem;
     class EditorOverlaysSubsystem;
 
-    // Render-side frame-debugger infrastructure that lives next to RenderPipeline. Owns the
+    // Render-side frame-debugger infrastructure owned by RenderingSystem. Owns the
     // per-draw and depth preview textures, the debug-blit render-graph pass, and the replay-
     // then-copy path. Distinct from RenderingSystem::m_FrameDebugger, which holds the archive,
     // state machine, and capture metadata; this context only deals with the render-side preview
@@ -29,7 +29,7 @@ namespace Luth
             PostProcessSubsystem&, EditorOverlaysSubsystem&);
         ~FrameDebuggerContext();
 
-        // Tear down the preview textures. Called from RenderPipeline::Shutdown before the Vulkan device is destroyed.
+        // Tear down previews before borrowed native domains and the Vulkan device are destroyed.
         void Shutdown();
 
         // Lazily create the debug-blit shader + descriptor resources. Safe to call repeatedly; returns early once
@@ -56,7 +56,7 @@ namespace Luth
         // the motion magnification (only used in mode 1; ignored otherwise).
         void BlitArchivedSlimToPreview(u32 archiveIdx, u32 mode, float scale);
 
-        // Editor/debug accessors (forwarded by RenderPipeline).
+        // Editor/debug accessors (forwarded by RenderingSystem).
         VkImageView GetPerDrawPreviewView()  const { return m_PerDrawPreviewView; }
         u64         GetPerDrawPreviewKey()   const { return m_PerDrawPreviewKey; }
         u32         GetPerDrawPreviewWidth() const { return m_PerDrawPreviewWidth; }

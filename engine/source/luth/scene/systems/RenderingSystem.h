@@ -33,6 +33,7 @@
 namespace Luth
 {
     class Texture;
+    class FrameDebuggerContext;
     struct RenderSnapshot;
 
     // Per-frame global shader inputs (Set 0 UBO). Layout mirrors GLSL binding.
@@ -305,6 +306,8 @@ namespace Luth
         // Frame debugger capture
         void RequestCapture()   { if (m_FrameDebugger.state == DebuggerState::Inactive) m_FrameDebugger.state = DebuggerState::CaptureRequested; }
         void ExitCapture();
+        void BeginViewCapture(const RenderView& view);
+        void ResetPreviewCacheKeys();
         DebuggerState GetDebuggerState() const { return m_FrameDebugger.state; }
         const RG::CapturedFrame& GetCapturedFrame() const { return m_FrameDebugger.capturedFrame; }
         VkSampler GetDebugSampler() const { return m_FrameDebugger.sampler; }
@@ -316,7 +319,7 @@ namespace Luth
         CaptureSource GetCaptureSource() const          { return m_FrameDebugger.requestedSource; }
         CaptureSource GetCapturedSource() const         { return m_FrameDebugger.capturedSource; }
 
-        // Frame-debugger preview forwarders (implementations on RenderPipeline).
+        // Frame-debugger previews are owned here; native domains are borrowed from the pipeline.
         void        ReplayPassUpToDraw(u32 passIdx, u32 localDrawIdx);
         VkImageView GetPerDrawPreviewView() const;
         u64         GetPerDrawPreviewKey()  const;
@@ -362,6 +365,7 @@ namespace Luth
         // Graphics resources + render-graph orchestration (owns all pipelines,
         // descriptor sets, samplers, UBOs, SSBOs, preview textures, etc.).
         std::unique_ptr<RenderPipeline> m_Pipeline;
+        std::unique_ptr<FrameDebuggerContext> m_CaptureContext;
 
         // Editor-facing state.
         PostProcessSettings  m_PostProcessSettings;

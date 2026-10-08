@@ -49,7 +49,7 @@ namespace Luth
     class FrameTargets;
     class Material;
     class RenderingSystem;
-    class FrameDebuggerContext;
+
     struct GeometryOutput;
     struct RenderSnapshot;
     namespace fs = std::filesystem;
@@ -104,11 +104,9 @@ namespace Luth
         // Composite remains cycled; native preparation rebinds its per-frame uniform slot.
         std::shared_ptr<CompositeViewState> composite;
 
-
         // Editor overlays: allocated for every view, bound only by the scene view
         // (game view's subgraph skips both passes via flags).
         std::shared_ptr<EditorOverlayViewState> overlays; // Borrowed native editor domain state.
-
 
         // Slim G-buffer live viz (ShadeMode toggle). Single set, written once at AllocateViewResources
         // time pointing at the 4 slim FrameTargets. Bindings: 0=normal, 1=roughness, 2=motion, 3=matID.
@@ -152,7 +150,6 @@ namespace Luth
         std::shared_ptr<TaaViewState> taa; // Borrowed postprocessing domain state.
         Vec2 currentJitter{ 0.0f, 0.0f };
         Vec2 prevJitter{ 0.0f, 0.0f };
-
 
         // RT sun-shadow mask: viewport-sized R8 storage image, written by raygen on
         // AsyncCompute and sampled by pbr.frag (Set 3 binding 4) when ShadowingMode::RtShadows is
@@ -378,12 +375,12 @@ namespace Luth
         // RenderingSystem::OnProjectLoaded, which forwards to this getter.
         ShaderWatcher& GetShaderWatcher() { return m_ShaderWatcher; }
 
-        // Owning RenderingSystem (set by ctor). FrameDebuggerContext + future subsystems read scene state
+        // Owning RenderingSystem (set by ctor). Compatibility subsystems read scene state
         // through this accessor.
         RenderingSystem&       GetSystem()       { return m_System; }
         const RenderingSystem& GetSystem() const { return m_System; }
 
-        // Active per-view scratch (set during Execute; consumed by FrameDebuggerContext + subsystems).
+        // Active per-view scratch (set during Execute; consumed by compatibility subsystems).
         const RenderView*    GetCurrentView()                { return m_CurrentView; }
         ViewResources*       GetCurrentViewResources()       { return m_CurrentViewResources; }
         const ViewResources* GetCurrentViewResources() const { return m_CurrentViewResources; }
@@ -418,7 +415,6 @@ namespace Luth
         RG::RenderGraphSnapshot CaptureSnapshot(const RG::RenderGraph& rg);
 
         RenderingSystem& m_System;
-        std::unique_ptr<FrameDebuggerContext> m_Debugger;
 
         // Active RenderView + ViewResources for the current Execute call.
         // Passes read these instead of taking the view as a parameter.

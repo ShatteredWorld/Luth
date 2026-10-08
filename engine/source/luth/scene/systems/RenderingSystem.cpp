@@ -5,6 +5,8 @@
 #include "luth/core/RenderSnapshot.h"
 #include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/Renderer.h"
+#include "luth/renderer/debug/FrameDebuggerContext.h"
+#include "luth/renderer/backend/vulkan/VulkanContext.h"
 #include "luth/renderer/backend/vulkan/VulkanBackend.h"
 #include "luth/assets/FileSystem.h"
 #include "luth/scene/Scene.h"
@@ -21,10 +23,19 @@ namespace Luth
         m_FrameAllocator = std::make_unique<Memory::LinearAllocator>(1 * Memory::MB);
         m_Pipeline       = std::make_unique<RenderPipeline>(*this);
         m_Pipeline->Initialize(viewportWidth, viewportHeight);
+        m_CaptureContext = std::make_unique<FrameDebuggerContext>(*this, m_Pipeline->GetGeometry(),
+            m_Pipeline->GetLighting(), m_Pipeline->GetPostProcess(), m_Pipeline->GetEditorOverlays());
     }
 
     RenderingSystem::~RenderingSystem()
     {
+        // Replay borrows native domains and descriptor resources. Retire capture first,
+        // after completion, while those dependencies and the Vulkan device are alive.
+        m_Pipeline->GetShaderWatcher().Stop();
+        Renderer::WaitForGPU();
+        m_CaptureContext->Shutdown();
+        m_FrameDebugger.Shutdown(VulkanContext::Get().GetDevice());
+        m_CaptureContext.reset();
         m_Pipeline->Shutdown();
     }
 
@@ -40,17 +51,30 @@ namespace Luth
 
     void RenderingSystem::ReplayPassUpToDraw(u32 passIdx, u32 localDrawIdx)
     {
-        m_Pipeline->ReplayPassUpToDraw(passIdx, localDrawIdx);
+        m_CaptureContext->ReplayPassUpToDraw(passIdx, localDrawIdx);
     }
 
     void RenderingSystem::BlitArchivedDepthToPreview(u32 archiveIdx, int layer, float nearZ, float farZ)
     {
-        m_Pipeline->BlitArchivedDepthToPreview(archiveIdx, layer, nearZ, farZ);
+        m_CaptureContext->BlitArchivedDepthToPreview(archiveIdx, layer, nearZ, farZ);
     }
 
     const RG::RenderGraphSnapshot& RenderingSystem::GetGraphSnapshot() const
     {
         return m_Pipeline->GetGraphSnapshot();
+    }
+
+    void RenderingSystem::BeginViewCapture(const RenderView& view)
+    {
+        if (!view.captureRequested || m_FrameDebugger.state != DebuggerState::CaptureRequested) return;
+        m_CaptureContext->InitDebugBlitResources();
+        m_CaptureContext->ResetPreviewCacheKeys();
+        m_FrameDebugger.BeginCapture(VulkanContext::Get().GetDevice(), VulkanContext::Get().GetAllocator());
+    }
+
+    void RenderingSystem::ResetPreviewCacheKeys()
+    {
+        m_CaptureContext->ResetPreviewCacheKeys();
     }
 
     void RenderingSystem::ExitCapture()
@@ -61,24 +85,24 @@ namespace Luth
         m_FrameDebugger.capturedFrame.Clear();
         // Drop the per-draw replay cache key so the next capture starts clean; the preview texture
         // itself is reused across captures.
-        m_Pipeline->ResetPreviewCacheKeys();
+        m_CaptureContext->ResetPreviewCacheKeys();
     }
 
-    VkImageView RenderingSystem::GetPerDrawPreviewView()   const { return m_Pipeline->GetPerDrawPreviewView(); }
-    u64         RenderingSystem::GetPerDrawPreviewKey()    const { return m_Pipeline->GetPerDrawPreviewKey(); }
-    u32         RenderingSystem::GetPerDrawPreviewWidth()  const { return m_Pipeline->GetPerDrawPreviewWidth(); }
-    u32         RenderingSystem::GetPerDrawPreviewHeight() const { return m_Pipeline->GetPerDrawPreviewHeight(); }
-    VkImageView RenderingSystem::GetDepthPreviewView()     const { return m_Pipeline->GetDepthPreviewView(); }
-    u32         RenderingSystem::GetDepthPreviewWidth()    const { return m_Pipeline->GetDepthPreviewWidth(); }
-    u32         RenderingSystem::GetDepthPreviewHeight()   const { return m_Pipeline->GetDepthPreviewHeight(); }
+    VkImageView RenderingSystem::GetPerDrawPreviewView()   const { return m_CaptureContext->GetPerDrawPreviewView(); }
+    u64         RenderingSystem::GetPerDrawPreviewKey()    const { return m_CaptureContext->GetPerDrawPreviewKey(); }
+    u32         RenderingSystem::GetPerDrawPreviewWidth()  const { return m_CaptureContext->GetPerDrawPreviewWidth(); }
+    u32         RenderingSystem::GetPerDrawPreviewHeight() const { return m_CaptureContext->GetPerDrawPreviewHeight(); }
+    VkImageView RenderingSystem::GetDepthPreviewView()     const { return m_CaptureContext->GetDepthPreviewView(); }
+    u32         RenderingSystem::GetDepthPreviewWidth()    const { return m_CaptureContext->GetDepthPreviewWidth(); }
+    u32         RenderingSystem::GetDepthPreviewHeight()   const { return m_CaptureContext->GetDepthPreviewHeight(); }
 
     void RenderingSystem::BlitArchivedSlimToPreview(u32 archiveIdx, u32 mode, float scale)
     {
-        m_Pipeline->BlitArchivedSlimToPreview(archiveIdx, mode, scale);
+        m_CaptureContext->BlitArchivedSlimToPreview(archiveIdx, mode, scale);
     }
-    VkImageView RenderingSystem::GetSlimPreviewView()      const { return m_Pipeline->GetSlimPreviewView(); }
-    u32         RenderingSystem::GetSlimPreviewWidth()     const { return m_Pipeline->GetSlimPreviewWidth(); }
-    u32         RenderingSystem::GetSlimPreviewHeight()    const { return m_Pipeline->GetSlimPreviewHeight(); }
+    VkImageView RenderingSystem::GetSlimPreviewView()      const { return m_CaptureContext->GetSlimPreviewView(); }
+    u32         RenderingSystem::GetSlimPreviewWidth()     const { return m_CaptureContext->GetSlimPreviewWidth(); }
+    u32         RenderingSystem::GetSlimPreviewHeight()    const { return m_CaptureContext->GetSlimPreviewHeight(); }
 
     // ---- Project lifecycle ----
 

@@ -25,7 +25,7 @@
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
-#include "luth/renderer/debug/FrameDebuggerContext.h"
+
 #include "luth/renderer/debug/CaptureRecordingSession.h"
 #include "luth/scene/systems/RenderingSystem.h"
 #include "luth/scene/systems/SystemRegistry.h"
@@ -68,7 +68,6 @@ namespace Luth
 
     RenderPipeline::RenderPipeline(RenderingSystem& system)
         : m_System(system)
-        , m_Debugger(std::make_unique<FrameDebuggerContext>(system, m_Geometry, m_Lighting, m_PostProcess, m_EditorOverlays))
         , m_Denoise(std::make_unique<SvgfDenoiser>(DenoiserChannel::Di))
         , m_DenoiseGi(std::make_unique<SvgfDenoiser>(DenoiserChannel::Gi))
         , m_DenoiseRefl(std::make_unique<SvgfDenoiser>(DenoiserChannel::Reflections))
@@ -397,17 +396,12 @@ namespace Luth
 
         BoneMatrixBuffer::Shutdown();
 
-        VkDevice device = VulkanContext::Get().GetDevice();
-
         // Release per-view state before the shared layouts it references.
         for (auto& [targets, vr] : m_ViewResources)
             DestroyViewResources(vr);
         m_ViewResources.clear();
         m_GtaoPipeline.reset();
         m_GtaoStates.ReleaseAll([] { Renderer::WaitForGPU(); });
-
-        m_Debugger->Shutdown();
-        m_System.GetFrameDebugger().Shutdown(device);
 
         // Subsystems own their layouts/pools/samplers/pipelines.
         m_Transparency.Shutdown();
@@ -546,7 +540,6 @@ namespace Luth
         // The TLAS-ready term makes ptEnabled imply ptActive below: a cold boot with PT pre-enabled renders
         // one real-time frame (which builds the TLAS) before PT takes over; never a black frame / invalid
         // geoOutput for the !ptActive overlays.
-
 
         // Real-time geometry inputs, hoisted so the post chain + overlays can reference them; produced only
         // on the real-time path (PT traces its own primary rays, so it needs none of these).
@@ -867,7 +860,6 @@ namespace Luth
                 LH_LOG(Renderer, error, "GTAO composition: {}", diagnostic.message);
             return false; // Never compile/record a graph with invalid contracts.
         }
-
 
         // Real-time lit chain (geometry -> skybox -> fog composite -> transparent -> TAA). Skipped in PT; the
         // megakernel output drives the post chain via hdrForPost below. geoOutput/selection outputs/resolvedHdr hoisted
@@ -1315,23 +1307,7 @@ namespace Luth
         m_GraphSnapshot.totalGpuTimeMs = totalMs;
         m_GraphSnapshot.totalStats = total;
 
-        // Wire the archive sink for this capture. The sink copies each tracked RT after the pass that writes it.
-        // Gate on the per-view captureRequested flag (set by the view's owner: RenderingSystem for the scene view,
-        // GamePanel for the game view) so the chosen capture source's RG installs the sink, not the editor's by default.
-        if (view.captureRequested && m_System.GetFrameDebugger().state == DebuggerState::CaptureRequested)
-        {
-            // Create the debug sampler for ImGui archive previews. Idempotent; returns immediately once blitPipeline is already set.
-            m_Debugger->InitDebugBlitResources();
-
-            // Invalidate per-draw and depth preview caches. Cache keys are (passIdx, drawIdx) / (archiveIdx,
-            // layer+1), which can collide across captures even though the underlying scene state has changed
-            // (camera moved -> recapture -> same indices, new content). Without this reset, re-clicking the
-            // same draw or cascade slice after recapture would hit stale cached previews.
-            m_Debugger->ResetPreviewCacheKeys();
-
-            m_System.GetFrameDebugger().BeginCapture(VulkanContext::Get().GetDevice(),
-                                            VulkanContext::Get().GetAllocator());
-        }
+        m_System.BeginViewCapture(view);
 
         bool hasComputeWork = false;
         CaptureSource recordedSource = m_System.GetFrameDebugger().requestedSource;
@@ -1617,35 +1593,35 @@ namespace Luth
         return (it != m_NamedTextures.end()) ? it->second : nullptr;
     }
 
-    // ---- Frame debugger: forwarders into FrameDebuggerContext ----
+    // ---- Compatibility frame-debugger forwarders into RenderingSystem ----
 
-    VkImageView RenderPipeline::GetPerDrawPreviewView()  const { return m_Debugger->GetPerDrawPreviewView(); }
-    u64         RenderPipeline::GetPerDrawPreviewKey()   const { return m_Debugger->GetPerDrawPreviewKey(); }
-    u32         RenderPipeline::GetPerDrawPreviewWidth() const { return m_Debugger->GetPerDrawPreviewWidth(); }
-    u32         RenderPipeline::GetPerDrawPreviewHeight()const { return m_Debugger->GetPerDrawPreviewHeight(); }
-    VkImageView RenderPipeline::GetDepthPreviewView()    const { return m_Debugger->GetDepthPreviewView(); }
-    u32         RenderPipeline::GetDepthPreviewWidth()   const { return m_Debugger->GetDepthPreviewWidth(); }
-    u32         RenderPipeline::GetDepthPreviewHeight()  const { return m_Debugger->GetDepthPreviewHeight(); }
-    void        RenderPipeline::ResetPreviewCacheKeys() { m_Debugger->ResetPreviewCacheKeys(); }
+    VkImageView RenderPipeline::GetPerDrawPreviewView()  const { return m_System.GetPerDrawPreviewView(); }
+    u64         RenderPipeline::GetPerDrawPreviewKey()   const { return m_System.GetPerDrawPreviewKey(); }
+    u32         RenderPipeline::GetPerDrawPreviewWidth() const { return m_System.GetPerDrawPreviewWidth(); }
+    u32         RenderPipeline::GetPerDrawPreviewHeight()const { return m_System.GetPerDrawPreviewHeight(); }
+    VkImageView RenderPipeline::GetDepthPreviewView()    const { return m_System.GetDepthPreviewView(); }
+    u32         RenderPipeline::GetDepthPreviewWidth()   const { return m_System.GetDepthPreviewWidth(); }
+    u32         RenderPipeline::GetDepthPreviewHeight()  const { return m_System.GetDepthPreviewHeight(); }
+    void        RenderPipeline::ResetPreviewCacheKeys() { m_System.ResetPreviewCacheKeys(); }
 
     void RenderPipeline::ReplayPassUpToDraw(u32 passIdx, u32 localDrawIdx)
     {
-        m_Debugger->ReplayPassUpToDraw(passIdx, localDrawIdx);
+        m_System.ReplayPassUpToDraw(passIdx, localDrawIdx);
     }
 
     void RenderPipeline::BlitArchivedDepthToPreview(u32 archiveIdx, int layer, float nearZ, float farZ)
     {
-        m_Debugger->BlitArchivedDepthToPreview(archiveIdx, layer, nearZ, farZ);
+        m_System.BlitArchivedDepthToPreview(archiveIdx, layer, nearZ, farZ);
     }
 
     void RenderPipeline::BlitArchivedSlimToPreview(u32 archiveIdx, u32 mode, float scale)
     {
-        m_Debugger->BlitArchivedSlimToPreview(archiveIdx, mode, scale);
+        m_System.BlitArchivedSlimToPreview(archiveIdx, mode, scale);
     }
 
-    VkImageView RenderPipeline::GetSlimPreviewView()   const { return m_Debugger->GetSlimPreviewView(); }
-    u32         RenderPipeline::GetSlimPreviewWidth()  const { return m_Debugger->GetSlimPreviewWidth(); }
-    u32         RenderPipeline::GetSlimPreviewHeight() const { return m_Debugger->GetSlimPreviewHeight(); }
+    VkImageView RenderPipeline::GetSlimPreviewView()   const { return m_System.GetSlimPreviewView(); }
+    u32         RenderPipeline::GetSlimPreviewWidth()  const { return m_System.GetSlimPreviewWidth(); }
+    u32         RenderPipeline::GetSlimPreviewHeight() const { return m_System.GetSlimPreviewHeight(); }
 
     // ---- Public-API forwarders into subsystems (preserve caller compat) ----
 
@@ -1665,7 +1641,6 @@ namespace Luth
     {
         return m_Geometry.EnsureMaterialRegistered(material);
     }
-
 
     void RenderPipeline::UpdateGTAOUBO()
     {
