@@ -1,7 +1,7 @@
 #include "luthpch.h"
 #include "luth/renderer/subsystems/TransparencySubsystem.h"
 #include "luth/renderer/subsystems/RtSubsystem.h"
-#include "luth/renderer/features/SortedTransparencyBindings.h"
+#include "luth/renderer/features/TransparencyBindings.h"
 #include "luth/renderer/draw/DrawList.h"
 #include "luth/core/RenderSnapshot.h"
 #include "luth/renderer/resources/Model.h"
@@ -26,19 +26,23 @@ namespace Luth
         std::sort(order.begin(), order.end(), [&keys](u32 a, u32 b) { return keys[a] > keys[b]; });
         return order;
     }
-    SortedTransparencyBindings TransparencySubsystem::PrepareSortedBindings(GeometrySubsystem& geo,
+    TransparencyBindings TransparencySubsystem::PrepareDrawBindings(GeometrySubsystem& geo,
         const std::array<VkDescriptorSet, 7>& sets, bool wireframe, bool captureDraws, const Mat4& view,
         const VisibleDrawRange& visible, const DrawList& draws, const RenderSnapshot& snapshot,
-        TextureBindingRef fog, TextureBindingRef backdrop, const RtSubsystem* rayScene)
+        TextureBindingRef fog, TextureBindingRef backdrop, const RtSubsystem* rayScene, bool oit)
     {
-        SortedTransparencyBindings out;
+        TransparencyBindings out;
         out.sets = sets; out.polygon = wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
         out.captureDraws = captureDraws; out.fog = fog; out.backdrop = backdrop; out.rayScene = rayScene;
-        if (draws.transparent.empty() || m_TransparentFragSpv.empty()) return out;
-        const auto shader = ShaderLibrary::Get("pbr_transparent.slang");
+        out.oit = oit;
+        const auto& fragment = oit ? m_OitStoreFragSpv : m_TransparentFragSpv;
+        if (draws.transparent.empty() || fragment.empty()) return out;
+        const auto shader = ShaderLibrary::Get(oit ? "pbr_oit_store.slang" : "pbr_transparent.slang");
         if (!shader) return out;
         // Compile native variants during CPU preparation, before parallel recording uses them.
-        for (auto index : SortedOrder(draws, view))
+        auto order = oit ? std::vector<u32>(draws.transparent.size()) : SortedOrder(draws, view);
+        if (oit) for (u32 i = 0; i < order.size(); ++i) order[i] = i;
+        for (auto index : order)
         {
             const auto& dc = draws.transparent[index];
             if (!dc.model) continue;
@@ -47,10 +51,10 @@ namespace Luth
             auto ib = std::static_pointer_cast<VKIndexBuffer>(mesh->GetIndexBuffer());
             if (!vb || !ib) continue;
             auto* pipeline = dc.isDeformed
-                ? m_SortedSkinnedPm.GetOrCreate(shader->Handle, Material::RenderMode::Transparent,
-                    dc.cullMode, out.polygon, geo.GetPBRSkinnedVertSpv(), m_TransparentFragSpv)
-                : m_SortedPm.GetOrCreate(shader->Handle, Material::RenderMode::Transparent,
-                    dc.cullMode, out.polygon, geo.GetPBRVertSpv(), m_TransparentFragSpv);
+                ? (oit ? m_OitSkinnedPm : m_SortedSkinnedPm).GetOrCreate(shader->Handle, Material::RenderMode::Transparent,
+                    dc.cullMode, out.polygon, geo.GetPBRSkinnedVertSpv(), fragment)
+                : (oit ? m_OitPm : m_SortedPm).GetOrCreate(shader->Handle, Material::RenderMode::Transparent,
+                    dc.cullMode, out.polygon, geo.GetPBRVertSpv(), fragment);
             if (!pipeline) continue;
             ForwardDrawPacket packet;
             packet.mesh = mesh; packet.pipeline = pipeline->GetHandle(); packet.layout = pipeline->GetLayout();
@@ -74,7 +78,7 @@ namespace Luth
     }
     std::array<RG::ResourceHandle, 3> TransparencySubsystem::AddSortedPass(RG::RenderGraph& graph,
         RG::ResourceHandle color, RG::ResourceHandle picking, RG::ResourceHandle depth,
-        const VisibleDrawRange& visible, u32 width, u32 height, const SortedTransparencyBindings& packet,
+        const VisibleDrawRange& visible, u32 width, u32 height, const TransparencyBindings& packet,
         std::span<const RG::ResourceHandle> images, std::span<const RG::BufferHandle> buffers,
         bool fogValid, FrameDebugger* debugger)
     {
@@ -92,36 +96,44 @@ namespace Luth
                 outputs = {data.color, data.picking, data.depth};
             },
             [packet, indirect, width, height, fogValid, debugger](Data&, RG::RenderPassContext& ctx) {
-                if (debugger) debugger->BeginCapturePass(ctx.passIndex, "TransparentPass", "SceneColor", false,
-                    {"pbr_transparent", 0, VK_CULL_MODE_BACK_BIT, packet.polygon, false, true, true, true});
-                TransparentPC pc{};
-                pc.geomTable = packet.rayScene ? packet.rayScene->GetGeometryTableBDA() : 0;
-                pc.flags = fogValid ? 1u : 0u;
-                VkViewport viewport{}; viewport.width = float(width); viewport.height = float(height); viewport.maxDepth = 1;
-                const VkRect2D scissor{{0, 0}, {width, height}};
-                vkCmdSetViewport(ctx.commandBuffer, 0, 1, &viewport); vkCmdSetScissor(ctx.commandBuffer, 0, 1, &scissor);
-                VkPipeline bound = VK_NULL_HANDLE;
-                for (const auto& draw : packet.draws)
-                {
-                    if (bound != draw.pipeline)
-                    {
-                        bound = draw.pipeline;
-                        vkCmdBindPipeline(ctx.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, bound);
-                        vkCmdBindDescriptorSets(ctx.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.layout,
-                            0, 7, packet.sets.data(), 0, nullptr);
-                        vkCmdPushConstants(ctx.commandBuffer, draw.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
-                    }
-                    const VkDeviceSize offset = 0;
-                    if (!draw.deformed) vkCmdBindVertexBuffers(ctx.commandBuffer, 0, 1, &draw.vertex, &offset);
-                    vkCmdBindIndexBuffer(ctx.commandBuffer, draw.index, 0, VK_INDEX_TYPE_UINT32);
-                    vkCmdDrawIndexedIndirect(ctx.commandBuffer, indirect, draw.indirectOffset, 1, sizeof(VkDrawIndexedIndirectCommand));
-                    if (debugger && packet.captureDraws)
-                        debugger->CaptureIndirectDraw("TransparentPass", draw.meshName, draw.entityName, draw.entityIndex,
-                            draw.indexCount, draw.objectIndex, draw.indirectOffset,
-                            {"pbr_transparent", draw.mode, draw.cull, packet.polygon, draw.deformed, true, true, true});
-                }
-                if (debugger) debugger->EndCapturePass();
+                RecordDraws(packet, indirect, width, height, fogValid, 0, ctx, debugger);
             });
         return outputs;
+    }
+    void TransparencySubsystem::RecordDraws(const TransparencyBindings& packet, VkBuffer indirect,
+        u32 width, u32 height, bool fogValid, u32 capacity, RG::RenderPassContext& ctx, FrameDebugger* debugger)
+    {
+        const char* name = packet.oit ? "OITStore" : "TransparentPass";
+        const char* shader = packet.oit ? "pbr_oit_store" : "pbr_transparent";
+        if (debugger) debugger->BeginCapturePass(ctx.passIndex, name, "SceneColor", false,
+            {shader, 0, VK_CULL_MODE_BACK_BIT, packet.polygon, false, true, !packet.oit, true});
+        TransparentPC pc{};
+        pc.geomTable = packet.rayScene ? packet.rayScene->GetGeometryTableBDA() : 0;
+        pc.flags = fogValid ? 1u : 0u;
+        pc.nodeCapacity = capacity;
+        VkViewport viewport{}; viewport.width = float(width); viewport.height = float(height); viewport.maxDepth = 1;
+        const VkRect2D scissor{{0, 0}, {width, height}};
+        vkCmdSetViewport(ctx.commandBuffer, 0, 1, &viewport); vkCmdSetScissor(ctx.commandBuffer, 0, 1, &scissor);
+        VkPipeline bound = VK_NULL_HANDLE;
+        for (const auto& draw : packet.draws)
+        {
+            if (bound != draw.pipeline)
+            {
+                bound = draw.pipeline;
+                vkCmdBindPipeline(ctx.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, bound);
+                vkCmdBindDescriptorSets(ctx.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.layout,
+                    0, 7, packet.sets.data(), 0, nullptr);
+                vkCmdPushConstants(ctx.commandBuffer, draw.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+            }
+            const VkDeviceSize offset = 0;
+            if (!draw.deformed) vkCmdBindVertexBuffers(ctx.commandBuffer, 0, 1, &draw.vertex, &offset);
+            vkCmdBindIndexBuffer(ctx.commandBuffer, draw.index, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexedIndirect(ctx.commandBuffer, indirect, draw.indirectOffset, 1, sizeof(VkDrawIndexedIndirectCommand));
+            if (debugger && packet.captureDraws)
+                debugger->CaptureIndirectDraw(name, draw.meshName, draw.entityName, draw.entityIndex,
+                    draw.indexCount, draw.objectIndex, draw.indirectOffset,
+                    {shader, draw.mode, draw.cull, packet.polygon, draw.deformed, true, !packet.oit, true});
+        }
+        if (debugger) debugger->EndCapturePass();
     }
 }

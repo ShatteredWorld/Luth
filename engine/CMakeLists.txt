@@ -53,7 +53,8 @@ add_library(Luth STATIC
     source/luth/renderer/features/ClusteredLightingFeature.cpp
     source/luth/renderer/features/SkyFeature.cpp
     source/luth/renderer/features/ForwardOpaqueFeature.cpp
-    source/luth/renderer/features/SortedTransparencyFeature.cpp
+    source/luth/renderer/features/TransparencyFeature.cpp
+    source/luth/renderer/subsystems/TransparencyOit.cpp
     source/luth/renderer/subsystems/TransparencySorted.cpp
     source/luth/renderer/features/TransparencyViewState.cpp
     source/luth/renderer/features/RefractionBackdropFeature.cpp

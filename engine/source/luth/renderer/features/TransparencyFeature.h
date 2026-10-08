@@ -4,20 +4,20 @@
 namespace Luth
 {
     class TransparencySubsystem;
-    struct SortedTransparencyBindings;
+    struct TransparencyBindings;
     struct FrameDebugger;
-    struct SortedTransparencyBindingRef { const SortedTransparencyBindings* native = nullptr; };
+    struct TransparencyBindingRef { const TransparencyBindings* native = nullptr; };
     namespace TransparencyResources
     {
-        inline constexpr ResourceKeyIdentity BindingsIdentity{"Transparency.SortedBindings"};
-        inline constexpr RenderResourceKey<SortedTransparencyBindingRef> Bindings{&BindingsIdentity};
+        inline constexpr ResourceKeyIdentity BindingsIdentity{"Transparency.Bindings"};
+        inline constexpr RenderResourceKey<TransparencyBindingRef> Bindings{&BindingsIdentity};
         inline constexpr ResourceKeyIdentity DepthIdentity{"Transparency.Depth"};
         inline constexpr RenderResourceKey<GraphTextureRef> Depth{&DepthIdentity};
     }
-    class SortedTransparencyFeature final : public IRenderFeature
+    class TransparencyFeature final : public IRenderFeature
     {
     public:
-        explicit SortedTransparencyFeature(TransparencySubsystem& native, FrameDebugger* debugger = nullptr)
+        explicit TransparencyFeature(TransparencySubsystem& native, FrameDebugger* debugger = nullptr)
             : m_Native(native), m_Debugger(debugger) {}
         FeatureInfo Describe() const override;
         FeatureFrameDecision Evaluate(const FeaturePrepareContext&) const override { return {}; }

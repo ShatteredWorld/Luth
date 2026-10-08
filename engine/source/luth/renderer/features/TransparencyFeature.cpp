@@ -1,14 +1,14 @@
 #include "luthpch.h"
-#include "luth/renderer/features/SortedTransparencyFeature.h"
-#include "luth/renderer/features/SortedTransparencyBindings.h"
+#include "luth/renderer/features/TransparencyFeature.h"
+#include "luth/renderer/features/TransparencyBindings.h"
 #include "luth/renderer/subsystems/TransparencySubsystem.h"
 
 namespace Luth
 {
-    FeatureInfo SortedTransparencyFeature::Describe() const
+    FeatureInfo TransparencyFeature::Describe() const
     {
         FeatureInfo info;
-        info.name = "SortedTransparency"; info.phase = FeaturePhase::AfterAsync;
+        info.name = "Transparency"; info.phase = FeaturePhase::AfterAsync;
         info.resources.reads = {{TransparencyResources::Bindings}, {RenderResources::FoggedHDR},
             {RenderResources::LitDepth}, {RenderResources::OpaquePickingIDs}, {RenderResources::CameraVisibleDraws},
             {RenderResources::ResolvedFog, ResourceReadRequirement::Optional},
@@ -22,7 +22,7 @@ namespace Luth
         info.capabilities.consumes = {{&DeformationResources::DeformedGeometry}};
         return info;
     }
-    void SortedTransparencyFeature::Build(RG::RenderGraph& graph, RenderFeatureContext& ctx)
+    void TransparencyFeature::Build(RG::RenderGraph& graph, RenderFeatureContext& ctx)
     {
         const auto& color = ctx.resources.Get(RenderResources::FoggedHDR);
         const auto& depth = ctx.resources.Get(RenderResources::LitDepth);
@@ -42,13 +42,13 @@ namespace Luth
             visible.indirect.binding.offset != visible.indirect.binding.slice->offset ||
             visible.indirect.binding.size > visible.indirect.binding.slice->size ||
             (u64(visible.firstDraw) + visible.maxDrawCount) * sizeof(VkDrawIndexedIndirectCommand) > visible.indirect.binding.size)
-            throw std::invalid_argument("SortedTransparency: invalid stage inputs or visible slice");
+            throw std::invalid_argument("Transparency: invalid stage inputs or visible slice");
         for (const auto& draw : packet->draws)
             if (!draw.pipeline || !draw.layout || !draw.index || (!draw.deformed && !draw.vertex) ||
                 draw.indirectOffset != GeometrySubsystem::ForwardDrawOffset(visible, draw.objectIndex))
-                throw std::invalid_argument("SortedTransparency: invalid prepared draw");
+                throw std::invalid_argument("Transparency: invalid prepared draw");
         if (!packet->draws.empty() && std::any_of(packet->sets.begin(), packet->sets.end(), [](auto set) { return !set; }))
-            throw std::invalid_argument("SortedTransparency: incomplete descriptor bindings");
+            throw std::invalid_argument("Transparency: incomplete descriptor bindings");
         std::vector<RG::ResourceHandle> images;
         RG::ResourceHandle fog;
         for (const auto key : {RenderResources::ResolvedFog, RenderResources::RefractionBackdrop})
@@ -59,7 +59,7 @@ namespace Luth
                     !image->binding.texture || image->binding.texture != expected.texture || image->binding.baseMip ||
                     image->binding.mipCount != 1 || image->binding.baseLayer || image->binding.layerCount != 1 ||
                     graph.GetResources()[image->handle.index - 1].desc.format != RG::TextureFormat::RGBA16_Float)
-                    throw std::invalid_argument("SortedTransparency: sampled binding mismatch");
+                    throw std::invalid_argument("Transparency: sampled binding mismatch");
                 images.push_back(image->handle);
                 if (key.identity == RenderResources::ResolvedFog.identity) fog = image->handle;
             }
@@ -70,13 +70,32 @@ namespace Luth
                 if (!value->handle.IsValid() || value->handle.index > graph.GetBuffers().size() || !value->binding.slice ||
                     !value->binding.slice->buffer || value->binding.offset != value->binding.slice->offset ||
                     value->binding.size > value->binding.slice->size)
-                    throw std::invalid_argument("SortedTransparency: invalid lighting slice");
+                    throw std::invalid_argument("Transparency: invalid lighting slice");
                 buffers.push_back(value->handle);
             }
         auto outputs = std::array{color.handle, picking.handle, depth.handle};
         if (!packet->draws.empty())
-            outputs = m_Native.AddSortedPass(graph, color.handle, picking.handle, depth.handle, visible,
-                ctx.view.width, ctx.view.height, *packet, images, buffers, fog.IsValid(), m_Debugger);
+        {
+            if (packet->oit)
+            {
+                if (!packet->headsImage || !packet->headsView || !packet->heads.texture ||
+                    packet->heads.baseMip || packet->heads.baseLayer || packet->heads.mipCount != 1 || packet->heads.layerCount != 1 ||
+                    packet->width != ctx.view.width || packet->height != ctx.view.height ||
+                    !packet->nodes.buffer || packet->nodes.offset % 4 || packet->nodes.size <= 16 ||
+                    (packet->nodes.size - 16) % 16 || !packet->capacity ||
+                    (packet->nodes.size - 16) / 16 != packet->capacity || packet->maxResolveK > 16 ||
+                    !packet->resolvePipeline || !packet->resolveLayout || !packet->resolveSet)
+                    throw std::invalid_argument("Transparency: invalid prepared OIT resources");
+                for (const auto& resource : graph.GetResources())
+                    if (resource.image == packet->headsImage)
+                        throw std::invalid_argument("Transparency: OIT heads already imported");
+                outputs = m_Native.AddOitPasses(graph, color.handle, picking.handle, depth.handle, visible,
+                    ctx.view.width, ctx.view.height, *packet, images, buffers, fog.IsValid(), m_Debugger);
+            }
+            else
+                outputs = m_Native.AddSortedPass(graph, color.handle, picking.handle, depth.handle, visible,
+                    ctx.view.width, ctx.view.height, *packet, images, buffers, fog.IsValid(), m_Debugger);
+        }
         ctx.resources.Publish(RenderResources::TransparentHDR, GraphTextureRef{outputs[0], color.binding});
         ctx.resources.Publish(RenderResources::FinalPickingIDs, GraphTextureRef{outputs[1], picking.binding});
         ctx.resources.Publish(TransparencyResources::Depth, GraphTextureRef{outputs[2], depth.binding});

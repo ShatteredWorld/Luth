@@ -10,7 +10,7 @@
 #include "luth/renderer/features/FogComputeFeature.h"
 #include "luth/renderer/features/FogCompositeFeature.h"
 #include "luth/renderer/features/RefractionBackdropFeature.h"
-#include "luth/renderer/features/SortedTransparencyFeature.h"
+#include "luth/renderer/features/TransparencyFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -94,7 +94,7 @@ namespace Luth
         m_Geometry.Init(*this);
         // Transparency's Set 6 layout must exist before its BuildPipelines below appends it to geoLayouts
         // (same Init-before-BuildPipelines invariant as Geometry's Set 5).
-        m_Transparency.Init(*this);
+        m_Transparency.Init();
 
         // Shadow / skybox / PBR / DepthPrepass pipelines all need the shared 6-layout vector.
         std::vector<VkDescriptorSetLayout> geoLayouts = {
@@ -181,18 +181,18 @@ namespace Luth
         auto fogCompiled = RenderPipelineCompiler{}.Compile(std::move(fogDefinition), {}, fogInputs);
         if (!fogCompiled.ReplaceIfValid(m_FogComputeComposition))
             throw std::runtime_error("Fog compute feature definition failed semantic validation");
-        RenderPipelineDefinition sortedDefinition;
-        sortedDefinition.AddFeature<SortedTransparencyFeature>(m_Transparency, &m_System.GetFrameDebugger());
-        PipelineInputContract sortedInputs;
-        sortedInputs.resources = {{TransparencyResources::Bindings}, {RenderResources::FoggedHDR}, {RenderResources::LitDepth},
+        RenderPipelineDefinition transparencyDefinition;
+        transparencyDefinition.AddFeature<TransparencyFeature>(m_Transparency, &m_System.GetFrameDebugger());
+        PipelineInputContract transparencyInputs;
+        transparencyInputs.resources = {{TransparencyResources::Bindings}, {RenderResources::FoggedHDR}, {RenderResources::LitDepth},
             {RenderResources::OpaquePickingIDs}, {RenderResources::CameraVisibleDraws},
             {RenderResources::ResolvedFog, ResourceOutputPresence::Optional}, {RenderResources::RefractionBackdrop, ResourceOutputPresence::Optional},
             {RenderResources::LightData, ResourceOutputPresence::Optional}, {RenderResources::ClusterGrid, ResourceOutputPresence::Optional},
             {RenderResources::LightIndices, ResourceOutputPresence::Optional}};
-        sortedInputs.capabilities = {&DeformationResources::DeformedGeometry};
-        auto sortedCompiled = RenderPipelineCompiler{}.Compile(std::move(sortedDefinition), {}, sortedInputs);
-        if (!sortedCompiled.ReplaceIfValid(m_SortedTransparencyComposition))
-            throw std::runtime_error("Sorted transparency definition failed semantic validation");
+        transparencyInputs.capabilities = {&DeformationResources::DeformedGeometry};
+        auto transparencyCompiled = RenderPipelineCompiler{}.Compile(std::move(transparencyDefinition), {}, transparencyInputs);
+        if (!transparencyCompiled.ReplaceIfValid(m_TransparencyComposition))
+            throw std::runtime_error("Transparency definition failed semantic validation");
         RenderPipelineDefinition backdropDefinition;
         backdropDefinition.AddFeature<RefractionBackdropFeature>(m_Transparency);
         PipelineInputContract backdropInputs;
@@ -337,7 +337,7 @@ namespace Luth
         m_FogComputeComposition.reset();
         m_FogCompositeComposition.reset();
         m_RefractionComposition.reset();
-        m_SortedTransparencyComposition.reset();
+        m_TransparencyComposition.reset();
         m_SkyComposition.reset();
         m_ForwardComposition.reset();
         m_Skinning.Shutdown();
@@ -900,7 +900,7 @@ namespace Luth
             // Snapshot the pre-transparent scene (opaque + fog) into the per-view refraction backdrop so glass
             // can sample the refracted background. RG orders the copy after the composite (reads fogColor as
             // TransferSrc) and before the transparent pass's Set 6 b3 sample (declared Read there). Skipped
-            // when the transparent bucket is empty (matches AddPasses' own early-out).
+            // when the transparent bucket is empty (matches transparency preparation).
             const auto backdropNative = m_Transparency.PrepareBackdropBindings(m_CurrentViewResources->transparency->refractionBackdrop,
                 !m_System.GetDrawList().transparent.empty());
             const RefractionBackdropBindingRef backdropBinding{&backdropNative};
@@ -927,24 +927,22 @@ namespace Luth
                 const u32 frameAbsT = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
                 m_Transparency.WritePerFrame(*m_CurrentViewResources->transparency, m_CurrentViewResources->fog,
                     m_Volumetric.GetSampler(), frameAbsT);
-                if (s.GetTransparencySettings().mode == TransparencyMode::OIT)
-                    transparentColor = m_Transparency.AddPasses(rg, fogColor, geoOutput.entityID, geoOutput.depth,
-                        volumetricEnabled ? volResolvedHandle : RG::ResourceHandle{}, backdropHandle, hIndirectBuf);
-                else
                 {
-                    std::array<VkDescriptorSet, 7> sortedSets;
-                    std::copy(forwardSets.begin(), forwardSets.end(), sortedSets.begin());
-                    sortedSets[6] = m_CurrentViewResources->transparency->transparentDescSet[frameAbsT % MAX_FRAMES_IN_FLIGHT];
-                    const auto sortedNative = m_Transparency.PrepareSortedBindings(m_Geometry, sortedSets,
+                    std::array<VkDescriptorSet, 7> transparencySets;
+                    std::copy(forwardSets.begin(), forwardSets.end(), transparencySets.begin());
+                    transparencySets[6] = m_CurrentViewResources->transparency->transparentDescSet[frameAbsT % MAX_FRAMES_IN_FLIGHT];
+                    const auto transparencyNative = m_Transparency.PrepareTransparencyBindings(m_Geometry, transparencySets,
                         s.GetShadeMode() == ShadeMode::Wireframe,
                         view.captureRequested && s.GetFrameDebugger().state == DebuggerState::CaptureRequested,
                         view.camera.view, cameraVisible, s.GetDrawList(), s.GetActiveSnapshot(),
-                        fogResolved.binding, backdropOutput.binding, &m_Rt);
-                    const SortedTransparencyBindingRef sortedBinding{&sortedNative};
+                        fogResolved.binding, backdropOutput.binding, &m_Rt,
+                        s.GetTransparencySettings().mode == TransparencyMode::OIT,
+                        *m_CurrentViewResources->transparency, s.GetTransparencySettings().maxResolveK);
+                    const TransparencyBindingRef transparencyBinding{&transparencyNative};
                     const auto optionalImage = [](auto key, const GraphTextureRef& value) {
                         return value.handle.IsValid() ? RenderInputBinding::Present(key, value) : RenderInputBinding::Absent(key);
                     };
-                    const std::array sortedResources{RenderInputBinding::Present(TransparencyResources::Bindings, sortedBinding),
+                    const std::array transparencyResources{RenderInputBinding::Present(TransparencyResources::Bindings, transparencyBinding),
                         RenderInputBinding::Present(RenderResources::FoggedHDR, foggedOutput),
                         RenderInputBinding::Present(RenderResources::LitDepth, litOutput),
                         RenderInputBinding::Present(RenderResources::OpaquePickingIDs, pickingOutput),
@@ -952,18 +950,18 @@ namespace Luth
                         optionalImage(RenderResources::ResolvedFog, fogResolved), optionalImage(RenderResources::RefractionBackdrop, backdropOutput),
                         optionalBuffer(RenderResources::LightData, lightData), optionalBuffer(RenderResources::ClusterGrid, clusterGrid),
                         optionalBuffer(RenderResources::LightIndices, lightIndices)};
-                    FrameRenderInputs sortedFrame; sortedFrame.renderFrameIndex = skyFrame.renderFrameIndex;
-                    sortedFrame.resources = sortedResources; sortedFrame.capabilities = forwardCapabilities;
+                    FrameRenderInputs transparencyFrame; transparencyFrame.renderFrameIndex = skyFrame.renderFrameIndex;
+                    transparencyFrame.resources = transparencyResources; transparencyFrame.capabilities = forwardCapabilities;
                     GraphTextureRef transparentOutput, finalPicking, transparentDepth;
-                    const std::array sortedExports{RenderOutputBinding::Capture(RenderResources::TransparentHDR, transparentOutput),
+                    const std::array transparencyExports{RenderOutputBinding::Capture(RenderResources::TransparentHDR, transparentOutput),
                         RenderOutputBinding::Capture(RenderResources::FinalPickingIDs, finalPicking),
                         RenderOutputBinding::Capture(TransparencyResources::Depth, transparentDepth)};
-                    const auto sortedBuild = m_SortedTransparencyComposition->Build(rg, sortedFrame, skyView,
-                        s.GetFrameAllocator(), sortedExports);
-                    if (!sortedBuild.success)
+                    const auto transparencyBuild = m_TransparencyComposition->Build(rg, transparencyFrame, skyView,
+                        s.GetFrameAllocator(), transparencyExports);
+                    if (!transparencyBuild.success)
                     {
-                        for (const auto& diagnostic : sortedBuild.diagnostics)
-                            LH_LOG(Renderer, error, "Sorted transparency composition: {}", diagnostic.message);
+                        for (const auto& diagnostic : transparencyBuild.diagnostics)
+                            LH_LOG(Renderer, error, "Transparency composition: {}", diagnostic.message);
                         return false;
                     }
                     transparentColor = transparentOutput.handle;
