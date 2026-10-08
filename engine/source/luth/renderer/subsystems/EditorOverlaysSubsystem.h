@@ -4,6 +4,7 @@
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/backend/vulkan/VulkanPipeline.h"
 #include "luth/renderer/features/EditorOverlayViewState.h"
+#include "luth/renderer/features/GridBindings.h"
 
 #include <entt/entt.hpp>
 #include <memory>
@@ -18,6 +19,8 @@ namespace Luth
     class RenderPipeline;
     struct ViewResources;
     struct SelectionMaskOutput;
+    struct CameraParams;
+    struct FrameDebugger;
 
     // Owns the editor-only overlay resources and passes: SelectionMask (rigid + skinned graphics pipelines
     // on Sets 0-4), Outline (fullscreen pass with its own descriptor set), Grid (fullscreen pass with its
@@ -42,7 +45,8 @@ namespace Luth
         SelectionMaskOutput AddSelectionMaskPass(RG::RenderGraph& rg);
         RG::ResourceHandle  AddOutlinePass(RG::RenderGraph& rg, RG::ResourceHandle ldrOutput,
                                             SelectionMaskOutput maskOutput, RG::ResourceHandle sceneDepth);
-        RG::ResourceHandle  AddGridPass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor, RG::ResourceHandle sceneDepth);
+        GridBindings PrepareGridBindings(std::shared_ptr<EditorOverlayViewState>, const CameraParams&, Vec2 jitter, u64 frame, bool enabled) const;
+        RG::ResourceHandle AddGridPass(RG::RenderGraph&, RG::ResourceHandle color, RG::ResourceHandle depth, const GridBindings&, FrameDebugger*);
 
         // Recursively collect entity handles + descendants for the selection mask.
         void CollectSelectedHandles(const std::vector<Entity>& selected, std::unordered_set<entt::entity>& outHandles) const;

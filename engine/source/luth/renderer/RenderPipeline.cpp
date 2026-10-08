@@ -14,6 +14,7 @@
 #include "luth/renderer/features/TaaFeature.h"
 #include "luth/renderer/features/BloomFeature.h"
 #include "luth/renderer/features/CompositeFeature.h"
+#include "luth/renderer/features/GridFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -196,6 +197,15 @@ namespace Luth
         auto transparencyCompiled = RenderPipelineCompiler{}.Compile(std::move(transparencyDefinition), {}, transparencyInputs);
         if (!transparencyCompiled.ReplaceIfValid(m_TransparencyComposition))
             throw std::runtime_error("Transparency definition failed semantic validation");
+        RenderPipelineDefinition gridDefinition;
+        gridDefinition.AddFeature<GridFeature>(m_EditorOverlays, &m_System.GetFrameDebugger());
+        PipelineInputContract gridInputs;
+        gridInputs.resources = {{RenderResources::ResolvedHDR}, {GridResources::Bindings},
+            {RenderResources::LitDepth, ResourceOutputPresence::Optional},
+            {RenderResources::BloomOutput, ResourceOutputPresence::Optional}};
+        auto gridCompiled = RenderPipelineCompiler{}.Compile(std::move(gridDefinition), {}, gridInputs);
+        if (!gridCompiled.ReplaceIfValid(m_GridComposition))
+            throw std::runtime_error("Grid definition failed semantic validation");
         RenderPipelineDefinition compositeDefinition;
         compositeDefinition.AddFeature<CompositeFeature>(m_PostProcess, &m_System.GetFrameDebugger());
         PipelineInputContract compositeInputs;
@@ -365,6 +375,7 @@ namespace Luth
         m_TransparencyComposition.reset();
         m_TaaComposition.reset();
         m_BloomComposition.reset();
+        m_GridComposition.reset();
         m_CompositeComposition.reset();
         m_SkyComposition.reset();
         m_ForwardComposition.reset();
@@ -1048,16 +1059,33 @@ namespace Luth
             return false;
         }
 
-        RG::ResourceHandle gridColor   = (view.drawGrid && !ptActive)
-                                         ? m_EditorOverlays.AddGridPass(rg, hdrForPost, geoOutput.depth)
-                                         : hdrForPost;
+        const auto gridNative = m_EditorOverlays.PrepareGridBindings(m_CurrentViewResources->overlays,
+            s.GetCameraParams(), m_CurrentViewResources->currentJitter, bloomFrame.renderFrameIndex, view.drawGrid && !ptActive);
+        const GridBindingRef gridBinding{&gridNative};
+        const GraphTextureRef gridDepth{geoOutput.depth, surfaceDepth.binding};
+        const std::array gridResources{RenderInputBinding::Present(RenderResources::ResolvedHDR, bloomSource),
+            RenderInputBinding::Present(GridResources::Bindings, gridBinding),
+            !ptActive ? RenderInputBinding::Present(RenderResources::LitDepth, gridDepth)
+                : RenderInputBinding::Absent(RenderResources::LitDepth),
+            bloomOutput.handle.IsValid() ? RenderInputBinding::Present(RenderResources::BloomOutput, bloomOutput)
+                : RenderInputBinding::Absent(RenderResources::BloomOutput)};
+        FrameRenderInputs gridFrame; gridFrame.renderFrameIndex = bloomFrame.renderFrameIndex; gridFrame.resources = gridResources;
+        GraphTextureRef gridStage;
+        const std::array gridExports{RenderOutputBinding::Capture(RenderResources::GridHDR, gridStage)};
+        const auto gridBuild = m_GridComposition->Build(rg, gridFrame, bloomView, s.GetFrameAllocator(), gridExports);
+        if (!gridBuild.success)
+        {
+            for (const auto& diagnostic : gridBuild.diagnostics)
+                LH_LOG(Renderer, error, "Grid composition: {}", diagnostic.message);
+            return false;
+        }
         const auto compositeParameters = MakeCompositeUniforms(bloomSettings,
             IsDataDebugMode(s.GetRenderMode() == RenderMode::PathTrace ? ShadeMode::Lit : shadeMode),
             bloomOutput.handle.IsValid(), Time::GetTime());
         const auto compositeNative = m_PostProcess.PrepareCompositeBindings(m_CurrentViewResources->composite,
             postSource, bloomOutput.binding, view.targets->GetLDROutput(), bloomFrame.renderFrameIndex, compositeParameters);
         const CompositeBindingRef compositeBinding{&compositeNative};
-        const GraphTextureRef gridStage{gridColor, postSource};
+
         const std::array compositeResources{RenderInputBinding::Present(RenderResources::GridHDR, gridStage),
             bloomOutput.handle.IsValid() ? RenderInputBinding::Present(RenderResources::BloomOutput, bloomOutput)
                 : RenderInputBinding::Absent(RenderResources::BloomOutput),
