@@ -118,6 +118,7 @@ add_library(Luth STATIC
     source/luth/renderer/backend/vulkan/VulkanSwapchain.cpp
     source/luth/renderer/backend/vulkan/VulkanTexture.cpp
 
+    source/luth/renderer/debug/GraphInstrumentation.cpp
     source/luth/renderer/debug/CaptureFinalization.cpp
     source/luth/renderer/debug/CaptureRecordingSession.cpp
     source/luth/renderer/debug/FrameDebuggerContext.cpp

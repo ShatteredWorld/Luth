@@ -7,6 +7,7 @@
 #include "luth/renderer/Renderer.h"
 #include "luth/renderer/debug/FrameDebuggerContext.h"
 #include "luth/renderer/debug/CaptureFinalization.h"
+#include "luth/renderer/debug/GraphInstrumentation.h"
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
 #include "luth/renderer/backend/vulkan/VulkanBackend.h"
 #include "luth/assets/FileSystem.h"
@@ -62,7 +63,13 @@ namespace Luth
 
     const RG::RenderGraphSnapshot& RenderingSystem::GetGraphSnapshot() const
     {
-        return m_Pipeline->GetGraphSnapshot();
+        return m_GraphSnapshot;
+    }
+
+    RG::RenderGraphSnapshot& RenderingSystem::CaptureGraphSnapshot(const RG::RenderGraph& graph)
+    {
+        m_GraphSnapshot = Luth::CaptureGraphSnapshot(graph, m_DrawList);
+        return m_GraphSnapshot;
     }
 
     void RenderingSystem::BeginViewCapture(const RenderView& view)

@@ -309,6 +309,7 @@ namespace Luth
         void ExitCapture();
         void BeginViewCapture(const RenderView& view);
         bool FinalizeViewCapture(const CaptureFinalizationInputs&, const RG::RenderGraphSnapshot&);
+        RG::RenderGraphSnapshot& CaptureGraphSnapshot(const RG::RenderGraph&);
         void ResetPreviewCacheKeys();
         DebuggerState GetDebuggerState() const { return m_FrameDebugger.state; }
         const RG::CapturedFrame& GetCapturedFrame() const { return m_FrameDebugger.capturedFrame; }
@@ -368,6 +369,7 @@ namespace Luth
         // descriptor sets, samplers, UBOs, SSBOs, preview textures, etc.).
         std::unique_ptr<RenderPipeline> m_Pipeline;
         std::unique_ptr<FrameDebuggerContext> m_CaptureContext;
+        RG::RenderGraphSnapshot m_GraphSnapshot;
 
         // Editor-facing state.
         PostProcessSettings  m_PostProcessSettings;

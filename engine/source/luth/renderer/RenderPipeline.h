@@ -346,7 +346,7 @@ namespace Luth
 
         // Per-frame CPU-side GPU state prep. Called from RenderingSystem::RenderToView before the graph
         // executes. The CascadeData + DirectionalLightShadowParams are produced by LightingSystem and cached
-        // on this Pipeline for the remainder of the view (Execute + CaptureSnapshot read them through
+        // on this Pipeline for the remainder of the view (Execute reads them through
         // m_FrameCascades / m_FrameShadowParams).
         void UpdateGlobalUniforms(const CameraParams& camera, const CascadeData& cascades, const DirectionalLightShadowParams& shadowParams);
 
@@ -412,7 +412,7 @@ namespace Luth
         // ImGui pass: single-view residual on the orchestrator.
         void AddImGuiPass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor);
 
-        RG::RenderGraphSnapshot CaptureSnapshot(const RG::RenderGraph& rg);
+
 
         RenderingSystem& m_System;
 
@@ -519,8 +519,8 @@ namespace Luth
         const IDenoiser&               GetDenoiseDiSpec()  const { return *m_DenoiseDiSpec; }
 
     private:
-        // ---- Graph snapshot + GPU timers + named-texture registry ----
-        RG::RenderGraphSnapshot m_GraphSnapshot;
+        // ---- GPU timers + named-texture registry ----
+
         GPUTimerPool            m_GPUTimers;
         std::unordered_map<std::string, std::shared_ptr<Texture>> m_NamedTextures;
 
@@ -540,7 +540,7 @@ namespace Luth
         VkImageView GetSlimPreviewView()     const;
         u32         GetSlimPreviewWidth()    const;
         u32         GetSlimPreviewHeight()   const;
-        const RG::RenderGraphSnapshot& GetGraphSnapshot() const { return m_GraphSnapshot; }
+        const RG::RenderGraphSnapshot& GetGraphSnapshot() const;
 
         // Resets the per-draw preview cache key; called from RS::ExitCapture.
         void ResetPreviewCacheKeys();

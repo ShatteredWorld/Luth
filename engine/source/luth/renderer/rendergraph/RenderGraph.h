@@ -282,6 +282,7 @@ namespace Luth::RG
         // Accessors
         const std::vector<PassNode>& GetPasses() const { return m_Passes; }
         std::vector<ResourceNode>& GetResources() { return m_Resources; }
+        const std::vector<ResourceNode>& GetResources() const { return m_Resources; }
         std::vector<BufferNode>& GetBuffers() { return m_Buffers; }
 
         // Serialize the compiled graph for offline inspection (.dot GraphViz / .json schema). Call after Compile().
