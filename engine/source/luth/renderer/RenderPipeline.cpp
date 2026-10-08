@@ -11,6 +11,7 @@
 #include "luth/renderer/features/FogCompositeFeature.h"
 #include "luth/renderer/features/RefractionBackdropFeature.h"
 #include "luth/renderer/features/TransparencyFeature.h"
+#include "luth/renderer/features/TaaFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -193,6 +194,14 @@ namespace Luth
         auto transparencyCompiled = RenderPipelineCompiler{}.Compile(std::move(transparencyDefinition), {}, transparencyInputs);
         if (!transparencyCompiled.ReplaceIfValid(m_TransparencyComposition))
             throw std::runtime_error("Transparency definition failed semantic validation");
+        RenderPipelineDefinition taaDefinition;
+        taaDefinition.AddFeature<TaaFeature>(m_PostProcess, &m_System.GetFrameDebugger());
+        PipelineInputContract taaInputs;
+        taaInputs.resources = {{RenderResources::TransparentHDR}, {RenderResources::MotionVectors},
+            {RenderResources::LitDepth}, {TaaResources::Bindings}};
+        auto taaCompiled = RenderPipelineCompiler{}.Compile(std::move(taaDefinition), {}, taaInputs);
+        if (!taaCompiled.ReplaceIfValid(m_TaaComposition))
+            throw std::runtime_error("TAA definition failed semantic validation");
         RenderPipelineDefinition backdropDefinition;
         backdropDefinition.AddFeature<RefractionBackdropFeature>(m_Transparency);
         PipelineInputContract backdropInputs;
@@ -338,6 +347,7 @@ namespace Luth
         m_FogCompositeComposition.reset();
         m_RefractionComposition.reset();
         m_TransparencyComposition.reset();
+        m_TaaComposition.reset();
         m_SkyComposition.reset();
         m_ForwardComposition.reset();
         m_Skinning.Shutdown();
@@ -463,7 +473,7 @@ namespace Luth
         // on the real-time path (PT traces its own primary rays, so it needs none of these).
         RG::ResourceHandle shadowHandles[k_ShadowCascadeCount]{};
         ShadowCascadeRefs shadowOutputs;
-        GraphTextureRef surfaceDepth{};
+        GraphTextureRef surfaceDepth{}, motionVectors{};
         SlimGBufferOutput  slimGB{};
         if (!ptEnabled)
         {
@@ -537,13 +547,13 @@ namespace Luth
             depthView.width = m_CurrentViewResources->width;
             depthView.height = m_CurrentViewResources->height;
             GraphTextureRef depthOutput;
-            GraphTextureRef normalOutput, roughnessOutput, motionOutput, materialOutput;
+            GraphTextureRef normalOutput, roughnessOutput, materialOutput;
             const std::array depthOutputs{
                 RenderOutputBinding::Capture(RenderResources::PrepassDepth, depthOutput),
                 RenderOutputBinding::Capture(RenderResources::SurfaceDepth, surfaceDepth),
                 RenderOutputBinding::Capture(RenderResources::Normal, normalOutput),
                 RenderOutputBinding::Capture(RenderResources::Roughness, roughnessOutput),
-                RenderOutputBinding::Capture(RenderResources::MotionVectors, motionOutput),
+                RenderOutputBinding::Capture(RenderResources::MotionVectors, motionVectors),
                 RenderOutputBinding::Capture(RenderResources::MaterialID, materialOutput)};
             const auto depthBuild = m_SurfacePreparationComposition->Build(rg, depthFrame, depthView,
                 s.GetFrameAllocator(), depthOutputs);
@@ -553,7 +563,7 @@ namespace Luth
                     LH_LOG(Renderer, error, "Surface preparation composition: {}", diagnostic.message);
                 return false;
             }
-            slimGB = {normalOutput.handle, roughnessOutput.handle, motionOutput.handle, materialOutput.handle};
+            slimGB = {normalOutput.handle, roughnessOutput.handle, motionVectors.handle, materialOutput.handle};
         }
 
         // Freeze native cluster resources before recording; retain shared Set 3 bindings.
@@ -784,11 +794,11 @@ namespace Luth
 
 
         // Real-time lit chain (geometry -> skybox -> fog composite -> transparent -> TAA). Skipped in PT; the
-        // megakernel output drives the post chain via hdrForPost below. geoOutput/maskOutput/taaColor hoisted
+        // megakernel output drives the post chain via hdrForPost below. geoOutput/maskOutput/resolvedHdr hoisted
         // for the overlays + post chain; default-invalid in PT (the overlays that read them are !ptActive too).
         GeometryOutput      geoOutput{};
         SelectionMaskOutput maskOutput{};
-        RG::ResourceHandle  taaColor{};
+        GraphTextureRef resolvedHdr;
         if (!ptEnabled)
         {
             const u32 forwardSlot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
@@ -921,7 +931,7 @@ namespace Luth
             const RG::ResourceHandle backdropHandle = backdropOutput.handle;
             // Transparent tier: after the fog composite so glass blends over the fogged background (its own
             // fog is per-fragment at the glass depth, sampled from the resolved atlas inside pbr_transparent.frag).
-            RG::ResourceHandle transparentColor = fogColor;
+            GraphTextureRef transparentStage = foggedOutput;
             if (m_CurrentViewResources)
             {
                 const u32 frameAbsT = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
@@ -964,29 +974,40 @@ namespace Luth
                             LH_LOG(Renderer, error, "Transparency composition: {}", diagnostic.message);
                         return false;
                     }
-                    transparentColor = transparentOutput.handle;
+                    transparentStage = transparentOutput;
                     geoOutput.entityID = finalPicking.handle; geoOutput.depth = transparentDepth.handle;
                 }
             }
-            // TAA Resolve: Karis14 YCoCg-clip, HDR-domain, after the fog composite + before bloom/grid.
-            // WriteTaaResolvePerFrame rebinds the parity-picked history-prev; the resolve writes history-curr.
-            const PostProcessSettings& pps = m_System.GetPostProcessSettings();
-            const bool taaEnabled = pps.taaEnabled && m_CurrentViewResources;
-            if (taaEnabled)
-                m_PostProcess.WriteTaaResolvePerFrame(*m_CurrentViewResources,
-                    static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()));
-            taaColor = taaEnabled
-                       ? m_PostProcess.AddTaaResolvePass(rg, transparentColor, slimGB.motion, surfaceDepth.handle)
-                       : transparentColor;
+            const auto& pps = s.GetPostProcessSettings();
+            const auto taaNative = m_PostProcess.PrepareTaaBindings(m_CurrentViewResources->taa,
+                skyFrame.renderFrameIndex, m_CurrentViewResources->generation,
+                m_Global.GetCachedSkyReproj(), pps.taaTemporalAlpha, pps.taaEnabled);
+            const TaaBindingRef taaBinding{&taaNative};
+            const GraphTextureRef taaDepth{geoOutput.depth, surfaceDepth.binding};
+            const std::array taaResources{RenderInputBinding::Present(RenderResources::TransparentHDR, transparentStage),
+                RenderInputBinding::Present(RenderResources::MotionVectors, motionVectors),
+                RenderInputBinding::Present(RenderResources::LitDepth, taaDepth),
+                RenderInputBinding::Present(TaaResources::Bindings, taaBinding)};
+            FrameRenderInputs taaFrame; taaFrame.renderFrameIndex = skyFrame.renderFrameIndex;
+            taaFrame.resources = taaResources;
+            const std::array taaExports{RenderOutputBinding::Capture(RenderResources::ResolvedHDR, resolvedHdr)};
+            const auto taaBuild = m_TaaComposition->Build(rg, taaFrame, skyView, s.GetFrameAllocator(), taaExports);
+            if (!taaBuild.success)
+            {
+                for (const auto& diagnostic : taaBuild.diagnostics)
+                    LH_LOG(Renderer, error, "TAA composition: {}", diagnostic.message);
+                return false;
+            }
         }
-        // Bloom/composite source rebind runs in BOTH paths: PT -> the ptColor display image; else the TAA
-        // chain output (taaHistoryCurr) when TAA is on, else SceneColor. Without it the bindings statically reference SceneColor.
+        // Native downstream descriptors follow the actual selected stage, including cold TAA pass-through.
+        const TextureBindingRef postSource = ptActive ? TextureBindingRef{m_CurrentViewResources->ptColor.get()}
+            : resolvedHdr.binding;
         if (m_CurrentViewResources)
-            m_PostProcess.UpdateBloomCompositeInput(*m_CurrentViewResources, *view.targets,
-                static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()));
+            m_PostProcess.UpdateBloomCompositeInput(*m_CurrentViewResources, postSource,
+                Renderer::GetFrameData()->GetRenderFrameIndex());
         // HDR source for the post chain: the PT megakernel output replaces the raster sceneColor when PT
-        // is active (the raster chain above is then dead-pass-culled). Grid is editor-overlay-only -> off in PT.
-        RG::ResourceHandle hdrForPost  = ptActive ? ptColorHandle : taaColor;
+        // is active (the realtime chain is not registered). Grid is editor-overlay-only -> off in PT.
+        RG::ResourceHandle hdrForPost  = ptActive ? ptColorHandle : resolvedHdr.handle;
         // Resolve the active shade mode once (PT forces Lit). Hoisted here so the bloom gate and the slim-viz dispatch below share it.
         const ShadeMode shadeMode = ptActive ? ShadeMode::Lit : m_System.GetShadeMode();
         // Bloom is skipped at strength 0 (composite adds bloom x strength; AddCompositePass guards an

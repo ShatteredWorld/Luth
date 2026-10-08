@@ -22,6 +22,12 @@ namespace Luth
         // Retain the stable sampled inputs together with their descriptor pool.
         std::array<std::shared_ptr<Texture>, 3> sources{};
         u64 sourceGeneration = 1;
+        u64 shaderGeneration = 0;
+        void ApplyShaderGeneration(u64 generation)
+        {
+            if (shaderGeneration == generation) return;
+            history.Invalidate(); shaderGeneration = generation;
+        }
         ViewHistoryState history;
         bool recorded = false;
     };

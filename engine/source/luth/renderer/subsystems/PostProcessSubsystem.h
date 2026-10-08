@@ -5,6 +5,7 @@
 #include "luth/renderer/backend/vulkan/VulkanPipeline.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 #include "luth/renderer/features/TaaViewState.h"
+#include "luth/renderer/features/TaaBindings.h"
 
 #include <memory>
 #include <string>
@@ -16,6 +17,7 @@ namespace Luth
     class RenderPipeline;
     struct ViewResources;
     struct SlimGBufferOutput;
+    struct FrameDebugger;
 
     // Owns the PostProcess descriptor layout/sampler, the bloom extract + bloom blur + tonemap-composite
     // pipelines, and the per-frame PP UBO upload (rebound to all 4 PP descriptor sets in one batched write).
@@ -26,6 +28,9 @@ namespace Luth
         void Shutdown();
         std::shared_ptr<TaaViewState> EnsureTaaView(RenderViewId, FrameTargets&);
         void ReleaseTaaView(RenderViewId);
+        void InvalidateTaaView(RenderViewId);
+        TaaBindings PrepareTaaBindings(const std::shared_ptr<TaaViewState>&, u64 frame,
+            u64 generation, const Mat4& skyReproj, float alpha, bool enabled);
 
         bool OnShaderReloaded(const std::string& name, const std::vector<u32>& spv);
 
@@ -42,14 +47,10 @@ namespace Luth
         // Stable per-view writes for the TAA resolve set (bindings 0/1/3: sceneColor / motion /
         // sceneDepth). Binding 2 (history-prev sampler) is rebound per-frame in WriteTaaResolvePerFrame.
         void WriteTaaResolveView(TaaViewState& state, FrameTargets& targets);
-        void WriteTaaResolvePerFrame(ViewResources& vr, u32 frameAbs);
+        void WriteTaaResolvePerFrame(TaaViewState& state, u64 frameAbs);
 
-        // Per-frame rebind of bloom-prefilter + composite binding 0 to track the TAA chain. When
-        // TAA is on, the binding points at taaHistoryCurr (parity-picked) so bloom and composite
-        // consume the TAA-resolved color; without this rebind, both statically reference
-        // FrameTargets::SceneColor and TAA's output is dropped. When TAA is off, the binding
-        // restores to FrameTargets::SceneColor.
-        void UpdateBloomCompositeInput(ViewResources& vr, FrameTargets& targets, u32 frameAbs);
+        // Rebind downstream descriptors to the actual HDR stage selected by composition.
+        void UpdateBloomCompositeInput(ViewResources& vr, TextureBindingRef source, u64 frameAbs);
 
         // Render-graph contributions.
         RG::ResourceHandle AddBloomPasses(RG::RenderGraph& rg, RG::ResourceHandle sceneColor);
@@ -58,7 +59,7 @@ namespace Luth
         // parity-picked history-prev (bound by WriteTaaResolvePerFrame); writes the parity-picked
         // history-curr. Returned handle is what downstream bloom + grid + composite consume.
         RG::ResourceHandle AddTaaResolvePass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor,
-                                             RG::ResourceHandle motion, RG::ResourceHandle sceneDepth);
+            RG::ResourceHandle motion, RG::ResourceHandle sceneDepth, const TaaBindings&, FrameDebugger*);
         // Live slim G-buffer viz; bypasses tonemap. Mode = SlimNormal/Roughness/Motion/MaterialID,
         // scale is motion magnification (unused for other modes). Runs after composite, writes LDR.
         // slimGB carries the producer-side RG handles from SlimGBufferPass; re-importing the same
@@ -81,6 +82,7 @@ namespace Luth
 
         RenderPipeline* m_Pipeline = nullptr;
         TaaViewStateStore m_TaaStates;
+        u64 m_TaaShaderGeneration = 1;
 
         VkSampler             m_Sampler                 = VK_NULL_HANDLE;
         VkSampler             m_NearestSampler          = VK_NULL_HANDLE; // for integer slim matID binding

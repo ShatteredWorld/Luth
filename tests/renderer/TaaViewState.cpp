@@ -56,3 +56,16 @@ TEST_CASE("TaaViewState: invalid configuration fails before device access")
     CHECK_THROWS_AS(TaaViewState::Create({}, config, {}), std::invalid_argument);
     CHECK_THROWS_AS(TaaViewState::Create({1}, config, {}), std::runtime_error);
 }
+TEST_CASE("TaaViewState: successful shader generation change invalidates every view lazily")
+{
+    TaaViewState scene, game;
+    scene.ApplyShaderGeneration(1); game.ApplyShaderGeneration(1);
+    scene.history.Commit(10, 2); game.history.Commit(10, 3);
+    scene.ApplyShaderGeneration(1);
+    CHECK(scene.history.CanReuse(11, 2)); CHECK(game.history.CanReuse(11, 3));
+    scene.ApplyShaderGeneration(2); CHECK_FALSE(scene.history.valid);
+    CHECK(game.history.CanReuse(11, 3));
+    game.ApplyShaderGeneration(2); CHECK_FALSE(game.history.valid);
+    scene.history.Commit(11, 2); scene.ApplyShaderGeneration(2);
+    CHECK(scene.history.CanReuse(12, 2)); CHECK(scene.shaderGeneration == 2);
+}
