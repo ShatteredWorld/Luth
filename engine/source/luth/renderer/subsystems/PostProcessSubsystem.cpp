@@ -3,7 +3,6 @@
 #include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/Renderer.h"
 #include "luth/renderer/FrameTargets.h"
-#include "luth/scene/systems/RenderingSystem.h"
 #include "luth/renderer/material/Material.h"
 #include "luth/renderer/draw/DrawCommand.h"
 #include "luth/renderer/shader/ShaderLibrary.h"
@@ -18,10 +17,10 @@
 
 namespace Luth
 {
-    void PostProcessSubsystem::Init(RenderPipeline& pipeline)
+    void PostProcessSubsystem::Init()
     {
         LH_PROFILE_FUNCTION();
-        m_Pipeline = &pipeline;
+
         VkDevice device = VulkanContext::Get().GetDevice();
 
         VkSamplerCreateInfo samplerInfo{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
@@ -391,76 +390,6 @@ namespace Luth
 
         if (!writes.empty())
             vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
-    }
-
-    RG::ResourceHandle PostProcessSubsystem::AddSlimVizPass(RG::RenderGraph& rg, RG::ResourceHandle ldrInput,
-                                                            const SlimGBufferOutput& slimGB, u32 mode, float scale)
-    {
-        LH_PROFILE_FUNCTION();
-        const auto* view = m_Pipeline->GetCurrentView();
-        if (!m_SlimVizPipeline || !view->targets->GetLDROutput())
-            return ldrInput;
-
-        struct SlimVizPassData {
-            RG::ResourceHandle output;
-            RG::ResourceHandle slimNormal;
-            RG::ResourceHandle slimRoughness;
-            RG::ResourceHandle slimMotion;
-            RG::ResourceHandle slimMaterialID;
-        };
-        RG::ResourceHandle outputHandle;
-
-        rg.AddPass<SlimVizPassData>("SlimVizPass",
-            [&, ldrInput, mode, slimGB](SlimVizPassData& data, RG::RenderPassBuilder& builder)
-            {
-                // Write to the LDR handle Composite returned: same RG resource node, so the
-                // barrier solver sees the producer's COLOR_ATTACHMENT state. Re-importing would
-                // alias the same VkImage onto a fresh node with a stale initialState (VUID 01197).
-                VkClearValue clearVal{ { {0.f, 0.f, 0.f, 1.f} } };
-                data.output = builder.Write(ldrInput, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, clearVal);
-
-                // Same reasoning for the slim attachments: reuse SlimGBufferPass's handles.
-                data.slimNormal     = builder.Read(slimGB.normal);
-                data.slimRoughness  = builder.Read(slimGB.roughness);
-                data.slimMotion     = builder.Read(slimGB.motion);
-                data.slimMaterialID = builder.Read(slimGB.materialID);
-
-                outputHandle = data.output;
-            },
-            [this, mode, scale](SlimVizPassData& data, RG::RenderPassContext& ctx)
-            {
-                auto& sys = m_Pipeline->GetSystem();
-                const auto* v = m_Pipeline->GetCurrentView();
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                if (!vr || vr->slimVizDescSet == VK_NULL_HANDLE) return;
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "SlimVizPass", "LDROutput", false,
-                    { "slim_viz", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, false });
-
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                m_SlimVizPipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_SlimVizPipeline->GetLayout(), 0, 1, &vr->slimVizDescSet, 0, nullptr);
-
-                struct { u32 mode; float scale; } pcData{ mode, scale };
-                vkCmdPushConstants(cmd, m_SlimVizPipeline->GetLayout(),
-                                   VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pcData), &pcData);
-
-                u32 w = v->targets->GetLDROutput()->GetWidth();
-                u32 h = v->targets->GetLDROutput()->GetHeight();
-                VkViewport vp{}; vp.width = (float)w; vp.height = (float)h; vp.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &vp);
-                VkRect2D sc{}; sc.extent = { w, h };
-                vkCmdSetScissor(cmd, 0, 1, &sc);
-                vkCmdDraw(cmd, 3, 1, 0, 0);
-
-                ObjectPushConstants dummyPC{};
-                sys.GetFrameDebugger().CaptureDrawCall("SlimVizPass", "FullscreenTriangle", "SlimViz", 0, 0, dummyPC,
-                    { "slim_viz", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, false });
-                sys.GetFrameDebugger().EndCapturePass();
-            }
-        );
-        return outputHandle;
     }
 
     void PostProcessSubsystem::WriteTaaResolveView(TaaViewState& state, FrameTargets& targets)

@@ -8,6 +8,7 @@
 #include "luth/renderer/features/TaaBindings.h"
 #include "luth/renderer/features/BloomBindings.h"
 #include "luth/renderer/features/CompositeBindings.h"
+#include "luth/renderer/features/SlimVizBindings.h"
 
 #include <memory>
 #include <string>
@@ -16,9 +17,9 @@
 namespace Luth
 {
     class FrameTargets;
-    class RenderPipeline;
+
     struct ViewResources;
-    struct SlimGBufferOutput;
+
     struct FrameDebugger;
 
     // Owns the PostProcess descriptor layout/sampler, bloom pyramid and tonemap-composite
@@ -26,7 +27,7 @@ namespace Luth
     class PostProcessSubsystem
     {
     public:
-        void Init(RenderPipeline& pipeline);
+        void Init();
         void Shutdown();
         std::shared_ptr<TaaViewState> EnsureTaaView(RenderViewId, FrameTargets&);
         void ReleaseTaaView(RenderViewId);
@@ -71,9 +72,10 @@ namespace Luth
         // scale is motion magnification (unused for other modes). Runs after composite, writes LDR.
         // slimGB carries the producer-side RG handles from SlimGBufferPass; re-importing the same
         // VkImages would create aliased RG resources the barrier solver can't reconcile.
-        RG::ResourceHandle AddSlimVizPass(RG::RenderGraph& rg, RG::ResourceHandle ldrInput,
-                                          const SlimGBufferOutput& slimGB, u32 mode, float scale);
-
+        SlimVizBindings PrepareSlimVizBindings(VkDescriptorSet,
+            const std::array<std::shared_ptr<Texture>, 4>&, u32 mode, float scale, bool enabled) const;
+        RG::ResourceHandle AddSlimVizPass(RG::RenderGraph&, RG::ResourceHandle input,
+            const std::array<RG::ResourceHandle, 4>&, const SlimVizBindings&, FrameDebugger*);
         VkDescriptorSetLayout GetBloomComputeLayout()      const { return m_BloomComputeLayout; }
         VkDescriptorSetLayout GetSlimVizDescSetLayout()    const { return m_SlimVizDescSetLayout; }
         VkDescriptorSetLayout GetTaaResolveDescSetLayout() const { return m_TaaResolveDescSetLayout; }
@@ -82,7 +84,7 @@ namespace Luth
     private:
         void BuildPipelines();
 
-        RenderPipeline* m_Pipeline = nullptr;
+
         TaaViewStateStore m_TaaStates;
         BloomViewStateStore m_BloomStates;
         CompositeViewStateStore m_CompositeStates;

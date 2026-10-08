@@ -17,6 +17,7 @@
 #include "luth/renderer/features/GridFeature.h"
 #include "luth/renderer/features/SelectionMaskFeature.h"
 #include "luth/renderer/features/OutlineFeature.h"
+#include "luth/renderer/features/SlimVizFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -86,7 +87,7 @@ namespace Luth
         BoneMatrixBuffer::Init();
         m_EditorOverlays.Init();
         m_DebugDraw.Init(*this);
-        m_PostProcess.Init(*this);
+        m_PostProcess.Init();
 
         // Lighting owns Set 3 + shadow map + IBL + skybox VB/SPVs. Engine ships no HDR; an empty path triggers
         // IBL::Precompute's silent dummy-cubemap fallback. Editor::OnProjectChanged invokes ReloadSkybox once
@@ -199,6 +200,15 @@ namespace Luth
         auto transparencyCompiled = RenderPipelineCompiler{}.Compile(std::move(transparencyDefinition), {}, transparencyInputs);
         if (!transparencyCompiled.ReplaceIfValid(m_TransparencyComposition))
             throw std::runtime_error("Transparency definition failed semantic validation");
+        RenderPipelineDefinition slimVizDefinition;
+        slimVizDefinition.AddFeature<SlimVizFeature>(m_PostProcess, &m_System.GetFrameDebugger());
+        PipelineInputContract slimVizInputs;
+        slimVizInputs.resources = {{RenderResources::TonemappedLDR}, {SlimVizResources::Bindings},
+            {RenderResources::Normal, ResourceOutputPresence::Optional}, {RenderResources::Roughness, ResourceOutputPresence::Optional},
+            {RenderResources::MotionVectors, ResourceOutputPresence::Optional}, {RenderResources::MaterialID, ResourceOutputPresence::Optional}};
+        auto slimVizCompiled = RenderPipelineCompiler{}.Compile(std::move(slimVizDefinition), {}, slimVizInputs);
+        if (!slimVizCompiled.ReplaceIfValid(m_SlimVizComposition))
+            throw std::runtime_error("SlimViz definition failed semantic validation");
         RenderPipelineDefinition outlineDefinition;
         outlineDefinition.AddFeature<OutlineFeature>(m_EditorOverlays, &m_System.GetFrameDebugger());
         PipelineInputContract outlineInputs;
@@ -393,6 +403,7 @@ namespace Luth
         m_TransparencyComposition.reset();
         m_TaaComposition.reset();
         m_BloomComposition.reset();
+        m_SlimVizComposition.reset();
         m_OutlineComposition.reset();
         m_SelectionMaskComposition.reset();
         m_GridComposition.reset();
@@ -523,6 +534,7 @@ namespace Luth
         RG::ResourceHandle shadowHandles[k_ShadowCascadeCount]{};
         ShadowCascadeRefs shadowOutputs;
         GraphTextureRef surfaceDepth{}, motionVectors{};
+        GraphTextureRef normalOutput, roughnessOutput, materialOutput;
         SlimGBufferOutput  slimGB{};
         if (!ptEnabled)
         {
@@ -596,7 +608,7 @@ namespace Luth
             depthView.width = m_CurrentViewResources->width;
             depthView.height = m_CurrentViewResources->height;
             GraphTextureRef depthOutput;
-            GraphTextureRef normalOutput, roughnessOutput, materialOutput;
+
             const std::array depthOutputs{
                 RenderOutputBinding::Capture(RenderResources::PrepassDepth, depthOutput),
                 RenderOutputBinding::Capture(RenderResources::SurfaceDepth, surfaceDepth),
@@ -1148,12 +1160,32 @@ namespace Luth
         // per-capture tuning; live viz uses a sensible default matching the existing thumbnail UX. PT mode forces
         // Lit (the debug-viz blits read the culled G-buffer / cluster / reservoir state, meaningless over the PT
         // image). shadeMode was resolved above (hoisted for the bloom gate).
-        if (shadeMode >= ShadeMode::SlimNormal && shadeMode <= ShadeMode::SlimMaterialID)
+        const bool slimVizEnabled = !ptEnabled && shadeMode >= ShadeMode::SlimNormal && shadeMode <= ShadeMode::SlimMaterialID;
+        const u32 slimMode = slimVizEnabled ? static_cast<u32>(shadeMode) - static_cast<u32>(ShadeMode::SlimNormal) : 0;
+        const std::array slimVizSources{view.targets->GetSlimNormal(), view.targets->GetSlimRoughness(),
+            view.targets->GetSlimMotion(), view.targets->GetSlimMaterialID()};
+        const auto slimVizNative = m_PostProcess.PrepareSlimVizBindings(m_CurrentViewResources->slimVizDescSet,
+            slimVizSources, slimMode, 20.0f, slimVizEnabled);
+        const SlimVizBindingRef slimVizBinding{&slimVizNative};
+        const auto optionalSlimInput = [](auto key, const GraphTextureRef& ref) {
+            return ref.handle.IsValid() ? RenderInputBinding::Present(key, ref) : RenderInputBinding::Absent(key);
+        };
+        const std::array slimVizResources{RenderInputBinding::Present(RenderResources::TonemappedLDR, tonemappedLdr),
+            RenderInputBinding::Present(SlimVizResources::Bindings, slimVizBinding),
+            optionalSlimInput(RenderResources::Normal, normalOutput), optionalSlimInput(RenderResources::Roughness, roughnessOutput),
+            optionalSlimInput(RenderResources::MotionVectors, motionVectors), optionalSlimInput(RenderResources::MaterialID, materialOutput)};
+        FrameRenderInputs slimVizFrame; slimVizFrame.renderFrameIndex = bloomFrame.renderFrameIndex; slimVizFrame.resources = slimVizResources;
+        GraphTextureRef slimVisualizedLdr;
+        const std::array slimVizExports{RenderOutputBinding::Capture(RenderResources::VisualizedLDR, slimVisualizedLdr)};
+        const auto slimVizBuild = m_SlimVizComposition->Build(rg, slimVizFrame, bloomView, s.GetFrameAllocator(), slimVizExports);
+        if (!slimVizBuild.success)
         {
-            const u32 slimMode = static_cast<u32>(shadeMode) - static_cast<u32>(ShadeMode::SlimNormal);
-            ldrOutput = m_PostProcess.AddSlimVizPass(rg, ldrOutput, slimGB, slimMode, /*motionScale*/20.0f);
+            for (const auto& diagnostic : slimVizBuild.diagnostics)
+                LH_LOG(Renderer, error, "SlimViz composition: {}", diagnostic.message);
+            return false;
         }
-        else if (shadeMode == ShadeMode::ClustersDensity)
+        ldrOutput = slimVisualizedLdr.handle;
+        if (shadeMode == ShadeMode::ClustersDensity)
         {
             ldrOutput = m_Lighting.AddClusterVizPass(rg, ldrOutput, surfaceDepth.handle);
         }
