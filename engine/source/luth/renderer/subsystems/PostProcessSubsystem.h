@@ -6,7 +6,7 @@
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 #include "luth/renderer/features/TaaViewState.h"
 #include "luth/renderer/features/TaaBindings.h"
-#include "luth/renderer/features/BloomViewState.h"
+#include "luth/renderer/features/BloomBindings.h"
 
 #include <memory>
 #include <string>
@@ -53,10 +53,12 @@ namespace Luth
         void WriteTaaResolvePerFrame(TaaViewState& state, u64 frameAbs);
 
         // Rebind downstream descriptors to the actual HDR stage selected by composition.
-        void UpdateBloomCompositeInput(ViewResources& vr, TextureBindingRef source, u64 frameAbs);
+        void UpdateCompositeInput(ViewResources& vr, TextureBindingRef source, u64 frameAbs);
 
         // Render-graph contributions.
-        RG::ResourceHandle AddBloomPasses(RG::RenderGraph& rg, RG::ResourceHandle sceneColor);
+        BloomBindings PrepareBloomBindings(const std::shared_ptr<BloomViewState>&, TextureBindingRef source,
+            u64 frame, float threshold, float radius, bool enabled);
+        RG::ResourceHandle AddBloomPasses(RG::RenderGraph&, RG::ResourceHandle, const BloomBindings&, FrameDebugger*);
         RG::ResourceHandle AddCompositePass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor, RG::ResourceHandle bloomResult);
         // TAA Resolve (Karis14 YCoCg-clip recipe). Reads sceneColor + motion + sceneDepth + the
         // parity-picked history-prev (bound by WriteTaaResolvePerFrame); writes the parity-picked
@@ -78,10 +80,6 @@ namespace Luth
 
     private:
         void BuildPipelines();
-
-        // One bloom compute dispatch: bind pipeline + set, push constants, dispatch (8x8), capture.
-        void RecordBloomDispatch(RG::RenderPassContext& ctx, VKComputePipeline* pipe, VkDescriptorSet set,
-                                 const void* pc, u32 pcSize, u32 dstW, u32 dstH, const char* label, const char* shader);
 
         RenderPipeline* m_Pipeline = nullptr;
         TaaViewStateStore m_TaaStates;

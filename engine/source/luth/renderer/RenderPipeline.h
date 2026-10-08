@@ -485,6 +485,7 @@ namespace Luth
         std::unique_ptr<CompiledRenderPipeline> m_RefractionComposition;
         std::unique_ptr<CompiledRenderPipeline> m_TransparencyComposition;
         std::unique_ptr<CompiledRenderPipeline> m_TaaComposition;
+        std::unique_ptr<CompiledRenderPipeline> m_BloomComposition;
         std::unique_ptr<CompiledRenderPipeline> m_SkyComposition;
         std::unique_ptr<CompiledRenderPipeline> m_ForwardComposition;
         std::unique_ptr<IDenoiser> m_Denoise;     // DI SVGF; swappable to NRD/RELAX via the settings toggle

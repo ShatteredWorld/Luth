@@ -18,29 +18,6 @@
 
 namespace Luth
 {
-    // Mirrors bloom_downsample.slang's push_constant. prefilter=1 gates the threshold + Karis
-    // bright-pass on the scene->mip0 step; later mips run the plain 13-tap.
-    struct BloomDownPC
-    {
-        Vec2  srcTexel;   // 0: 1/sourceResolution
-        IVec2 dstSize;    // 8: dest extent
-        f32   threshold;  // 16
-        f32   knee;       // 20
-        u32   prefilter;  // 24
-        u32   _pad;       // 28
-    };
-    static_assert(sizeof(BloomDownPC) == 32, "BloomDownPC must match bloom_downsample.slang");
-
-    // Mirrors bloom_upsample.slang's push_constant. radius scales the tent spread (scatter).
-    struct BloomUpPC
-    {
-        Vec2  srcTexel;            // 0
-        IVec2 dstSize;             // 8
-        f32   radius;              // 16
-        f32   _pad0, _pad1, _pad2; // 20-31
-    };
-    static_assert(sizeof(BloomUpPC) == 32, "BloomUpPC must match bloom_upsample.slang");
-
     void PostProcessSubsystem::Init(RenderPipeline& pipeline)
     {
         LH_PROFILE_FUNCTION();
@@ -103,7 +80,7 @@ namespace Luth
 
         // Bloom pyramid compute layout: b0 = source mip (COMBINED_IMAGE_SAMPLER), b1 = dest mip
         // (STORAGE_IMAGE), both COMPUTE. b0 is UAB so the prefilter's per-frame source rebind
-        // (UpdateBloomCompositeInput) is race-safe; the single down/up sets bind stable per-view mips.
+        // (PrepareBloomBindings) is race-safe; the single down/up sets bind stable per-view mips.
         VkDescriptorSetLayoutBinding bloomBindings[2] = {};
         bloomBindings[0].binding         = 0;
         bloomBindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -397,7 +374,7 @@ namespace Luth
             return info;
         };
 
-        // Composite: b0 = HDR source (default; rebound per frame by UpdateBloomCompositeInput),
+        // Composite: b0 = HDR source (default; rebound per frame by PrepareBloomBindings),
         // b1 = bloom pyramid mip0 (the accumulated bloom). Both stable across cycled slots.
         VkDescriptorImageInfo compImg0 = makeImg(sceneVk->GetImageView());
         VkDescriptorImageInfo compImg1 = makeImg(mip0Vk->GetImageView());
@@ -493,7 +470,7 @@ namespace Luth
             writes.push_back(w);
         };
 
-        // Prefilter dest (b1 = mip0 storage); b0 source is rebound per frame by UpdateBloomCompositeInput.
+        // Prefilter dest (b1 = mip0 storage); b0 source is rebound per frame by PrepareBloomBindings.
         for (u32 s = 0; s < MAX_FRAMES_IN_FLIGHT; ++s)
             add(state.prefilterSets[s], 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &storage[0]);
 
@@ -509,136 +486,6 @@ namespace Luth
 
         if (!writes.empty())
             vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
-    }
-
-    void PostProcessSubsystem::RecordBloomDispatch(RG::RenderPassContext& ctx, VKComputePipeline* pipe,
-        VkDescriptorSet set, const void* pc, u32 pcSize, u32 dstW, u32 dstH, const char* label, const char* shader)
-    {
-        auto& sys = m_Pipeline->GetSystem();
-        sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, label, "BloomMip", false,
-            { shader, 0, 0, VK_POLYGON_MODE_FILL, false, false, false, false });
-        if (!pipe || set == VK_NULL_HANDLE) { sys.GetFrameDebugger().EndCapturePass(); return; }
-
-        VkCommandBuffer cmd = ctx.commandBuffer;
-        pipe->Bind(cmd);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe->GetLayout(), 0, 1, &set, 0, nullptr);
-        vkCmdPushConstants(cmd, pipe->GetLayout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, pcSize, pc);
-        const u32 gx = (dstW + 7) / 8, gy = (dstH + 7) / 8;
-        vkCmdDispatch(cmd, gx, gy, 1);
-
-        sys.GetFrameDebugger().CaptureComputeDispatch(label, shader, gx, gy, 1);
-        sys.GetFrameDebugger().EndCapturePass();
-    }
-
-    RG::ResourceHandle PostProcessSubsystem::AddBloomPasses(RG::RenderGraph& rg, RG::ResourceHandle sceneColor)
-    {
-        LH_PROFILE_FUNCTION();
-        ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-        if (!m_BloomDownPipeline || !m_BloomUpPipeline || !vr || !vr->bloom || !vr->bloom->mips[0])
-            return {};
-
-        constexpr u32 N = BloomViewState::kMipCount;
-
-        // Thread one handle per mip. Each mip is imported exactly once (at its producing pass); re-importing
-        // a VkImage an upstream pass already imported aliases it onto two RG nodes with divergent state (arch
-        // hazard). h[i] always names mip[i]'s single live node. see arch/rendering-pipeline.md.
-        RG::ResourceHandle h[N];
-        struct BloomData {};
-
-        auto importMip = [&](u32 mip, RG::RenderPassBuilder& b) -> RG::ResourceHandle {
-            auto vk = std::static_pointer_cast<VKTexture>(vr->bloom->mips[mip]);
-            RG::TextureDesc desc;
-            desc.name   = "BloomMip";
-            desc.width  = vr->bloom->mips[mip]->GetWidth();
-            desc.height = vr->bloom->mips[mip]->GetHeight();
-            desc.format = RG::TextureFormat::RGBA16_Float;
-            RG::ResourceHandle handle = rg.ImportResource(desc,
-                (void*)vk->GetImage(), (void*)vk->GetImageView(), RG::ResourceState::Undefined);
-            return b.WriteStorageImage(handle);
-        };
-
-        // Prefilter: full-res scene -> mip0 (threshold + soft-knee + Karis bright-pass).
-        rg.AddComputePass<BloomData>("BloomPrefilter",
-            [&](BloomData&, RG::RenderPassBuilder& b)
-            {
-                b.ReadStorageImage(sceneColor);
-                h[0] = importMip(0, b);
-            },
-            [this](BloomData&, RG::RenderPassContext& ctx)
-            {
-                ViewResources* vr  = m_Pipeline->GetCurrentViewResources();
-                const auto*    view = m_Pipeline->GetCurrentView();
-                if (!vr || !view || !view->targets->GetSceneColor() || !vr->bloom || !vr->bloom->mips[0]) return;
-                const auto& s  = m_Pipeline->GetSystem().GetPostProcessSettings();
-                const u32 srcW = view->targets->GetSceneColor()->GetWidth();
-                const u32 srcH = view->targets->GetSceneColor()->GetHeight();
-                const u32 dstW = vr->bloom->mips[0]->GetWidth(), dstH = vr->bloom->mips[0]->GetHeight();
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                BloomDownPC pc{};
-                pc.srcTexel  = { 1.0f / float(srcW), 1.0f / float(srcH) };
-                pc.dstSize   = { (i32)dstW, (i32)dstH };
-                pc.threshold = s.bloomThreshold;
-                pc.knee      = 0.5f;
-                pc.prefilter = 1u;
-                RecordBloomDispatch(ctx, m_BloomDownPipeline.get(), vr->bloom->prefilterSets[slot],
-                                    &pc, sizeof(pc), dstW, dstH, "BloomPrefilter", "bloom_downsample");
-            });
-
-        // Downsample chain: mip[i] -> mip[i+1] (plain 13-tap).
-        for (u32 i = 0; i < N - 1; ++i)
-        {
-            rg.AddComputePass<BloomData>("BloomDown" + std::to_string(i),
-                [&, i](BloomData&, RG::RenderPassBuilder& b)
-                {
-                    b.ReadStorageImage(h[i]);
-                    h[i + 1] = importMip(i + 1, b);
-                },
-                [this, i](BloomData&, RG::RenderPassContext& ctx)
-                {
-                    ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                    if (!vr || !vr->bloom || !vr->bloom->mips[i + 1]) return;
-                    const u32 srcW = vr->bloom->mips[i]->GetWidth(),     srcH = vr->bloom->mips[i]->GetHeight();
-                    const u32 dstW = vr->bloom->mips[i + 1]->GetWidth(), dstH = vr->bloom->mips[i + 1]->GetHeight();
-                    BloomDownPC pc{};
-                    pc.srcTexel  = { 1.0f / float(srcW), 1.0f / float(srcH) };
-                    pc.dstSize   = { (i32)dstW, (i32)dstH };
-                    pc.prefilter = 0u;
-                    RecordBloomDispatch(ctx, m_BloomDownPipeline.get(), vr->bloom->downSets[i],
-                                        &pc, sizeof(pc), dstW, dstH, "BloomDown", "bloom_downsample");
-                });
-        }
-
-        // Upsample chain: mip[i+1] -> mip[i] (tent + additive accumulation into the existing content).
-        const float radius = m_Pipeline->GetSystem().GetPostProcessSettings().bloomRadius;
-        for (i32 i = (i32)N - 2; i >= 0; --i)
-        {
-            rg.AddComputePass<BloomData>("BloomUp" + std::to_string(i),
-                [&, i](BloomData&, RG::RenderPassBuilder& b)
-                {
-                    b.ReadStorageImage(h[i + 1]);            // smaller mip, sampled (tent taps)
-                    // Additive RMW: the dest read needs read-visibility for the imageLoad, so declare
-                    // ReadStorageImageGeneral + WriteStorageImage on the same node (PathTrace ptAccum
-                    // pattern); WriteStorageImage alone would leave the imageLoad of the downsample
-                    // content un-synchronized. Same node, no re-import (arch RG-aliasing hazard).
-                    h[i] = b.ReadStorageImageGeneral(h[i]);
-                    h[i] = b.WriteStorageImage(h[i]);
-                },
-                [this, i, radius](BloomData&, RG::RenderPassContext& ctx)
-                {
-                    ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                    if (!vr || !vr->bloom || !vr->bloom->mips[i + 1]) return;
-                    const u32 srcW = vr->bloom->mips[i + 1]->GetWidth(), srcH = vr->bloom->mips[i + 1]->GetHeight();
-                    const u32 dstW = vr->bloom->mips[i]->GetWidth(),     dstH = vr->bloom->mips[i]->GetHeight();
-                    BloomUpPC pc{};
-                    pc.srcTexel = { 1.0f / float(srcW), 1.0f / float(srcH) };
-                    pc.dstSize  = { (i32)dstW, (i32)dstH };
-                    pc.radius   = radius;
-                    RecordBloomDispatch(ctx, m_BloomUpPipeline.get(), vr->bloom->upSets[i],
-                                        &pc, sizeof(pc), dstW, dstH, "BloomUp", "bloom_upsample");
-                });
-        }
-
-        return h[0];
     }
 
     RG::ResourceHandle PostProcessSubsystem::AddCompositePass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor, RG::ResourceHandle bloomResult)
@@ -826,37 +673,18 @@ namespace Luth
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), idx, writes, 0, nullptr);
     }
 
-    void PostProcessSubsystem::UpdateBloomCompositeInput(ViewResources& vr, TextureBindingRef source, u64 frameAbs)
+    void PostProcessSubsystem::UpdateCompositeInput(ViewResources& vr, TextureBindingRef source, u64 frameAbs)
     {
-        LH_PROFILE_FUNCTION();
         const u32 slot = frameAbs % MAX_FRAMES_IN_FLIGHT;
-        if (!vr.bloom || vr.bloom->prefilterSets[slot] == VK_NULL_HANDLE || vr.compositeDescSet[slot] == VK_NULL_HANDLE)
-            return;
-
+        if (!vr.compositeDescSet[slot]) return;
         if (!source.texture) throw std::invalid_argument("PostProcess: missing resolved HDR binding");
-        const auto srcView = static_cast<const VKTexture*>(source.texture)->GetImageView();
-
-        VkDescriptorImageInfo info{};
-        info.sampler     = m_Sampler;
-        info.imageView   = srcView;
-        info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        VkWriteDescriptorSet writes[2] = {};
-        writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[0].dstSet          = vr.bloom->prefilterSets[slot];
-        writes[0].dstBinding      = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[0].pImageInfo      = &info;
-        writes[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[1].dstSet          = vr.compositeDescSet[slot];
-        writes[1].dstBinding      = 0;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[1].pImageInfo      = &info;
-        vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 2, writes, 0, nullptr);
+        VkDescriptorImageInfo image{m_Sampler, static_cast<const VKTexture*>(source.texture)->GetImageView(),
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = vr.compositeDescSet[slot]; write.dstBinding = 0; write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; write.pImageInfo = &image;
+        vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 1, &write, 0, nullptr);
     }
-
     void PostProcessSubsystem::WriteTaaResolvePerFrame(TaaViewState& state, u64 frameAbs)
     {
         LH_PROFILE_FUNCTION();

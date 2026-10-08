@@ -12,6 +12,7 @@
 #include "luth/renderer/features/RefractionBackdropFeature.h"
 #include "luth/renderer/features/TransparencyFeature.h"
 #include "luth/renderer/features/TaaFeature.h"
+#include "luth/renderer/features/BloomFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -194,6 +195,13 @@ namespace Luth
         auto transparencyCompiled = RenderPipelineCompiler{}.Compile(std::move(transparencyDefinition), {}, transparencyInputs);
         if (!transparencyCompiled.ReplaceIfValid(m_TransparencyComposition))
             throw std::runtime_error("Transparency definition failed semantic validation");
+        RenderPipelineDefinition bloomDefinition;
+        bloomDefinition.AddFeature<BloomFeature>(m_PostProcess, &m_System.GetFrameDebugger());
+        PipelineInputContract bloomInputs;
+        bloomInputs.resources = {{RenderResources::ResolvedHDR}, {BloomResources::Bindings}};
+        auto bloomCompiled = RenderPipelineCompiler{}.Compile(std::move(bloomDefinition), {}, bloomInputs);
+        if (!bloomCompiled.ReplaceIfValid(m_BloomComposition))
+            throw std::runtime_error("Bloom definition failed semantic validation");
         RenderPipelineDefinition taaDefinition;
         taaDefinition.AddFeature<TaaFeature>(m_PostProcess, &m_System.GetFrameDebugger());
         PipelineInputContract taaInputs;
@@ -348,6 +356,7 @@ namespace Luth
         m_RefractionComposition.reset();
         m_TransparencyComposition.reset();
         m_TaaComposition.reset();
+        m_BloomComposition.reset();
         m_SkyComposition.reset();
         m_ForwardComposition.reset();
         m_Skinning.Shutdown();
@@ -1003,20 +1012,36 @@ namespace Luth
         const TextureBindingRef postSource = ptActive ? TextureBindingRef{m_CurrentViewResources->ptColor.get()}
             : resolvedHdr.binding;
         if (m_CurrentViewResources)
-            m_PostProcess.UpdateBloomCompositeInput(*m_CurrentViewResources, postSource,
+            m_PostProcess.UpdateCompositeInput(*m_CurrentViewResources, postSource,
                 Renderer::GetFrameData()->GetRenderFrameIndex());
         // HDR source for the post chain: the PT megakernel output replaces the raster sceneColor when PT
         // is active (the realtime chain is not registered). Grid is editor-overlay-only -> off in PT.
         RG::ResourceHandle hdrForPost  = ptActive ? ptColorHandle : resolvedHdr.handle;
         // Resolve the active shade mode once (PT forces Lit). Hoisted here so the bloom gate and the slim-viz dispatch below share it.
         const ShadeMode shadeMode = ptActive ? ShadeMode::Lit : m_System.GetShadeMode();
-        // Bloom is skipped at strength 0 (composite adds bloom x strength; AddCompositePass guards an
-        // invalid handle) and for every non-Lit mode: bloom is a radiance effect that smears over data
-        // views and clutters radiance debug. Reads PRE-grid color so grid lines don't bloom.
-        RG::ResourceHandle bloomResult = (m_System.GetPostProcessSettings().bloomStrength > 0.0f
-                                          && shadeMode == ShadeMode::Lit)
-                                         ? m_PostProcess.AddBloomPasses(rg, hdrForPost)
-                                         : RG::ResourceHandle{};
+        // Bloom consumes the selected pre-grid HDR stage; disabled contributions publish absence.
+        const auto& bloomSettings = m_System.GetPostProcessSettings();
+        const auto bloomNative = m_PostProcess.PrepareBloomBindings(m_CurrentViewResources->bloom, postSource,
+            Renderer::GetFrameData()->GetRenderFrameIndex(), bloomSettings.bloomThreshold, bloomSettings.bloomRadius,
+            bloomSettings.bloomStrength > 0.0f && shadeMode == ShadeMode::Lit);
+        const BloomBindingRef bloomBinding{&bloomNative};
+        const GraphTextureRef bloomSource{hdrForPost, postSource};
+        const std::array bloomResources{RenderInputBinding::Present(RenderResources::ResolvedHDR, bloomSource),
+            RenderInputBinding::Present(BloomResources::Bindings, bloomBinding)};
+        FrameRenderInputs bloomFrame; bloomFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+        bloomFrame.resources = bloomResources;
+        ViewRenderInputs bloomView; bloomView.id = view.id;
+        bloomView.width = view.targets->GetSceneColor()->GetWidth(); bloomView.height = view.targets->GetSceneColor()->GetHeight();
+        GraphTextureRef bloomOutput;
+        const std::array bloomExports{RenderOutputBinding::Capture(RenderResources::BloomOutput, bloomOutput)};
+        const auto bloomBuild = m_BloomComposition->Build(rg, bloomFrame, bloomView, s.GetFrameAllocator(), bloomExports);
+        if (!bloomBuild.success)
+        {
+            for (const auto& diagnostic : bloomBuild.diagnostics)
+                LH_LOG(Renderer, error, "Bloom composition: {}", diagnostic.message);
+            return false;
+        }
+        const auto bloomResult = bloomOutput.handle;
         RG::ResourceHandle gridColor   = (view.drawGrid && !ptActive)
                                          ? m_EditorOverlays.AddGridPass(rg, hdrForPost, geoOutput.depth)
                                          : hdrForPost;

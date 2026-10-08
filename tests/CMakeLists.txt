@@ -18,6 +18,7 @@ add_executable(LuthTests
     renderer/RenderPipelineCompiler.cpp
     renderer/RenderViewState.cpp
     renderer/SortedTransparencyFeature.cpp
+    renderer/BloomFeature.cpp
     renderer/TaaFeature.cpp
     renderer/BloomViewState.cpp
     renderer/TaaViewState.cpp
