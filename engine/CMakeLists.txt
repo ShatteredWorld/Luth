@@ -137,6 +137,7 @@ add_library(Luth STATIC
     source/luth/renderer/material/MaterialLayoutGuard.cpp
     source/luth/renderer/material/MaterialSystem.cpp
 
+    source/luth/renderer/presentation/ViewPresentation.cpp
     source/luth/renderer/passes/ImGuiPass.cpp
 
     source/luth/renderer/pipeline/PipelineManager.cpp

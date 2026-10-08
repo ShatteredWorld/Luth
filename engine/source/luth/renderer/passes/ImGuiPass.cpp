@@ -1,65 +1,30 @@
 #include "luthpch.h"
-#include "luth/scene/systems/RenderingSystem.h"
-#include "luth/renderer/RenderPipeline.h"
-#include "luth/core/diagnostics/Profiler.h"
-#include "luth/scene/Scene.h"
-#include "luth/scene/Components.h"
-#include "luth/renderer/Renderer.h"
-#include "luth/renderer/material/MaterialSystem.h"
-#include "luth/renderer/resources/BoneMatrixBuffer.h"
-#include "luth/renderer/backend/vulkan/VulkanBackend.h"
-#include "luth/renderer/backend/vulkan/VulkanContext.h"
-#include "luth/renderer/backend/vulkan/VulkanTexture.h"
-#include "luth/renderer/backend/vulkan/VulkanBuffer.h"
-#include "luth/renderer/material/Material.h"
-#include "luth/renderer/resources/Model.h"
-#include "luth/assets/AssetManager.h"
-#include <vk_mem_alloc.h>
+#include "luth/renderer/presentation/ViewPresentation.h"
+#include "luth/renderer/FrameDebugger.h"
 #include <backends/imgui_impl_vulkan.h>
-#include <imgui.h>
+#include <stdexcept>
 
 namespace Luth
 {
-    using namespace Component;
-
-    void RenderPipeline::AddImGuiPass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor)
+    void AddViewImGuiPass(RG::RenderGraph& graph, const ViewPresentationInputs& inputs,
+        FrameDebugger& debugger, RG::ResourceHandle sceneLdr)
     {
-        struct ImGuiPassData {
-            RG::ResourceHandle backbuffer;
-            RG::ResourceHandle sceneTexture;
-        };
-
-        rg.AddPass<ImGuiPassData>("ImGuiPass",
-            [&](ImGuiPassData& data, RG::RenderPassBuilder& builder)
-            {
-                auto* vkRenderer = static_cast<VulkanBackend*>(Renderer::GetBackend());
-                VkImage     swapchainImage = vkRenderer->GetSwapchain().GetImage(vkRenderer->GetSwapchain().GetCurrentFrameIndex());
-                VkImageView swapchainView  = vkRenderer->GetSwapchain().GetImageView(vkRenderer->GetSwapchain().GetCurrentFrameIndex());
-
-                RG::TextureDesc desc;
-                desc.name   = "Backbuffer";
-                desc.width  = vkRenderer->GetSwapchain().GetExtent().width;
-                desc.height = vkRenderer->GetSwapchain().GetExtent().height;
-                desc.format = RG::TextureFormat::BGRA8_Unorm;
-
-                // finalState=Present -> RG appends the present-barrier on this pass.
-                data.backbuffer = rg.ImportResource(desc,
-                    (void*)swapchainImage, (void*)swapchainView,
-                    RG::ResourceState::Undefined, RG::ResourceState::Present);
-
-                data.backbuffer = builder.Write(data.backbuffer);
-
-                if (sceneColor.IsValid())
-                    data.sceneTexture = builder.Read(sceneColor);
-            },
-            [this](ImGuiPassData& data, RG::RenderPassContext& ctx)
-            {
-                m_System.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "ImGuiPass", "Backbuffer", false,
-                    { "imgui", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, true });
-                ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), ctx.commandBuffer);
-                m_System.GetFrameDebugger().EndCapturePass();
-            }
-        );
+        if (!inputs.image || !inputs.imageView || !inputs.backbuffer.width || !inputs.backbuffer.height)
+            throw std::invalid_argument("Presentation requires an acquired backbuffer");
+        struct Data { RG::ResourceHandle backbuffer, sceneTexture; ImDrawData* draws; };
+        // Import once; finalState=Present retains the existing RG-generated present barrier.
+        const auto backbuffer = graph.ImportResource(inputs.backbuffer, inputs.image, inputs.imageView,
+            RG::ResourceState::Undefined, RG::ResourceState::Present);
+        graph.AddPass<Data>("ImGuiPass",
+            [backbuffer, sceneLdr, draws = inputs.drawData](Data& data, RG::RenderPassBuilder& builder) {
+                data.backbuffer = builder.Write(backbuffer);
+                data.draws = draws;
+                if (sceneLdr.IsValid()) data.sceneTexture = builder.Read(sceneLdr);
+            }, [&debugger](Data& data, RG::RenderPassContext& context) {
+                debugger.BeginCapturePass(context.passIndex, "ImGuiPass", "Backbuffer", false,
+                    {"imgui", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, true});
+                ImGui_ImplVulkan_RenderDrawData(data.draws, context.commandBuffer);
+                debugger.EndCapturePass();
+            });
     }
-
 }

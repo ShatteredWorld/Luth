@@ -1,4 +1,6 @@
 #include "luthpch.h"
+#include "luth/renderer/presentation/ViewPresentation.h"
+#include <imgui.h>
 #include "luth/renderer/shader/ShaderReloadCoordinator.h"
 #include "luth/scene/systems/RenderingSystem.h"
 #include "luth/scene/systems/LightingSystem.h"
@@ -98,6 +100,31 @@ namespace Luth
     void RenderingSystem::SubmitViewProfiling(RenderViewId id, u64 frame, SubmissionCompletionToken token)
     {
         if (m_Profiling.Submit(id, frame, token)) m_GpuProfiler->Submit(id, frame, token);
+    }
+    void RenderingSystem::AppendViewPresentation(RG::RenderGraph& graph, RG::ResourceHandle finalLdr, bool emitImGui)
+    {
+        if (finalLdr.IsValid()) AddViewOutputExport(graph, finalLdr);
+        else if (!emitImGui) throw std::invalid_argument("Secondary view requires final LDR output");
+        if (!emitImGui) return;
+        auto& swapchain = static_cast<VulkanBackend*>(Renderer::GetBackend())->GetSwapchain();
+        const auto imageIndex = swapchain.GetCurrentFrameIndex();
+        ViewPresentationInputs inputs;
+        inputs.backbuffer.name = "Backbuffer";
+        inputs.backbuffer.width = swapchain.GetExtent().width;
+        inputs.backbuffer.height = swapchain.GetExtent().height;
+        inputs.backbuffer.format = RG::TextureFormat::BGRA8_Unorm;
+        inputs.image = (void*)swapchain.GetImage(imageIndex);
+        inputs.imageView = (void*)swapchain.GetImageView(imageIndex);
+        inputs.drawData = ImGui::GetDrawData();
+        AddViewImGuiPass(graph, inputs, m_FrameDebugger, finalLdr);
+    }
+
+    void RenderingSystem::ExecuteMinimal()
+    {
+        RG::RenderGraph graph(GetFrameAllocator());
+        AppendViewPresentation(graph, {}, true); // Frozen outputs already sampled; no duplicate imports.
+        graph.Compile();
+        Renderer::ExecuteGraph(graph, Renderer::GetFrameData()->GetFrameIndex(), nullptr);
     }
     void RenderingSystem::BeginViewCapture(const RenderView& view)
     {
@@ -238,7 +265,7 @@ namespace Luth
                 // Static or throttled: minimal graph, just blit ImGui to the swapchain. Drop queued
                 // views; letting the queue grow unbounded spikes the frame when the debugger exits.
                 m_QueuedViews.clear();
-                m_Pipeline->ExecuteMinimal();
+                ExecuteMinimal();
                 return;
             }
 

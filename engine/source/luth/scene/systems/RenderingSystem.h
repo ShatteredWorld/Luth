@@ -310,6 +310,8 @@ namespace Luth
         void RequestCapture()   { if (m_FrameDebugger.state == DebuggerState::Inactive) m_FrameDebugger.state = DebuggerState::CaptureRequested; }
         void ExitCapture();
         void BeginViewCapture(const RenderView& view);
+        void AppendViewPresentation(RG::RenderGraph&, RG::ResourceHandle finalLdr, bool emitImGui);
+        void ExecuteMinimal();
         bool FinalizeViewCapture(const CaptureFinalizationInputs&, const RG::RenderGraphSnapshot&);
         RG::RenderGraphSnapshot& CaptureGraphSnapshot(const RG::RenderGraph&);
         GPUTimerPool* PrepareViewProfiling(RenderViewId, u64 generation, u64 renderFrame,

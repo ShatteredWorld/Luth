@@ -408,8 +408,6 @@ namespace Luth
     private:
         void RegisterNamedTextures();
 
-        // ImGui pass: single-view residual on the orchestrator.
-        void AddImGuiPass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor);
 
 
 
