@@ -126,19 +126,20 @@ namespace Luth
         // Cluster debug viz, gated by ShadeMode::ClustersDensity in BuildGraph. Samples SceneDepth
         // to derive the per-fragment Olsson slice, then reads the per-view cluster grid and heat-maps
         // the lights-per-cluster count over LDR.
-        ClusterVizBindings PrepareClusterVizBindings(const std::array<VkDescriptorSet, 2>& sets,
-            std::shared_ptr<Texture> depth, const Memory::GPUSubRegion& grid,
+        ClusterVizBindings PrepareClusterVizBindings(std::shared_ptr<ClusterVizViewState> state, VkDescriptorSet lightingSet,
+            const Memory::GPUSubRegion& grid,
             u32 width, u32 height, float nearZ, float farZ, bool enabled) const;
         RG::ResourceHandle AddClusterVizPass(RG::RenderGraph& rg, RG::ResourceHandle ldrInput,
             RG::ResourceHandle sceneDepth, RG::BufferHandle grid,
             const ClusterVizBindings& packet, FrameDebugger* debugger);
-        // Per-view depth-sampler write for the ClusterViz pipeline. Stable across frames; called
-        // once at AllocateViewResources time + on resize via FrameTargets re-allocation.
-        void WriteClusterVizView(struct ViewResources& vr, class FrameTargets& targets);
+        // Domain-owned depth-sampler state. Stable across frames; source replacement uses a safe point.
+        // The shared cycled lighting set remains an explicit native compatibility dependency.
+        std::shared_ptr<ClusterVizViewState> EnsureClusterVizView(RenderViewId, class FrameTargets&);
+        void ReleaseClusterVizView(RenderViewId);
+        void WriteClusterVizView(ClusterVizViewState&);
 
         VkDescriptorSetLayout GetClusterBuildLayout() const { return m_ClusterBuildSetLayout; }
         VkDescriptorSetLayout GetLightAssignLayout()  const { return m_LightAssignSetLayout; }
-        VkDescriptorSetLayout GetClusterVizLayout()   const { return m_ClusterVizDescSetLayout; }
 
         // ---- Accessors ----
         VkDescriptorSetLayout GetSetLayout() const          { return m_LightSetLayout; }
@@ -207,6 +208,7 @@ namespace Luth
 
         // Cluster debug viz. Two-set pipeline: set 0 owns the depth sampler (stable per-view, written
         // by WriteClusterVizView); set 1 reuses the Set 3 lightDescSet for its cluster grid read.
+        ClusterVizViewStateStore m_ClusterVizStates;
         std::unique_ptr<VKPipeline> m_ClusterVizPipeline;
         VkDescriptorSetLayout       m_ClusterVizDescSetLayout = VK_NULL_HANDLE;
         VkSampler                   m_ClusterVizDepthSampler  = VK_NULL_HANDLE;

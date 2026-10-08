@@ -4,14 +4,16 @@
 #include "luth/renderer/FrameDebugger.h"
 namespace Luth
 {
-    ClusterVizBindings LightingSubsystem::PrepareClusterVizBindings(const std::array<VkDescriptorSet, 2>& sets,
-        std::shared_ptr<Texture> depth, const Memory::GPUSubRegion& grid,
+    ClusterVizBindings LightingSubsystem::PrepareClusterVizBindings(std::shared_ptr<ClusterVizViewState> state, VkDescriptorSet lightingSet,
+        const Memory::GPUSubRegion& grid,
         u32 width, u32 height, float nearZ, float farZ, bool enabled) const
     {
         ClusterVizBindings packet; packet.enabled = enabled;
         if (!enabled || !m_ClusterVizPipeline) return packet;
+        if (!state || !state->set || !state->depth || !lightingSet)
+            throw std::invalid_argument("ClusterViz: incomplete native view bindings");
         packet.pipeline = m_ClusterVizPipeline->GetHandle(); packet.layout = m_ClusterVizPipeline->GetLayout();
-        packet.sets = sets; packet.depth = std::move(depth); packet.grid = {grid.buffer, grid.offset, grid.size};
+        packet.sets = {state->set, lightingSet}; packet.state = std::move(state); packet.grid = {grid.buffer, grid.offset, grid.size};
         packet.parameters = {Vec2(float(width), float(height)), nearZ, farZ}; return packet;
     }
     RG::ResourceHandle LightingSubsystem::AddClusterVizPass(RG::RenderGraph& graph, RG::ResourceHandle input,

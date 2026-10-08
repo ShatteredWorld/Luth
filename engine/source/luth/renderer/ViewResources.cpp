@@ -23,11 +23,11 @@ namespace Luth
     // Per-view pool: cycled sets allocate MAX_FRAMES_IN_FLIGHT instances each. Capacity bumped on
     // every subsystem addition; silent vkAllocateDescriptorSets failure on overflow returns
     // VK_NULL_HANDLE handles and skips the draw with no log. Bump generously; pool memory is cheap.
-    static constexpr u32 k_ViewPoolMaxSets              = 205 - 12 * MAX_FRAMES_IN_FLIGHT - 15;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale
+    static constexpr u32 k_ViewPoolMaxSets              = 205 - 12 * MAX_FRAMES_IN_FLIGHT - 16;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale
     static constexpr u32 k_ViewPoolUniformBufferCount   = 48 - 4 * MAX_FRAMES_IN_FLIGHT;
     static constexpr u32 k_ViewPoolStorageImageCount    = 248 - 7 * MAX_FRAMES_IN_FLIGHT - 13;  // + DiSpecular SVGF + restir Set 2 b8 + GI upscale b3 + DI upscale x2 + refl upscale b3
     static constexpr u32 k_ViewPoolStorageBufferCount   = 126 - 5 * MAX_FRAMES_IN_FLIGHT - 1;
-    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - 23 * MAX_FRAMES_IN_FLIGHT - 20;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels
+    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - 23 * MAX_FRAMES_IN_FLIGHT - 21;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels
     static constexpr u32 k_ViewPoolAccelStructCount     = 8;   // Set 0 binding 6 (TLAS) cycled per frame
 
     namespace {
@@ -91,6 +91,10 @@ namespace Luth
         const bool slimVizReplaced = vr.slimViz && vr.slimViz != slimViz;
         vr.slimViz = std::move(slimViz);
         if (slimVizReplaced) vr.generation = m_System.InvalidateView(id);
+        auto clusterViz = m_Lighting.EnsureClusterVizView(id, targets);
+        const bool clusterVizReplaced = vr.clusterViz && vr.clusterViz != clusterViz;
+        vr.clusterViz = std::move(clusterViz);
+        if (clusterVizReplaced) vr.generation = m_System.InvalidateView(id);
         auto overlays = m_EditorOverlays.EnsureView(id, targets);
         const bool overlaysReplaced = vr.overlays && vr.overlays != overlays;
         vr.overlays = std::move(overlays);
@@ -148,6 +152,7 @@ namespace Luth
         m_PostProcess.ReleaseTaaView(id);
         m_EditorOverlays.ReleaseView(id);
         m_PostProcess.ReleaseSlimVizView(id);
+        m_Lighting.ReleaseClusterVizView(id);
         m_PostProcess.ReleaseCompositeView(id);
         m_PostProcess.ReleaseBloomView(id);
         auto it = m_ViewResources.find(id.value);
@@ -252,7 +257,6 @@ namespace Luth
         allocCycled(m_Lighting.GetSetLayout(),           vr.lightDescSet,         "View.Light");
         allocCycled(m_Lighting.GetClusterBuildLayout(),  vr.clusterBuildDescSet,  "View.ClusterBuild");
         allocCycled(m_Lighting.GetLightAssignLayout(),   vr.lightAssignDescSet,   "View.LightAssign");
-        allocSingle(m_Lighting.GetClusterVizLayout(),    vr.clusterVizDescSet,    "View.ClusterViz");
         allocCycled(m_Rt.GetShadowPassLayout(),          vr.rtShadowPassDescSet,  "View.RtShadowPass");
         allocCycled(m_Restir.GetSetLayout(),             vr.restirDescSet,        "View.Restir");
         allocCycled(m_RestirGi.GetSetLayout(),           vr.restirGiDescSet,      "View.RestirGi");
@@ -271,7 +275,6 @@ namespace Luth
 
 
         m_Lighting.WriteShadowView(vr);
-        m_Lighting.WriteClusterVizView(vr, targets);
         m_Rt.WriteShadowPassView(vr, targets);
         m_Restir.WriteView(vr, targets);
         m_RestirGi.WriteView(vr, targets);

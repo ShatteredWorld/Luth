@@ -1,7 +1,7 @@
 #pragma once
 #include "luth/renderer/features/RenderResource.h"
 #include "luth/core/types/LuthMath.h"
-#include "luth/renderer/resources/Texture.h"
+#include "luth/renderer/features/ClusterVizViewState.h"
 #include <memory>
 #include <vulkan/vulkan.h>
 namespace Luth
@@ -13,7 +13,7 @@ namespace Luth
         VkPipeline pipeline = VK_NULL_HANDLE;
         VkPipelineLayout layout = VK_NULL_HANDLE;
         std::array<VkDescriptorSet, 2> sets{};
-        std::shared_ptr<Texture> depth;
+        std::shared_ptr<ClusterVizViewState> state;
         VkDescriptorBufferInfo grid{};
         ClusterVizPushConstants parameters{};
         bool enabled = false;

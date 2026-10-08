@@ -20,7 +20,8 @@ namespace
             bindings.enabled = true; bindings.pipeline = Native<VkPipeline>(1);
             bindings.layout = Native<VkPipelineLayout>(2);
             bindings.sets = {Native<VkDescriptorSet>(3), Native<VkDescriptorSet>(4)};
-            bindings.depth = std::shared_ptr<Texture>(Native<Texture*>(10), [](Texture*){});
+            bindings.state = std::make_shared<ClusterVizViewState>(); bindings.state->set = bindings.sets[0];
+            bindings.state->depth = std::shared_ptr<Texture>(Native<Texture*>(10), [](Texture*){});
             bindings.grid = {Native<VkBuffer>(5), 4096, u64(k_ClusterCount) * sizeof(GPUCluster)};
             bindings.parameters = {Vec2(640, 480), 0.1f, 1000};
             RenderPipelineDefinition definition;
@@ -120,7 +121,9 @@ TEST_CASE("ClusterVizFeature: rejects inconsistent frozen bindings before regist
     SUBCASE("layout") { f.bindings.layout = VK_NULL_HANDLE; }
     SUBCASE("depth set") { f.bindings.sets[0] = VK_NULL_HANDLE; }
     SUBCASE("lighting set") { f.bindings.sets[1] = VK_NULL_HANDLE; }
-    SUBCASE("owner") { f.bindings.depth.reset(); }
+    SUBCASE("state") { f.bindings.state.reset(); }
+    SUBCASE("descriptor ownership") { f.bindings.state->set = VK_NULL_HANDLE; }
+    SUBCASE("owner") { f.bindings.state->depth.reset(); }
     SUBCASE("buffer") { f.bindings.grid.buffer = Native<VkBuffer>(6); }
     SUBCASE("offset") { ++f.bindings.grid.offset; }
     SUBCASE("size") { --f.bindings.grid.range; }
@@ -135,10 +138,11 @@ TEST_CASE("ClusterVizFeature: rejects inconsistent frozen bindings before regist
 }
 TEST_CASE("ClusterVizFeature: frozen jobs retain depth and declare async grid handoff [renderfeatures]")
 {
-    Fixture f; std::weak_ptr<Texture> retained = f.bindings.depth;
+    Fixture f; std::weak_ptr<Texture> retained = f.bindings.state->depth;
+    std::weak_ptr<ClusterVizViewState> retainedState = f.bindings.state;
     {
         Memory::LinearAllocator scratch(64 * 1024); RG::RenderGraph graph(scratch); GraphTextureRef output;
-        REQUIRE(f.Build(graph, scratch, output, true, true, true, true).success); f.bindings.depth.reset(); CHECK_FALSE(retained.expired());
+        REQUIRE(f.Build(graph, scratch, output, true, true, true, true).success); f.bindings.state.reset(); CHECK_FALSE(retained.expired()); CHECK_FALSE(retainedState.expired());
         REQUIRE(graph.GetPasses().size() == 2); CHECK(graph.GetPasses()[1].bufferReads[0].version == 1);
         graph.Compile(); CHECK_FALSE(graph.GetPasses()[0].culled);
         REQUIRE(graph.GetPasses()[1].bufferPreBarriers.size() == 1);
@@ -146,14 +150,14 @@ TEST_CASE("ClusterVizFeature: frozen jobs retain depth and declare async grid ha
         CHECK(graph.GetPasses()[1].bufferPreBarriers[0].after == RG::ResourceState::FragmentStorageRead);
         CHECK(graph.GetPasses()[1].bufferPreBarriers[0].crossQueueSrc);
     }
-    CHECK(retained.expired());
+    CHECK(retained.expired()); CHECK(retainedState.expired());
 }
 TEST_CASE("ClusterVizFeature: cold and disabled preparation need no device [renderfeatures]")
 {
     LightingSubsystem native;
-    CHECK_FALSE(native.PrepareClusterVizBindings({}, {}, {}, 0, 0, 0, 0, false).enabled);
-    const auto cold = native.PrepareClusterVizBindings({}, {}, {}, 640, 480, .1f, 1000, true);
-    CHECK(cold.enabled); CHECK_FALSE(cold.pipeline); CHECK_FALSE(cold.depth);
+    CHECK_FALSE(native.PrepareClusterVizBindings({}, VK_NULL_HANDLE, {}, 0, 0, 0, 0, false).enabled);
+    const auto cold = native.PrepareClusterVizBindings({}, VK_NULL_HANDLE, {}, 640, 480, .1f, 1000, true);
+    CHECK(cold.enabled); CHECK_FALSE(cold.pipeline); CHECK_FALSE(cold.state);
 }
 TEST_CASE("ClusterVizFeature: shared composition preserves slim output and ordered alias versions [renderfeatures]")
 {

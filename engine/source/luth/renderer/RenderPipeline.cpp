@@ -1167,9 +1167,8 @@ namespace Luth
         const u32 slimMode = slimVizEnabled ? static_cast<u32>(shadeMode) - static_cast<u32>(ShadeMode::SlimNormal) : 0;
         const auto slimVizNative = m_PostProcess.PrepareSlimVizBindings(m_CurrentViewResources->slimViz, slimMode, 20.0f, slimVizEnabled);
         const SlimVizBindingRef slimVizBinding{&slimVizNative};
-        const std::array<VkDescriptorSet, 2> clusterVizSets{m_CurrentViewResources->clusterVizDescSet,
-            m_CurrentViewResources->lightDescSet[bloomFrame.renderFrameIndex % MAX_FRAMES_IN_FLIGHT]};
-        const auto clusterVizNative = m_Lighting.PrepareClusterVizBindings(clusterVizSets, view.targets->GetSceneDepth(),
+        const auto clusterVizNative = m_Lighting.PrepareClusterVizBindings(m_CurrentViewResources->clusterViz,
+            m_CurrentViewResources->lightDescSet[bloomFrame.renderFrameIndex % MAX_FRAMES_IN_FLIGHT],
             clusterGridRegion, bloomView.width, bloomView.height, view.camera.nearZ, view.camera.farZ,
             !ptEnabled && shadeMode == ShadeMode::ClustersDensity);
         const ClusterVizBindingRef clusterVizBinding{&clusterVizNative};

@@ -191,6 +191,7 @@ namespace Luth
         LH_PROFILE_FUNCTION();
         VkDevice device = VulkanContext::Get().GetDevice();
 
+        m_ClusterVizStates.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_SkyboxPipeline.reset();
         m_SkyboxVB.reset();
         m_ShadowSkinnedPipeline.reset();
@@ -1102,28 +1103,4 @@ namespace Luth
             });
         return output;
     }
-    // Per-view stable depth-sampler write for the ClusterViz set 0; called from
-    // AllocateViewResources after FrameTargets exists.
-    void LightingSubsystem::WriteClusterVizView(ViewResources& vr, FrameTargets& targets)
-    {
-        LH_PROFILE_FUNCTION();
-        if (vr.clusterVizDescSet == VK_NULL_HANDLE || m_ClusterVizDepthSampler == VK_NULL_HANDLE) return;
-
-        auto vkScnDepth = std::static_pointer_cast<VKTexture>(targets.GetSceneDepth());
-        if (!vkScnDepth) return;
-
-        VkDescriptorImageInfo depthInfo{};
-        depthInfo.sampler     = m_ClusterVizDepthSampler;
-        depthInfo.imageView   = vkScnDepth->GetImageView();
-        depthInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        write.dstSet          = vr.clusterVizDescSet;
-        write.dstBinding      = 0;
-        write.descriptorCount = 1;
-        write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        write.pImageInfo      = &depthInfo;
-        vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 1, &write, 0, nullptr);
-    }
-
 }

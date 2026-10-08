@@ -126,9 +126,9 @@ namespace Luth
 
         std::shared_ptr<TransparencyViewState> transparency; // Borrowed domain state during migration.
 
-        // Cluster debug viz: single set, 1 binding = SceneDepth sampler. Stable per-view; written
+        // Cluster debug viz: domain-owned depth descriptor and retained SceneDepth.
         // by WriteClusterVizView at AllocateViewResources time.
-        VkDescriptorSet clusterVizDescSet = VK_NULL_HANDLE;
+        std::shared_ptr<ClusterVizViewState> clusterViz; // Borrowed lighting domain state.
 
         // Per-view previous-frame view-projection; feeds ubo.prevViewProjection for motion vectors.
         // GlobalSubsystem::m_CachedViewProj is shared across views, so multi-view rendering (Scene +

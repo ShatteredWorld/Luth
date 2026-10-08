@@ -32,7 +32,8 @@ namespace Luth
         {
             const auto* depth = ctx.resources.TryGet(RenderResources::SurfaceDepth);
             if (!depth || !valid(*depth, RG::TextureFormat::D32_Float) || !packet->layout || !packet->sets[0] || !packet->sets[1] ||
-                !packet->depth || packet->depth.get() != depth->binding.texture ||
+                !packet->state || packet->state->set != packet->sets[0] ||
+                !packet->state->depth || packet->state->depth.get() != depth->binding.texture ||
                 input.handle.index == depth->handle.index || input.binding.texture == depth->binding.texture ||
                 !grid->handle.IsValid() || grid->handle.index > graph.GetBuffers().size() || !grid->binding.slice ||
                 !packet->grid.buffer || packet->grid.buffer != grid->binding.slice->buffer ||
