@@ -15,6 +15,7 @@
 #include "luth/renderer/features/BloomFeature.h"
 #include "luth/renderer/features/CompositeFeature.h"
 #include "luth/renderer/features/GridFeature.h"
+#include "luth/renderer/features/SelectionMaskFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -197,6 +198,12 @@ namespace Luth
         auto transparencyCompiled = RenderPipelineCompiler{}.Compile(std::move(transparencyDefinition), {}, transparencyInputs);
         if (!transparencyCompiled.ReplaceIfValid(m_TransparencyComposition))
             throw std::runtime_error("Transparency definition failed semantic validation");
+        RenderPipelineDefinition selectionDefinition;
+        selectionDefinition.AddFeature<SelectionMaskFeature>(m_EditorOverlays, &m_System.GetFrameDebugger());
+        PipelineInputContract selectionInputs; selectionInputs.resources = {{SelectionMaskResources::Bindings}};
+        auto selectionCompiled = RenderPipelineCompiler{}.Compile(std::move(selectionDefinition), {}, selectionInputs);
+        if (!selectionCompiled.ReplaceIfValid(m_SelectionMaskComposition))
+            throw std::runtime_error("SelectionMask definition failed semantic validation");
         RenderPipelineDefinition gridDefinition;
         gridDefinition.AddFeature<GridFeature>(m_EditorOverlays, &m_System.GetFrameDebugger());
         PipelineInputContract gridInputs;
@@ -375,6 +382,7 @@ namespace Luth
         m_TransparencyComposition.reset();
         m_TaaComposition.reset();
         m_BloomComposition.reset();
+        m_SelectionMaskComposition.reset();
         m_GridComposition.reset();
         m_CompositeComposition.reset();
         m_SkyComposition.reset();
@@ -885,10 +893,29 @@ namespace Luth
                 return false;
             }
             geoOutput = {opaqueOutput.handle, litOutput.handle, pickingOutput.handle};
-            maskOutput = view.drawSelectionOutline
-                         ? m_EditorOverlays.AddSelectionMaskPass(rg)
-                         : SelectionMaskOutput{};
-            // The legacy opaque producer exports typed stages; sky reuses their imports.
+            const std::array<VkDescriptorSet, 5> selectionSets{forwardSets[0], forwardSets[1], forwardSets[2],
+                forwardSets[3], forwardSets[4]};
+            const auto selectionNative = m_EditorOverlays.PrepareSelectionMaskBindings(m_CurrentViewResources->overlays,
+                selectionSets, view.camera, m_CurrentViewResources->currentJitter,
+                s.GetDrawList(), s.GetActiveSnapshot(), view.drawSelectionOutline);
+            const SelectionMaskBindingRef selectionBinding{&selectionNative};
+            const std::array selectionResources{RenderInputBinding::Present(SelectionMaskResources::Bindings, selectionBinding)};
+            FrameRenderInputs selectionFrame; selectionFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            selectionFrame.resources = selectionResources;
+            ViewRenderInputs selectionView; selectionView.id = view.id;
+            selectionView.width = view.targets->GetSceneColor()->GetWidth(); selectionView.height = view.targets->GetSceneColor()->GetHeight();
+            GraphTextureRef selectionMask, selectionDepth;
+            const std::array selectionExports{RenderOutputBinding::Capture(RenderResources::SelectionMask, selectionMask),
+                RenderOutputBinding::Capture(RenderResources::SelectionDepth, selectionDepth)};
+            const auto selectionBuild = m_SelectionMaskComposition->Build(rg, selectionFrame, selectionView,
+                s.GetFrameAllocator(), selectionExports);
+            if (!selectionBuild.success)
+            {
+                for (const auto& diagnostic : selectionBuild.diagnostics)
+                    LH_LOG(Renderer, error, "SelectionMask composition: {}", diagnostic.message);
+                return false;
+            }
+            maskOutput = {selectionMask.handle, selectionDepth.handle};
             const u32 skySlot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
             const std::array<VkDescriptorSet, 5> skySets{m_CurrentViewResources->globalDescriptorSet[skySlot],
                 VulkanContext::Get().GetBindlessSet().GetSet(), MaterialSystem::GetDescriptorSet(skySlot),

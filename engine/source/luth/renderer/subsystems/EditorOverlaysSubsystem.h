@@ -5,6 +5,7 @@
 #include "luth/renderer/backend/vulkan/VulkanPipeline.h"
 #include "luth/renderer/features/EditorOverlayViewState.h"
 #include "luth/renderer/features/GridBindings.h"
+#include "luth/renderer/features/SelectionMaskBindings.h"
 
 #include <entt/entt.hpp>
 #include <memory>
@@ -21,6 +22,8 @@ namespace Luth
     struct SelectionMaskOutput;
     struct CameraParams;
     struct FrameDebugger;
+    struct DrawList;
+    struct RenderSnapshot;
 
     // Owns the editor-only overlay resources and passes: SelectionMask (rigid + skinned graphics pipelines
     // on Sets 0-4), Outline (fullscreen pass with its own descriptor set), Grid (fullscreen pass with its
@@ -42,7 +45,10 @@ namespace Luth
         void WriteOutlineView(EditorOverlayViewState&);
         void WriteGridView(EditorOverlayViewState&);
 
-        SelectionMaskOutput AddSelectionMaskPass(RG::RenderGraph& rg);
+        SelectionMaskBindings PrepareSelectionMaskBindings(std::shared_ptr<EditorOverlayViewState>,
+            const std::array<VkDescriptorSet, 5>&, const CameraParams&, Vec2 jitter,
+            const DrawList&, const RenderSnapshot&, bool enabled) const;
+        SelectionMaskGraphOutput AddSelectionMaskPass(RG::RenderGraph&, const SelectionMaskBindings&, FrameDebugger*);
         RG::ResourceHandle  AddOutlinePass(RG::RenderGraph& rg, RG::ResourceHandle ldrOutput,
                                             SelectionMaskOutput maskOutput, RG::ResourceHandle sceneDepth);
         GridBindings PrepareGridBindings(std::shared_ptr<EditorOverlayViewState>, const CameraParams&, Vec2 jitter, u64 frame, bool enabled) const;
