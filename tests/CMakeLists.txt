@@ -23,6 +23,7 @@ add_executable(LuthTests
     renderer/SlimVizViewState.cpp
     renderer/SlimVizFeature.cpp
     renderer/ClusterVizFeature.cpp
+    renderer/FogVizFeature.cpp
     renderer/ClusterVizViewState.cpp
     renderer/OutlineFeature.cpp
     renderer/SelectionMaskFeature.cpp

@@ -64,6 +64,7 @@ add_library(Luth STATIC
     source/luth/renderer/subsystems/PostProcessSlimVizState.cpp
     source/luth/renderer/features/SlimVizFeature.cpp
     source/luth/renderer/features/ClusterVizFeature.cpp
+    source/luth/renderer/features/FogVizFeature.cpp
     source/luth/renderer/features/ClusterVizViewState.cpp
     source/luth/renderer/subsystems/PostProcessSlimViz.cpp
     source/luth/renderer/features/OutlineFeature.cpp
@@ -87,6 +88,7 @@ add_library(Luth STATIC
     source/luth/renderer/subsystems/TransparencyBackdrop.cpp
     source/luth/renderer/features/FogCompositeFeature.cpp
     source/luth/renderer/subsystems/VolumetricComposite.cpp
+    source/luth/renderer/subsystems/VolumetricViz.cpp
     source/luth/renderer/features/FogComputeFeature.cpp
     source/luth/renderer/subsystems/VolumetricCompute.cpp
     source/luth/renderer/features/FogViewState.cpp

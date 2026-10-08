@@ -79,7 +79,7 @@ namespace
                 optionalSlim(RenderResources::Normal, 0), optionalSlim(RenderResources::Roughness, 1),
                 optionalSlim(RenderResources::MotionVectors, 2), optionalSlim(RenderResources::MaterialID, 3)};
             FrameRenderInputs frame; frame.resources = resources; ViewRenderInputs view; view.id = {1}; view.width = 640; view.height = 480;
-            const std::array exports{RenderOutputBinding::Capture(RenderResources::VisualizedLDR, output)};
+            const std::array exports{RenderOutputBinding::Capture(ClusterVizResources::Output, output)};
             return pipeline->Build(graph, frame, view, scratch, exports);
         }
     };

@@ -8,6 +8,7 @@
 #include "luth/renderer/features/FogViewState.h"
 #include "luth/renderer/features/FogComputeBindings.h"
 #include "luth/renderer/features/FogCompositeBindings.h"
+#include "luth/renderer/features/FogVizBindings.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 #include "luth/renderer/backend/vulkan/VulkanPipeline.h"
 
@@ -115,13 +116,15 @@ namespace Luth
         // Stable per-view write of the viz descriptor: b0 (sceneDepth), b1 (volDensity) are stable.
         // b2 (resolved in-scatter sampler) parity-rewrites in WriteVizPerFrame.
         void WriteVizView(FogViewState& vr, FrameTargets& targets);
-        void WriteVizPerFrame(ViewResources& vr, u32 frameAbs);
+        void WriteVizPerFrame(FogViewState&, u64 renderFrameIndex);
+        FogVizBindings PrepareVizBindings(std::shared_ptr<FogViewState>, u64 renderFrameIndex,
+            VkDescriptorSet global, u32 mode, float scale, float opacity, bool enabled);
 
         // Debug graphics pass: blits a heat-mapped density or raw in-scatter radiance over LDR.
         // ShadeMode::VolumetricDensity -> mode 0; VolumetricInScatter -> mode 1.
         RG::ResourceHandle AddVizPass(RG::RenderGraph& rg, RG::ResourceHandle ldrInput,
                                       RG::ResourceHandle density, RG::ResourceHandle inScatter,
-                                      RG::ResourceHandle sceneDepth, u32 mode);
+                                      RG::ResourceHandle sceneDepth, const FogVizBindings&, FrameDebugger*);
 
         // Graphics pass: blends fog-modulated radiance back into sceneColor via standard alpha blend.
         RG::ResourceHandle AddCompositePass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor,

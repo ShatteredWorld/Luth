@@ -10,7 +10,7 @@ namespace Luth
         info.resources.reads = {{SlimVizResources::Output}, {ClusterVizResources::Bindings},
             {RenderResources::SurfaceDepth, ResourceReadRequirement::Optional},
             {RenderResources::ClusterGrid, ResourceReadRequirement::Optional}};
-        info.resources.writes = {{RenderResources::VisualizedLDR, ResourceOutputPresence::Required,
+        info.resources.writes = {{ClusterVizResources::Output, ResourceOutputPresence::Required,
             ResourceKeyRef{SlimVizResources::Output}, true}};
         return info;
     }
@@ -48,6 +48,6 @@ namespace Luth
                 throw std::invalid_argument("ClusterViz: incomplete or mismatched frozen depth/grid bindings");
             output.handle = m_Native.AddClusterVizPass(graph, input.handle, depth->handle, grid->handle, *packet, m_Debugger);
         }
-        ctx.resources.Publish(RenderResources::VisualizedLDR, output);
+        ctx.resources.Publish(ClusterVizResources::Output, output);
     }
 }

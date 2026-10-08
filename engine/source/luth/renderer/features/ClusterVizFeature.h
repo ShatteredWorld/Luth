@@ -7,6 +7,8 @@ namespace Luth
     struct ClusterVizBindingRef { const ClusterVizBindings* native = nullptr; };
     namespace ClusterVizResources
     {
+        inline constexpr ResourceKeyIdentity OutputIdentity{"ClusterViz.LDR"};
+        inline constexpr RenderResourceKey<GraphTextureRef> Output{&OutputIdentity};
         inline constexpr ResourceKeyIdentity BindingsIdentity{"ClusterViz.Bindings"};
         inline constexpr RenderResourceKey<ClusterVizBindingRef> Bindings{&BindingsIdentity};
     }

@@ -19,6 +19,7 @@
 #include "luth/renderer/features/OutlineFeature.h"
 #include "luth/renderer/features/SlimVizFeature.h"
 #include "luth/renderer/features/ClusterVizFeature.h"
+#include "luth/renderer/features/FogVizFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -204,8 +205,11 @@ namespace Luth
         RenderPipelineDefinition visualizationDefinition;
         visualizationDefinition.AddFeature<SlimVizFeature>(m_PostProcess, &m_System.GetFrameDebugger());
         visualizationDefinition.AddFeature<ClusterVizFeature>(m_Lighting, &m_System.GetFrameDebugger());
+        visualizationDefinition.AddFeature<FogVizFeature>(m_Volumetric, &m_System.GetFrameDebugger());
         PipelineInputContract visualizationInputs;
         visualizationInputs.resources = {{RenderResources::TonemappedLDR}, {SlimVizResources::Bindings}, {ClusterVizResources::Bindings},
+            {FogVizResources::Bindings}, {RenderResources::FogDensity, ResourceOutputPresence::Optional},
+            {RenderResources::ResolvedFog, ResourceOutputPresence::Optional},
             {RenderResources::SurfaceDepth, ResourceOutputPresence::Optional}, {RenderResources::ClusterGrid, ResourceOutputPresence::Optional},
             {RenderResources::Normal, ResourceOutputPresence::Optional}, {RenderResources::Roughness, ResourceOutputPresence::Optional},
             {RenderResources::MotionVectors, ResourceOutputPresence::Optional}, {RenderResources::MaterialID, ResourceOutputPresence::Optional}};
@@ -731,11 +735,6 @@ namespace Luth
             return false;
         }
         const RG::ResourceHandle volResolvedHandle = fogResolved.handle;
-        if (volResolvedHandle.IsValid())
-        {
-            m_Volumetric.WriteVizPerFrame(*m_CurrentViewResources, fogFrameAbs);
-        }
-
         // Path-traced reference mode: a megakernel that bypasses the entire raster + ReSTIR chain. When active,
         // its HDR output (ptColor) feeds the post chain in place of the raster sceneColor; every raster/RT-GI
         // pass below produces handles nothing consumes, so the RG dead-pass culls them. AsyncCompute, after the
@@ -1172,12 +1171,22 @@ namespace Luth
             clusterGridRegion, bloomView.width, bloomView.height, view.camera.nearZ, view.camera.farZ,
             !ptEnabled && shadeMode == ShadeMode::ClustersDensity);
         const ClusterVizBindingRef clusterVizBinding{&clusterVizNative};
+        const bool fogVizEnabled = !ptEnabled && (shadeMode == ShadeMode::VolumetricDensity || shadeMode == ShadeMode::VolumetricInScatter);
+        const u32 fogVizMode = shadeMode == ShadeMode::VolumetricInScatter ? 1u : 0u;
+        const auto& fogVizSettings = s.GetVolumetricSettings();
+        const auto fogVizNative = m_Volumetric.PrepareVizBindings(m_CurrentViewResources->fog, bloomFrame.renderFrameIndex,
+            m_CurrentViewResources->globalDescriptorSet[bloomFrame.renderFrameIndex % MAX_FRAMES_IN_FLIGHT], fogVizMode,
+            fogVizMode ? fogVizSettings.vizScaleInScatter : fogVizSettings.vizScaleDensity, fogVizSettings.vizOpacity,
+            fogVizEnabled && fogResolved.handle.IsValid());
+        const FogVizBindingRef fogVizBinding{&fogVizNative};
         const auto optionalSlimInput = [](auto key, const GraphTextureRef& ref) {
             return ref.handle.IsValid() ? RenderInputBinding::Present(key, ref) : RenderInputBinding::Absent(key);
         };
         const std::array visualizationResources{RenderInputBinding::Present(RenderResources::TonemappedLDR, tonemappedLdr),
             RenderInputBinding::Present(SlimVizResources::Bindings, slimVizBinding),
             RenderInputBinding::Present(ClusterVizResources::Bindings, clusterVizBinding),
+            RenderInputBinding::Present(FogVizResources::Bindings, fogVizBinding),
+            optionalSlimInput(RenderResources::FogDensity, fogDensity), optionalSlimInput(RenderResources::ResolvedFog, fogResolved),
             optionalSlimInput(RenderResources::SurfaceDepth, surfaceDepth),
             clusterGrid.handle.IsValid() ? RenderInputBinding::Present(RenderResources::ClusterGrid, clusterGrid)
                 : RenderInputBinding::Absent(RenderResources::ClusterGrid),
@@ -1194,14 +1203,7 @@ namespace Luth
             return false;
         }
         ldrOutput = visualizedStageLdr.handle;
-        if ((shadeMode == ShadeMode::VolumetricDensity ||
-                  shadeMode == ShadeMode::VolumetricInScatter) &&
-                 volResolvedHandle.IsValid() && m_CurrentViewResources)
-        {
-            const u32 vizMode = (shadeMode == ShadeMode::VolumetricDensity) ? 0u : 1u;
-            ldrOutput = m_Volumetric.AddVizPass(rg, ldrOutput, fogDensity.handle, volResolvedHandle, surfaceDepth.handle, vizMode);
-        }
-        else if (shadeMode == ShadeMode::RestirGiReservoir && m_RestirGi.IsEnabled() && m_CurrentViewResources)
+        if (shadeMode == ShadeMode::RestirGiReservoir && m_RestirGi.IsEnabled() && m_CurrentViewResources)
         {
             ldrOutput = m_RestirGi.AddReservoirVizPass(rg, ldrOutput, surfaceDepth.handle);
         }
