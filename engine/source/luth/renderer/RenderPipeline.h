@@ -370,9 +370,9 @@ namespace Luth
         // Populated by BuildGPUObjectBuffer.
         const std::vector<entt::entity>& GetEntityLookup() const { return m_Geometry.GetEntityLookup(); }
 
-        // Engine-side hot-reload service for .slang files. Project shader dirs register via
-        // RenderingSystem::OnProjectLoaded, which forwards to this getter.
-        ShaderWatcher& GetShaderWatcher() { return m_ShaderWatcher; }
+        // Compatibility access to the system-owned watcher. Reload lifecycle and Poll belong to RenderingSystem.
+        ShaderWatcher& GetShaderWatcher();
+        void RegisterShaderReloadConsumers(class ShaderReloadCoordinator&);
 
         // Owning RenderingSystem (set by ctor). Compatibility subsystems read scene state
         // through this accessor.
@@ -523,7 +523,6 @@ namespace Luth
         std::unordered_map<std::string, std::shared_ptr<Texture>> m_NamedTextures;
 
         // ---- Shader hot-reload (engine + project dirs) ----
-        ShaderWatcher m_ShaderWatcher;
 
     public:
         // Accessors forwarded to the frame-debugger context so editor panels can sample preview textures

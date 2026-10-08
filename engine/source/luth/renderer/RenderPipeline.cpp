@@ -1,4 +1,5 @@
 #include "luthpch.h"
+#include "luth/renderer/shader/ShaderReloadCoordinator.h"
 #include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/features/GTAOFeature.h"
 #include "luth/renderer/features/DeformationFeature.h"
@@ -314,84 +315,58 @@ namespace Luth
         auto forwardCompiled = RenderPipelineCompiler{}.Compile(std::move(forwardDefinition), {}, forwardInputs);
         if (!forwardCompiled.ReplaceIfValid(m_ForwardComposition))
             throw std::runtime_error("Forward opaque definition failed semantic validation");
-        // Shader hot-reload callback: pulls fresh SPIR-V into the cached blob and rebuilds pipelines that use it.
-        // Fires after ShaderLibrary::Reload has already recompiled and re-reflected the single-stage shader.
-        // Library keys are the shader filename (e.g. "pbr_vert.slang", "gtao_main.slang").
-        ShaderLibrary::SetReloadCallback([this](const std::string& name) {
-            // No vkDeviceWaitIdle: old pipelines are deferred-destroyed via VulkanContext::PushDeletion, which
-            // drains MAX_FRAMES_IN_FLIGHT frames later in AcquireImage; by then the GPU has retired any command
-            // buffer that bound them. Keeps shader save under steady frame pacing.
-            auto vk = std::static_pointer_cast<VulkanShader>(ShaderLibrary::Get(name));
-            if (!vk || !vk->IsValid())
-            {
-                LH_LOG(Renderer, error, "Shader reload: '{}' invalid - keeping existing pipelines", name);
-                return;
-            }
-            const auto& spv = vk->GetSpirV();
-
-            std::vector<VkDescriptorSetLayout> geoLayouts = {
-                m_Global.GetSetLayout(),
-                VulkanContext::Get().GetBindlessSet().GetLayout(),
-                MaterialSystem::GetDescriptorSetLayout(),
-                m_Lighting.GetSetLayout(),
-                BoneMatrixBuffer::GetDescriptorSetLayout(),
-                m_Geometry.GetSet5Layout()
-            };
-            // Subsystems handle their own shaders + pipeline rebuilds. Order matters: fullscreen.slang must
-            // reach both PostProcess and EditorOverlays (PostProcess returns false for it; EditorOverlays
-            // returns true). Debug shaders + IBL precompute remain RP residual.
-            // Transparency runs OUTSIDE the || chain (overlays precedent): it must also see
-            // pbr_vert.slang / pbr_skinned.slang (handled = true by Geometry) to invalidate its variants.
-            const bool transparencyHandled = m_Transparency.OnShaderReloaded(name, spv);
-            // SlangParity gate runs OUTSIDE the || chain: it re-scans restir_gi_initial.slang, which RestirGi
-            // consumes first (short-circuiting the chain), and it rebuilds no pipeline of its own.
-            m_SlangParity.OnShaderReloaded(name, spv);
-            const bool handled = m_Lighting.OnShaderReloaded(name, spv, geoLayouts)
-                              || m_Geometry.OnShaderReloaded(name, spv, geoLayouts)
-                              || m_GTAO.OnShaderReloaded(name, spv)
-                              || m_Volumetric.OnShaderReloaded(name, spv)
-                              || m_Skinning.OnShaderReloaded(name, spv)
-                              || m_Rt.OnShaderReloaded(name, spv)
-                              || m_Restir.OnShaderReloaded(name, spv)
-                              || m_RestirGi.OnShaderReloaded(name, spv)
-                              || m_PathTrace.OnShaderReloaded(name, spv)
-                              || m_Reflections.OnShaderReloaded(name, spv)
-                              || m_Denoise->OnShaderReloaded(name, spv)
-                              || m_DenoiseGi->OnShaderReloaded(name, spv)
-                              || m_DenoiseRefl->OnShaderReloaded(name, spv)
-                              || m_DenoiseDiSpec->OnShaderReloaded(name, spv);
-            // PostProcess returns false for fullscreen.slang so EditorOverlays still gets to rebuild its outline/grid pipelines below.
-            const bool ppHandled       = m_PostProcess.OnShaderReloaded(name, spv);
-            const bool overlaysHandled = m_EditorOverlays.OnShaderReloaded(name, spv, geoLayouts);
-            const bool debugHandled    = m_DebugDraw.OnShaderReloaded(name, spv);
-            if (handled || ppHandled || overlaysHandled || debugHandled || transparencyHandled)
-            {
-                if      (name == "debugBlit.slang")  m_System.GetFrameDebugger().blitFragSpv  = spv;
-                else if (name == "debugDepth.slang") m_System.GetFrameDebugger().depthFragSpv = spv;
-                LH_LOG(Renderer, info, "Pipelines rebuilt after shader reload: {}", name);
-                return;
-            }
-
-            // Debug-shader-only path (no pipeline rebuild on RP side; FrameDebuggerContext rebuilds lazily).
-            if      (name == "debugBlit.slang")  m_System.GetFrameDebugger().blitFragSpv  = spv;
-            else if (name == "debugDepth.slang") m_System.GetFrameDebugger().depthFragSpv = spv;
-            // IBL precompute shaders refresh in the library; ReloadSkybox() must run to re-bake.
-        });
-
-        // Shader hot-reload watcher (engine-shaders dir; project dirs added via RenderingSystem::OnProjectLoaded).
-        // Queues background-thread detections for main-thread Poll at the top of Execute.
-        m_ShaderWatcher.Start(FileSystem::EngineAssetsPath("shaders"));
-
         RegisterNamedTextures();
     }
 
+    ShaderWatcher& RenderPipeline::GetShaderWatcher()
+    {
+        return m_System.GetShaderReloadCoordinator().Watcher();
+    }
+
+    void RenderPipeline::RegisterShaderReloadConsumers(ShaderReloadCoordinator& coordinator)
+    {
+        // This compatibility host contributes explicit native owners, not reload policy.
+        auto layouts = [this] {
+            return std::vector<VkDescriptorSetLayout>{m_Global.GetSetLayout(),
+                VulkanContext::Get().GetBindlessSet().GetLayout(), MaterialSystem::GetDescriptorSetLayout(),
+                m_Lighting.GetSetLayout(), BoneMatrixBuffer::GetDescriptorSetLayout(), m_Geometry.GetSet5Layout()};
+        };
+        coordinator.AddConsumer("Lighting", [this, layouts](const auto& name, const auto& spv) {
+            return m_Lighting.OnShaderReloaded(name, spv, layouts());
+        });
+        coordinator.AddConsumer("Geometry", [this, layouts](const auto& name, const auto& spv) {
+            return m_Geometry.OnShaderReloaded(name, spv, layouts());
+        });
+        coordinator.AddConsumer("EditorOverlays", [this, layouts](const auto& name, const auto& spv) {
+            return m_EditorOverlays.OnShaderReloaded(name, spv, layouts());
+        });
+        auto add = [&coordinator](const char* name, auto& domain) {
+            coordinator.AddConsumer(name, [&domain](const auto& shader, const auto& spv) {
+                return domain.OnShaderReloaded(shader, spv);
+            });
+        };
+        add("Transparency", m_Transparency);
+        add("SlangParity", m_SlangParity);
+        add("GTAO", m_GTAO);
+        add("Volumetric", m_Volumetric);
+        add("Skinning", m_Skinning);
+        add("RaySceneAndShadows", m_Rt);
+        add("ReSTIR_DI", m_Restir);
+        add("ReSTIR_GI", m_RestirGi);
+        add("PathTrace", m_PathTrace);
+        add("Reflections", m_Reflections);
+        add("Denoise_DI", *m_Denoise);
+        add("Denoise_GI", *m_DenoiseGi);
+        add("Denoise_Reflections", *m_DenoiseRefl);
+        add("Denoise_DI_Specular", *m_DenoiseDiSpec);
+        add("PostProcess", m_PostProcess);
+        add("DebugDraw", m_DebugDraw);
+    }
     void RenderPipeline::Shutdown()
     {
         LH_PROFILE_FUNCTION();
         auto& s = m_System;
 
-        m_ShaderWatcher.Stop();
-        ShaderLibrary::SetReloadCallback(nullptr);
 
         BoneMatrixBuffer::Shutdown();
 

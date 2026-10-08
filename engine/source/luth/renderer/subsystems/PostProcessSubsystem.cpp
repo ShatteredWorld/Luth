@@ -294,9 +294,7 @@ namespace Luth
         if ((name == "taa_resolve.slang" || name == "fullscreen.slang") &&
             m_TaaResolvePipeline && m_TaaResolvePipeline->GetHandle())
             ++m_TaaShaderGeneration;
-        // For fullscreen.slang, return false so the orchestrator also rebuilds Outline + Grid
-        // (they share the same vertex shader). PostProcess pipelines are already rebuilt above.
-        return name != "fullscreen.slang";
+        return true;
     }
 
     void PostProcessSubsystem::WriteSlimVizView(SlimVizViewState& state)

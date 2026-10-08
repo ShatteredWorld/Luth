@@ -1,4 +1,5 @@
 #include "luthpch.h"
+#include "luth/renderer/shader/ShaderReloadCoordinator.h"
 #include "luth/scene/systems/RenderingSystem.h"
 #include "luth/scene/systems/LightingSystem.h"
 #include "luth/scene/systems/SystemRegistry.h"
@@ -29,13 +30,25 @@ namespace Luth
         m_GpuProfiler = std::make_unique<ViewGpuProfiler>();
         m_CaptureContext = std::make_unique<FrameDebuggerContext>(*this, m_Pipeline->GetGeometry(),
             m_Pipeline->GetLighting(), m_Pipeline->GetPostProcess(), m_Pipeline->GetEditorOverlays());
+        m_ShaderReload = std::make_unique<ShaderReloadCoordinator>();
+        if (Renderer::GetBackend()->GetAPI() == RenderBackend::API::Vulkan)
+        {
+            m_Pipeline->RegisterShaderReloadConsumers(*m_ShaderReload);
+            m_ShaderReload->AddConsumer("CapturePreview", [this](const auto& name, const auto& spv) {
+                if (name == "debugBlit.slang") m_FrameDebugger.blitFragSpv = spv;
+                else if (name == "debugDepth.slang") m_FrameDebugger.depthFragSpv = spv;
+                else return false;
+                return true;
+            });
+            m_ShaderReload->Start(FileSystem::EngineAssetsPath("shaders"));
+        }
     }
 
     RenderingSystem::~RenderingSystem()
     {
         // Replay borrows native domains and descriptor resources. Retire capture first,
         // after completion, while those dependencies and the Vulkan device are alive.
-        m_Pipeline->GetShaderWatcher().Stop();
+        m_ShaderReload->Stop();
         Renderer::WaitForGPU();
         m_GpuProfiler->Shutdown();
         m_CaptureContext->Shutdown();
@@ -137,12 +150,12 @@ namespace Luth
     void RenderingSystem::OnProjectLoaded()
     {
         if (!FileSystem::HasProject()) return;
-        m_Pipeline->GetShaderWatcher().AddProjectDir(FileSystem::AssetsPath("shaders"));
+        m_ShaderReload->AddProjectDir(FileSystem::AssetsPath("shaders"));
     }
 
     void RenderingSystem::OnProjectUnloaded()
     {
-        m_Pipeline->GetShaderWatcher().RemoveProjectDir();
+        m_ShaderReload->RemoveProjectDir();
     }
 
     // ---- Per-frame dispatcher ----
@@ -157,7 +170,7 @@ namespace Luth
         // Drain pending shader reloads once per frame (FileWatcher detections from its bg thread).
         // Formerly lived inside RenderPipeline::Execute and ran twice per frame when both Scene + Game
         // viewports were open.
-        m_Pipeline->GetShaderWatcher().Poll();
+        m_ShaderReload->Poll();
 
         // ---- Frame Debugger: Frozen state ----
         // Strict snapshot model with auto-recapture on camera move.

@@ -9,16 +9,9 @@
 
 namespace Luth
 {
-    // Monitors shader source directories on a background thread (FileWatcher)
-    // and queues shader names for reload on the main thread. Poll() drains the
-    // queue via ShaderLibrary::Reload, which fires the per-pipeline rebuild
-    // callback registered by RenderPipeline.
-    //
-    // Owned by RenderPipeline. Start() is called with the engine-shaders dir
-    // from RenderPipeline::Initialize; AddProjectDir/RemoveProjectDir toggle
-    // the active project's dir from App's project-lifecycle hooks; Stop()
-    // runs from Shutdown. Poll() is invoked once per frame in Execute's
-    // prologue so reloads land before the next graph build.
+    // Background detections queue shader names for main-thread ShaderLibrary reload.
+    // Owned by RenderingSystem through ShaderReloadCoordinator. Poll runs once in
+    // RenderingSystem::Update before frozen/normal view recording; stop precedes native teardown.
     class ShaderWatcher
     {
     public:

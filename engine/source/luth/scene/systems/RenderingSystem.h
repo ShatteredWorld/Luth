@@ -316,6 +316,7 @@ namespace Luth
             const RG::RenderGraph&, RG::RenderGraphSnapshot&, bool applyPrevious);
         void SubmitViewProfiling(RenderViewId, u64 renderFrame, SubmissionCompletionToken);
         const ProfileSubmissionProvenance* GetViewProfiling(RenderViewId id) const { return m_Profiling.Find(id); }
+        ShaderReloadCoordinator& GetShaderReloadCoordinator() { return *m_ShaderReload; }
         void ResetPreviewCacheKeys();
         DebuggerState GetDebuggerState() const { return m_FrameDebugger.state; }
         const RG::CapturedFrame& GetCapturedFrame() const { return m_FrameDebugger.capturedFrame; }
@@ -378,6 +379,7 @@ namespace Luth
         RG::RenderGraphSnapshot m_GraphSnapshot;
         ProfilingProvenance m_Profiling;
         std::unique_ptr<class ViewGpuProfiler> m_GpuProfiler;
+        std::unique_ptr<class ShaderReloadCoordinator> m_ShaderReload;
 
         // Editor-facing state.
         PostProcessSettings  m_PostProcessSettings;
