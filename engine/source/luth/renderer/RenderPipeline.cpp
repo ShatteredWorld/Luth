@@ -68,7 +68,7 @@ namespace Luth
 
     RenderPipeline::RenderPipeline(RenderingSystem& system)
         : m_System(system)
-        , m_Debugger(std::make_unique<FrameDebuggerContext>(*this))
+        , m_Debugger(std::make_unique<FrameDebuggerContext>(system, m_Geometry, m_Lighting, m_PostProcess, m_EditorOverlays))
         , m_Denoise(std::make_unique<SvgfDenoiser>(DenoiserChannel::Di))
         , m_DenoiseGi(std::make_unique<SvgfDenoiser>(DenoiserChannel::Gi))
         , m_DenoiseRefl(std::make_unique<SvgfDenoiser>(DenoiserChannel::Reflections))
@@ -1411,6 +1411,17 @@ namespace Luth
                 cf.capturedView.width  = view.targets->GetSceneColor()->GetWidth();
                 cf.capturedView.height = view.targets->GetSceneColor()->GetHeight();
             }
+            const u32 replaySlot = cf.capturedRenderFrameIndex % MAX_FRAMES_IN_FLIGHT;
+            cf.replayBindings.sets = {m_CurrentViewResources->globalDescriptorSet[replaySlot],
+                VulkanContext::Get().GetBindlessSet().GetSet(), MaterialSystem::GetDescriptorSet(replaySlot),
+                m_Lighting.GetLightDescSet(replaySlot), BoneMatrixBuffer::GetDescriptorSet(replaySlot),
+                m_Geometry.GetObjectSSBODescSet(replaySlot)};
+            const auto indirect = m_Geometry.GetIndirectRegion();
+            cf.replayBindings.indirectBuffer = indirect.buffer;
+            cf.replayBindings.indirectOffset = indirect.offset;
+            cf.replayBindings.indirectSize = indirect.size;
+            cf.replayBindings.regionsPerView = k_IndirectRegionsPerView;
+            cf.replayBindings.regionStride = k_IndirectRegionStride;
             m_Global.GetLastUboBytes(cf.capturedGlobalUboBytes);
             cf.capturedIrradiance     = m_Lighting.GetIrradianceMap();
             cf.capturedPrefiltered    = m_Lighting.GetPrefilteredMap();

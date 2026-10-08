@@ -1,6 +1,9 @@
 #include "luthpch.h"
 #include "luth/renderer/debug/FrameDebuggerContext.h"
-#include "luth/renderer/RenderPipeline.h"
+#include "luth/renderer/subsystems/GeometrySubsystem.h"
+#include "luth/renderer/subsystems/LightingSubsystem.h"
+#include "luth/renderer/subsystems/PostProcessSubsystem.h"
+#include "luth/renderer/subsystems/EditorOverlaysSubsystem.h"
 #include "luth/renderer/Renderer.h"
 #include "luth/renderer/FrameTargets.h"
 #include "luth/scene/systems/RenderingSystem.h"
@@ -24,8 +27,10 @@
 
 namespace Luth
 {
-    FrameDebuggerContext::FrameDebuggerContext(RenderPipeline& pipeline)
-        : m_Pipeline(pipeline)
+    FrameDebuggerContext::FrameDebuggerContext(RenderingSystem& system, GeometrySubsystem& geometry,
+        LightingSubsystem& lighting, PostProcessSubsystem& postProcess, EditorOverlaysSubsystem& overlays)
+        : m_System(system), m_Geometry(geometry), m_Lighting(lighting),
+          m_PostProcess(postProcess), m_EditorOverlays(overlays)
     {
     }
 
@@ -40,7 +45,7 @@ namespace Luth
 
     void FrameDebuggerContext::InitDebugBlitResources()
     {
-        auto& fd = m_Pipeline.GetSystem().GetFrameDebugger();
+        auto& fd = m_System.GetFrameDebugger();
         if (fd.blitPipeline) return;
 
         if (auto sh = ShaderLibrary::LoadEngine("shaders/debugBlit.slang"))
@@ -54,7 +59,7 @@ namespace Luth
 
         if (fd.blitFragSpv.empty() || fd.depthFragSpv.empty()
          || fd.slimDecodeFragSpv.empty() || fd.slimMatIDFragSpv.empty()
-         || m_Pipeline.GetPostProcess().GetFullscreenVertSpv().empty())
+         || m_PostProcess.GetFullscreenVertSpv().empty())
         {
             LH_LOG(Renderer, error, "Failed to compile debug blit shaders");
             return;
@@ -126,7 +131,7 @@ namespace Luth
         blitConfig.cullMode         = VK_CULL_MODE_NONE;
         blitConfig.colorFormats     = { VK_FORMAT_R8G8B8A8_UNORM };
         fd.blitPipeline = std::make_unique<VKPipeline>(
-            blitConfig, m_Pipeline.GetPostProcess().GetFullscreenVertSpv(), fd.blitFragSpv, layouts);
+            blitConfig, m_PostProcess.GetFullscreenVertSpv(), fd.blitFragSpv, layouts);
 
         // Create depth visualization pipeline
         PipelineConfig depthConfig;
@@ -142,7 +147,7 @@ namespace Luth
         depthConfig.pushConstantRanges = { depthPC };
 
         fd.depthPipeline = std::make_unique<VKPipeline>(
-            depthConfig, m_Pipeline.GetPostProcess().GetFullscreenVertSpv(), fd.depthFragSpv, layouts);
+            depthConfig, m_PostProcess.GetFullscreenVertSpv(), fd.depthFragSpv, layouts);
 
         // Slim G-buffer decoder pipeline (oct-normal / motion / roughness, float-sampled).
         // Push constants: uint mode + float scale = 8B.
@@ -158,7 +163,7 @@ namespace Luth
         slimDecodeCfg.colorFormats     = { VK_FORMAT_R8G8B8A8_UNORM };
         slimDecodeCfg.pushConstantRanges = { slimPC };
         fd.slimDecodePipeline = std::make_unique<VKPipeline>(
-            slimDecodeCfg, m_Pipeline.GetPostProcess().GetFullscreenVertSpv(), fd.slimDecodeFragSpv, layouts);
+            slimDecodeCfg, m_PostProcess.GetFullscreenVertSpv(), fd.slimDecodeFragSpv, layouts);
 
         // Slim material-ID pipeline (uint-sampled R16U). Shares descSet layout; the shader
         // declares usampler2D so the bound view must point at the R16U image.
@@ -168,12 +173,12 @@ namespace Luth
         slimMatIDCfg.cullMode         = VK_CULL_MODE_NONE;
         slimMatIDCfg.colorFormats     = { VK_FORMAT_R8G8B8A8_UNORM };
         fd.slimMatIDPipeline = std::make_unique<VKPipeline>(
-            slimMatIDCfg, m_Pipeline.GetPostProcess().GetFullscreenVertSpv(), fd.slimMatIDFragSpv, layouts);
+            slimMatIDCfg, m_PostProcess.GetFullscreenVertSpv(), fd.slimMatIDFragSpv, layouts);
     }
 
     RG::ResourceHandle FrameDebuggerContext::AddDebugBlitPass(RG::RenderGraph& rg, RG::ResourceHandle inputHandle, bool isDepth)
     {
-        auto& sys = m_Pipeline.GetSystem();
+        auto& sys = m_System;
         if (!sys.GetFrameDebugger().blitPipeline || !sys.GetSceneTargets().GetLDROutput()) return inputHandle;
 
         struct DebugBlitData {
@@ -203,7 +208,7 @@ namespace Luth
             },
             [this, isDepth](DebugBlitData& data, RG::RenderPassContext& ctx)
             {
-                auto& sys = m_Pipeline.GetSystem();
+                auto& sys = m_System;
                 VkCommandBuffer cmd = ctx.commandBuffer;
 
                 u32 w = sys.GetSceneTargets().GetLDROutput()->GetWidth();
@@ -324,9 +329,9 @@ namespace Luth
 
     bool FrameDebuggerContext::ValidateCapturedView()
     {
-        auto& sys = m_Pipeline.GetSystem();
+        auto& sys = m_System;
         auto& cf  = sys.GetFrameDebugger().capturedFrame;
-        if (m_Pipeline.HasViewResources(cf.capturedView.targets, cf.capturedView.id,
+        if (sys.GetViews().Matches(cf.capturedView.id, cf.capturedView.targets,
                                        cf.capturedView.resourceGeneration))
             return true;
 
@@ -340,7 +345,7 @@ namespace Luth
 
     void FrameDebuggerContext::ReplayPassUpToDraw(u32 passIdx, u32 localDrawIdx)
     {
-        auto& sys = m_Pipeline.GetSystem();
+        auto& sys = m_System;
 
         if (sys.GetFrameDebugger().state != DebuggerState::Frozen) return;
         if (!sys.GetFrameDebugger().capturedFrame.valid) return;
@@ -373,13 +378,10 @@ namespace Luth
     {
         // invariant: ReplayPassUpToDraw already validated cf.capturedView via ValidateCapturedView; replay
         // must render against THIS view's targets, not m_CurrentViewResources (which points at whichever view ran last).
-        auto& sys = m_Pipeline.GetSystem();
+        auto& sys = m_System;
         auto& cf  = sys.GetFrameDebugger().capturedFrame;
         FrameTargets* targets = cf.capturedView.targets;
         if (!targets || !targets->GetSceneColor() || !targets->GetSceneDepth() || !targets->GetEntityIDBuffer()) return;
-
-        ViewResources* capturedVr = m_Pipeline.GetViewResources(targets);
-        if (!capturedVr) return;
 
         // Cache hit: same selection as last replay, nothing to do.
         const u64 key = ((u64)passIdx << 32) | (u64)localDrawIdx;
@@ -405,13 +407,12 @@ namespace Luth
         const u32 maxDraws = localDrawIdx + 1;
 
         // Capture the CPU-side data by value (the lambda runs inside ImmediateSubmit and must be self-contained).
-        VkPolygonMode polyMode = (sys.GetShadeMode() == ShadeMode::Wireframe) ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
+        const VkPolygonMode polyMode = cf.passes[passIdx].pipelineState.polygonMode;
         UUID pbrUUID = ShaderLibrary::Get("pbr_vert.slang")->Handle;
 
         VulkanContext::Get().ImmediateSubmit([&, this](VkCommandBuffer cmd)
         {
-            auto& sys = m_Pipeline.GetSystem();
-            auto& rp  = m_Pipeline;
+            auto& sys = m_System;
 
             // ---- Prep all attachments + preview ----
             // UNDEFINED -> ATTACHMENT ignores prior contents (the graph CLEARs anyway) and avoids
@@ -485,9 +486,9 @@ namespace Luth
             // ---- Bind pipelines + descriptors, replay draws ----
             // Same descriptor sets as the live GeometryPass; the underlying UBOs/SSBOs are byte-stable
             // in Frozen state (no live writers).
-            auto* opaquePipeline = rp.GetGeometry().GetGeoPipelineManager().GetOrCreate(
+            auto* opaquePipeline = m_Geometry.GetGeoPipelineManager().GetOrCreate(
                 pbrUUID, Material::RenderMode::Opaque, Material::CullMode::Back,
-                polyMode, rp.GetGeometry().GetPBRVertSpv(), rp.GetGeometry().GetPBRFragSpv());
+                polyMode, m_Geometry.GetPBRVertSpv(), m_Geometry.GetPBRFragSpv());
             if (!opaquePipeline)
             {
                 DynamicRendering::EndRendering(cmd);
@@ -500,14 +501,8 @@ namespace Luth
             // invariant: do NOT rewrite Set 0 binding 0 here; the set may be in use by a still-pending cmd
             // buffer from before Frozen engaged (no UAB flag set on Set 0). Captured-time region stays alive
             // across Frozen because the live RG isn't running to advance FreeTag.
-            const u32 slot = cf.capturedRenderFrameIndex % MAX_FRAMES_IN_FLIGHT;
-
-            VkDescriptorSet bindlessSet = VulkanContext::Get().GetBindlessSet().GetSet();
-            VkDescriptorSet sets[] = {
-                capturedVr->globalDescriptorSet[slot], bindlessSet, MaterialSystem::GetDescriptorSet(slot),
-                rp.GetLighting().GetLightDescSet(slot), BoneMatrixBuffer::GetDescriptorSet(slot), rp.GetGeometry().GetObjectSSBODescSet(slot)
-            };
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 6, sets, 0, nullptr);
+            const auto& sets = cf.replayBindings.sets;
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 6, sets.data(), 0, nullptr);
 
             VkViewport vp{}; vp.width = (float)width; vp.height = (float)height; vp.maxDepth = 1.0f;
             vkCmdSetViewport(cmd, 0, 1, &vp);
@@ -522,8 +517,8 @@ namespace Luth
 
                 Material::CullMode currentCull = Material::CullMode::Back;
                 bool currentSkinned = false;
-                auto* pipeline = rp.GetGeometry().GetGeoPipelineManager().GetOrCreate(
-                    pbrUUID, mode, currentCull, polyMode, rp.GetGeometry().GetPBRVertSpv(), rp.GetGeometry().GetPBRFragSpv());
+                auto* pipeline = m_Geometry.GetGeoPipelineManager().GetOrCreate(
+                    pbrUUID, mode, currentCull, polyMode, m_Geometry.GetPBRVertSpv(), m_Geometry.GetPBRFragSpv());
                 if (!pipeline) return;
                 pipeline->Bind(cmd);
 
@@ -536,8 +531,8 @@ namespace Luth
                         currentCull    = dc.cullMode;
                         currentSkinned = dc.isSkinned;
                         VKPipeline* newPipeline = currentSkinned
-                            ? rp.GetGeometry().GetGeoSkinnedPipelineManager().GetOrCreate(pbrUUID, mode, currentCull, polyMode, rp.GetGeometry().GetPBRSkinnedVertSpv(), rp.GetGeometry().GetPBRFragSpv())
-                            : rp.GetGeometry().GetGeoPipelineManager().GetOrCreate       (pbrUUID, mode, currentCull, polyMode, rp.GetGeometry().GetPBRVertSpv(),        rp.GetGeometry().GetPBRFragSpv());
+                            ? m_Geometry.GetGeoSkinnedPipelineManager().GetOrCreate(pbrUUID, mode, currentCull, polyMode, m_Geometry.GetPBRSkinnedVertSpv(), m_Geometry.GetPBRFragSpv())
+                            : m_Geometry.GetGeoPipelineManager().GetOrCreate       (pbrUUID, mode, currentCull, polyMode, m_Geometry.GetPBRVertSpv(),        m_Geometry.GetPBRFragSpv());
                         if (!newPipeline) continue;
                         newPipeline->Bind(cmd);
                     }
@@ -554,10 +549,8 @@ namespace Luth
                     vkCmdBindIndexBuffer(cmd, ib->GetVulkanBuffer(), 0, VK_INDEX_TYPE_UINT32);
 
                     // invariant: cmdIndex must match the camera-region layout the live cull wrote into.
-                    const u32 viewBaseRegion = cf.capturedView.viewIndex * RenderPipeline::k_IndirectRegionsPerView;
-                    const u32 cmdIndex = viewBaseRegion * RenderPipeline::k_IndirectRegionStride + dc.gpuObjectIndex;
-                    VkDeviceSize indirectOffset = rp.GetGeometry().GetIndirectRegion().offset + cmdIndex * sizeof(VkDrawIndexedIndirectCommand);
-                    vkCmdDrawIndexedIndirect(cmd, rp.GetGeometry().GetIndirectRegion().buffer, indirectOffset, 1,
+                    const VkDeviceSize indirectOffset = cf.replayBindings.DrawOffset(cf.capturedView.viewIndex, 0, dc.gpuObjectIndex);
+                    vkCmdDrawIndexedIndirect(cmd, cf.replayBindings.indirectBuffer, indirectOffset, 1,
                         sizeof(VkDrawIndexedIndirectCommand));
 
                     --drawsRemaining;
@@ -653,17 +646,14 @@ namespace Luth
 
     void FrameDebuggerContext::ReplayShadow(u32 passIdx, u32 localDrawIdx, int cascadeIdx)
     {
-        auto& sys = m_Pipeline.GetSystem();
+        auto& sys = m_System;
         auto& cf  = sys.GetFrameDebugger().capturedFrame;
         if (cascadeIdx < 0 || cascadeIdx >= (int)k_ShadowCascadeCount) return;
 
         const u64 key = ((u64)passIdx << 32) | (u64)localDrawIdx;
         if (key == m_PerDrawPreviewKey) return;
 
-        ViewResources* capturedVr = m_Pipeline.GetViewResources(cf.capturedView.targets);
-        if (!capturedVr) return;
-
-        auto& lighting = m_Pipeline.GetLighting();
+        auto& lighting = m_Lighting;
         VkImageView shadowLayerView = lighting.GetShadowLayerView((u32)cascadeIdx);
         auto vkShadowMap = std::static_pointer_cast<VKTexture>(lighting.GetShadowMap());
         VKPipeline* shadowPipeline = lighting.GetShadowPipeline();
@@ -700,7 +690,6 @@ namespace Luth
 
         VulkanContext::Get().ImmediateSubmit([&, this, cascade, maxDraws](VkCommandBuffer cmd)
         {
-            auto& rp = m_Pipeline;
 
             // Shadow cascade slice -> DEPTH_ATTACHMENT (UNDEFINED to discard prior).
             VkImageMemoryBarrier2 prep{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
@@ -733,20 +722,11 @@ namespace Luth
 
             DynamicRendering::BeginRendering(cmd, rpInfo);
 
-            const u32 slot = cf.capturedRenderFrameIndex % MAX_FRAMES_IN_FLIGHT;
-            VkDescriptorSet bindlessSet = VulkanContext::Get().GetBindlessSet().GetSet();
-            VkDescriptorSet sets[] = {
-                capturedVr->globalDescriptorSet[slot],
-                bindlessSet,
-                MaterialSystem::GetDescriptorSet(slot),
-                rp.GetLighting().GetLightDescSet(slot),
-                BoneMatrixBuffer::GetDescriptorSet(slot),
-                rp.GetGeometry().GetObjectSSBODescSet(slot)
-            };
+            const auto& sets = cf.replayBindings.sets;
 
             shadowPipeline->Bind(cmd);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                shadowPipeline->GetLayout(), 0, 6, sets, 0, nullptr);
+                shadowPipeline->GetLayout(), 0, 6, sets.data(), 0, nullptr);
             vkCmdPushConstants(cmd, shadowPipeline->GetLayout(),
                 VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(u32), &cascade);
 
@@ -771,7 +751,7 @@ namespace Luth
                         if (!p) { drawsRemaining--; continue; }
                         p->Bind(cmd);
                         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            p->GetLayout(), 0, 6, sets, 0, nullptr);
+                            p->GetLayout(), 0, 6, sets.data(), 0, nullptr);
                         vkCmdPushConstants(cmd, p->GetLayout(),
                             VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(u32), &cascade);
                     }
@@ -786,10 +766,8 @@ namespace Luth
                     vkCmdBindVertexBuffers(cmd, 0, 1, vbuf, offsets);
                     vkCmdBindIndexBuffer(cmd, ib->GetVulkanBuffer(), 0, VK_INDEX_TYPE_UINT32);
 
-                    const u32 viewBaseRegion = cf.capturedView.viewIndex * RenderPipeline::k_IndirectRegionsPerView;
-                    const u32 cmdIndex = (viewBaseRegion + cascade + 1) * RenderPipeline::k_IndirectRegionStride + dc.gpuObjectIndex;
-                    VkDeviceSize indirectOffset = rp.GetGeometry().GetIndirectRegion().offset + cmdIndex * sizeof(VkDrawIndexedIndirectCommand);
-                    vkCmdDrawIndexedIndirect(cmd, rp.GetGeometry().GetIndirectRegion().buffer, indirectOffset, 1,
+                    const VkDeviceSize indirectOffset = cf.replayBindings.DrawOffset(cf.capturedView.viewIndex, cascade + 1, dc.gpuObjectIndex);
+                    vkCmdDrawIndexedIndirect(cmd, cf.replayBindings.indirectBuffer, indirectOffset, 1,
                         sizeof(VkDrawIndexedIndirectCommand));
                     --drawsRemaining;
                 }
@@ -953,7 +931,7 @@ namespace Luth
 
     void FrameDebuggerContext::ReplayDepthPrepass(u32 passIdx, u32 localDrawIdx)
     {
-        auto& sys = m_Pipeline.GetSystem();
+        auto& sys = m_System;
         auto& cf  = sys.GetFrameDebugger().capturedFrame;
         FrameTargets* targets = cf.capturedView.targets;
         if (!targets || !targets->GetSceneDepth()) return;
@@ -961,11 +939,8 @@ namespace Luth
         const u64 key = ((u64)passIdx << 32) | (u64)localDrawIdx;
         if (key == m_PerDrawPreviewKey) return;
 
-        ViewResources* capturedVr = m_Pipeline.GetViewResources(targets);
-        if (!capturedVr) return;
-
-        VKPipeline* depthPrepass = m_Pipeline.GetGeometry().GetDepthPrepassPipeline();
-        VKPipeline* depthSkinned = m_Pipeline.GetGeometry().GetDepthPrepassSkinnedPipeline();
+        VKPipeline* depthPrepass = m_Geometry.GetDepthPrepassPipeline();
+        VKPipeline* depthSkinned = m_Geometry.GetDepthPrepassSkinnedPipeline();
         if (!depthPrepass) return;
 
         InitDebugBlitResources();
@@ -997,7 +972,6 @@ namespace Luth
 
         VulkanContext::Get().ImmediateSubmit([&, this, maxDraws, width, height](VkCommandBuffer cmd)
         {
-            auto& rp = m_Pipeline;
 
             VkImageMemoryBarrier2 prep{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
             prep.srcStageMask        = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
@@ -1029,20 +1003,11 @@ namespace Luth
 
             DynamicRendering::BeginRendering(cmd, rpInfo);
 
-            const u32 slot = cf.capturedRenderFrameIndex % MAX_FRAMES_IN_FLIGHT;
-            VkDescriptorSet bindlessSet = VulkanContext::Get().GetBindlessSet().GetSet();
-            VkDescriptorSet sets[] = {
-                capturedVr->globalDescriptorSet[slot],
-                bindlessSet,
-                MaterialSystem::GetDescriptorSet(slot),
-                rp.GetLighting().GetLightDescSet(slot),
-                BoneMatrixBuffer::GetDescriptorSet(slot),
-                rp.GetGeometry().GetObjectSSBODescSet(slot)
-            };
+            const auto& sets = cf.replayBindings.sets;
 
             depthPrepass->Bind(cmd);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                depthPrepass->GetLayout(), 0, 6, sets, 0, nullptr);
+                depthPrepass->GetLayout(), 0, 6, sets.data(), 0, nullptr);
 
             VkViewport vp{}; vp.width = (float)width; vp.height = (float)height; vp.maxDepth = 1.0f;
             vkCmdSetViewport(cmd, 0, 1, &vp);
@@ -1063,7 +1028,7 @@ namespace Luth
                     if (!p) { drawsRemaining--; continue; }
                     p->Bind(cmd);
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        p->GetLayout(), 0, 6, sets, 0, nullptr);
+                        p->GetLayout(), 0, 6, sets.data(), 0, nullptr);
                 }
                 auto mesh = dc.model->GetMesh(dc.meshIndex);
                 if (!mesh) { drawsRemaining--; continue; }
@@ -1076,10 +1041,8 @@ namespace Luth
                 vkCmdBindVertexBuffers(cmd, 0, 1, vbuf, offsets);
                 vkCmdBindIndexBuffer(cmd, ib->GetVulkanBuffer(), 0, VK_INDEX_TYPE_UINT32);
 
-                const u32 viewBaseRegion = cf.capturedView.viewIndex * RenderPipeline::k_IndirectRegionsPerView;
-                const u32 cmdIndex = viewBaseRegion * RenderPipeline::k_IndirectRegionStride + dc.gpuObjectIndex;
-                VkDeviceSize indirectOffset = rp.GetGeometry().GetIndirectRegion().offset + cmdIndex * sizeof(VkDrawIndexedIndirectCommand);
-                vkCmdDrawIndexedIndirect(cmd, rp.GetGeometry().GetIndirectRegion().buffer, indirectOffset, 1,
+                const VkDeviceSize indirectOffset = cf.replayBindings.DrawOffset(cf.capturedView.viewIndex, 0, dc.gpuObjectIndex);
+                vkCmdDrawIndexedIndirect(cmd, cf.replayBindings.indirectBuffer, indirectOffset, 1,
                     sizeof(VkDrawIndexedIndirectCommand));
                 --drawsRemaining;
             }
@@ -1231,7 +1194,7 @@ namespace Luth
 
     void FrameDebuggerContext::ReplaySelectionMask(u32 passIdx, u32 localDrawIdx)
     {
-        auto& sys = m_Pipeline.GetSystem();
+        auto& sys = m_System;
         auto& cf  = sys.GetFrameDebugger().capturedFrame;
         FrameTargets* targets = cf.capturedView.targets;
         if (!targets || !targets->GetSelectionMask() || !targets->GetSelectionDepth()) return;
@@ -1239,11 +1202,8 @@ namespace Luth
         const u64 key = ((u64)passIdx << 32) | (u64)localDrawIdx;
         if (key == m_PerDrawPreviewKey) return;
 
-        ViewResources* capturedVr = m_Pipeline.GetViewResources(targets);
-        if (!capturedVr) return;
-
-        VKPipeline* maskPipeline    = m_Pipeline.GetEditorOverlays().GetSelectionMaskPipeline();
-        VKPipeline* maskSkinned     = m_Pipeline.GetEditorOverlays().GetSelectionMaskSkinnedPipeline();
+        VKPipeline* maskPipeline    = m_EditorOverlays.GetSelectionMaskPipeline();
+        VKPipeline* maskSkinned     = m_EditorOverlays.GetSelectionMaskSkinnedPipeline();
         if (!maskPipeline) return;
 
         // Resolved-at-capture selection set; m_CurrentView's RenderView is stack-allocated and gone
@@ -1268,7 +1228,6 @@ namespace Luth
 
         VulkanContext::Get().ImmediateSubmit([&, this, maxDraws, width, height](VkCommandBuffer cmd)
         {
-            auto& rp = m_Pipeline;
 
             VkImageMemoryBarrier2 prep[2]{};
             prep[0].sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -1321,19 +1280,11 @@ namespace Luth
 
             DynamicRendering::BeginRendering(cmd, rpInfo);
 
-            const u32 slot = cf.capturedRenderFrameIndex % MAX_FRAMES_IN_FLIGHT;
-            VkDescriptorSet bindlessSet = VulkanContext::Get().GetBindlessSet().GetSet();
-            VkDescriptorSet sets[] = {
-                capturedVr->globalDescriptorSet[slot],
-                bindlessSet,
-                MaterialSystem::GetDescriptorSet(slot),
-                rp.GetLighting().GetLightDescSet(slot),
-                BoneMatrixBuffer::GetDescriptorSet(slot)
-            };
+            const auto& sets = cf.replayBindings.sets;
 
             maskPipeline->Bind(cmd);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                maskPipeline->GetLayout(), 0, 5, sets, 0, nullptr);
+                maskPipeline->GetLayout(), 0, 5, sets.data(), 0, nullptr);
 
             VkViewport vp{}; vp.width = (float)width; vp.height = (float)height; vp.maxDepth = 1.0f;
             vkCmdSetViewport(cmd, 0, 1, &vp);
@@ -1358,7 +1309,7 @@ namespace Luth
                         if (!p) { drawsRemaining--; continue; }
                         p->Bind(cmd);
                         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            p->GetLayout(), 0, 5, sets, 0, nullptr);
+                            p->GetLayout(), 0, 5, sets.data(), 0, nullptr);
                     }
 
                     auto mesh = dc.model->GetMesh(dc.meshIndex);
@@ -1546,7 +1497,7 @@ namespace Luth
 
     void FrameDebuggerContext::BlitArchivedDepthToPreview(u32 archiveIdx, int layer, float nearZ, float farZ)
     {
-        auto& sys = m_Pipeline.GetSystem();
+        auto& sys = m_System;
 
         if (sys.GetFrameDebugger().state != DebuggerState::Frozen) return;
         if (!sys.GetFrameDebugger().capturedFrame.valid) return;
@@ -1602,7 +1553,7 @@ namespace Luth
 
         VulkanContext::Get().ImmediateSubmit([this, dstImg, dstView, width, height, nearZ, farZ](VkCommandBuffer cmd)
         {
-            auto& sys = m_Pipeline.GetSystem();
+            auto& sys = m_System;
 
             // Preview UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL (clear-on-load).
             VkImageMemoryBarrier2 prep{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
@@ -1739,7 +1690,7 @@ namespace Luth
 
     void FrameDebuggerContext::BlitArchivedSlimToPreview(u32 archiveIdx, u32 mode, float scale)
     {
-        auto& sys = m_Pipeline.GetSystem();
+        auto& sys = m_System;
 
         if (sys.GetFrameDebugger().state != DebuggerState::Frozen) return;
         if (!sys.GetFrameDebugger().capturedFrame.valid) return;
@@ -1789,7 +1740,7 @@ namespace Luth
 
         VulkanContext::Get().ImmediateSubmit([this, dstImg, dstView, width, height, mode, scale, pipelinePtr, needsPushConstants](VkCommandBuffer cmd)
         {
-            auto& sys = m_Pipeline.GetSystem();
+            auto& sys = m_System;
 
             VkImageMemoryBarrier2 prep{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
             prep.srcStageMask        = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;

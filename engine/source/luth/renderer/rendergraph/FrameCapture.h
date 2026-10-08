@@ -2,6 +2,7 @@
 
 #include "luth/core/types/LuthMath.h"
 #include "luth/renderer/features/RenderViewState.h"
+#include "luth/renderer/debug/CapturedReplayBindings.h"
 #include "luth/renderer/rendergraph/RenderGraphSnapshot.h"
 #include "luth/renderer/rendergraph/ArchivedImage.h"
 #include "luth/renderer/rendergraph/FrameEventTree.h"
@@ -157,6 +158,7 @@ namespace Luth::RG
         // against these, not live state; when capturedSource == Game and the live scene view runs after capture,
         // m_CurrentViewResources points at the scene view, not the captured one.
         CapturedViewState        capturedView;
+        CapturedReplayBindings   replayBindings;
         std::vector<u8>          capturedGlobalUboBytes;   // GlobalUniforms snapshot
         std::shared_ptr<Texture> capturedIrradiance;
         std::shared_ptr<Texture> capturedPrefiltered;
@@ -179,6 +181,7 @@ namespace Luth::RG
             for (auto& m : lightSpaceMatrix) m = Mat4(0.0f);
             capturedRenderFrameIndex = 0;
             capturedView        = {};
+            replayBindings      = {};
             capturedGlobalUboBytes.clear();
             capturedIrradiance.reset();
             capturedPrefiltered.reset();
