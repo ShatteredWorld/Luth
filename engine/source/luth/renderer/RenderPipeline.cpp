@@ -17,6 +17,7 @@
 #include "luth/renderer/features/GridFeature.h"
 #include "luth/renderer/features/SelectionMaskFeature.h"
 #include "luth/renderer/features/OutlineFeature.h"
+#include "luth/renderer/features/DebugDrawFeature.h"
 #include "luth/renderer/features/SlimVizFeature.h"
 #include "luth/renderer/features/ClusterVizFeature.h"
 #include "luth/renderer/features/FogVizFeature.h"
@@ -89,7 +90,7 @@ namespace Luth
 
         BoneMatrixBuffer::Init();
         m_EditorOverlays.Init();
-        m_DebugDraw.Init(*this);
+        m_DebugDraw.Init();
         m_PostProcess.Init();
 
         // Lighting owns Set 3 + shadow map + IBL + skybox VB/SPVs. Engine ships no HDR; an empty path triggers
@@ -229,6 +230,12 @@ namespace Luth
         auto outlineCompiled = RenderPipelineCompiler{}.Compile(std::move(outlineDefinition), {}, outlineInputs);
         if (!outlineCompiled.ReplaceIfValid(m_OutlineComposition))
             throw std::runtime_error("Outline definition failed semantic validation");
+        RenderPipelineDefinition debugDrawDefinition;
+        debugDrawDefinition.AddFeature<DebugDrawFeature>(m_DebugDraw, &m_System.GetFrameDebugger());
+        PipelineInputContract debugDrawInputs; debugDrawInputs.resources = {{RenderResources::OutlinedLDR}, {DebugDrawResources::Bindings}};
+        auto debugDrawCompiled = RenderPipelineCompiler{}.Compile(std::move(debugDrawDefinition), {}, debugDrawInputs);
+        if (!debugDrawCompiled.ReplaceIfValid(m_DebugDrawComposition))
+            throw std::runtime_error("DebugDraw definition failed semantic validation");
         RenderPipelineDefinition selectionDefinition;
         selectionDefinition.AddFeature<SelectionMaskFeature>(m_EditorOverlays, &m_System.GetFrameDebugger());
         PipelineInputContract selectionInputs; selectionInputs.resources = {{SelectionMaskResources::Bindings}};
@@ -415,6 +422,7 @@ namespace Luth
         m_BloomComposition.reset();
         m_VisualizationComposition.reset();
         m_OutlineComposition.reset();
+        m_DebugDrawComposition.reset();
         m_SelectionMaskComposition.reset();
         m_GridComposition.reset();
         m_CompositeComposition.reset();
@@ -1245,9 +1253,22 @@ namespace Luth
                 LH_LOG(Renderer, error, "Outline composition: {}", diagnostic.message);
             return false;
         }
-        RG::ResourceHandle finalOutput = outlinedLdr.handle;
-        if (view.drawDebugShapes && !ptActive)
-            finalOutput = m_DebugDraw.AddDebugDrawPass(rg, finalOutput);
+        const auto debugDrawNative = m_DebugDraw.PrepareBindings(DebugDraw::GetForRender(bloomFrame.renderFrameIndex),
+            m_Global.GetCachedViewProj(), bloomFrame.renderFrameIndex, view.drawDebugShapes && !ptActive);
+        const DebugDrawBindingRef debugDrawBinding{&debugDrawNative};
+        const std::array debugDrawInputs{RenderInputBinding::Present(RenderResources::OutlinedLDR, outlinedLdr),
+            RenderInputBinding::Present(DebugDrawResources::Bindings, debugDrawBinding)};
+        FrameRenderInputs debugDrawFrame; debugDrawFrame.renderFrameIndex = bloomFrame.renderFrameIndex; debugDrawFrame.resources = debugDrawInputs;
+        GraphTextureRef finalViewLdr;
+        const std::array debugDrawExports{RenderOutputBinding::Capture(RenderResources::FinalViewLDR, finalViewLdr)};
+        const auto debugDrawBuild = m_DebugDrawComposition->Build(rg, debugDrawFrame, bloomView, s.GetFrameAllocator(), debugDrawExports);
+        if (!debugDrawBuild.success)
+        {
+            for (const auto& diagnostic : debugDrawBuild.diagnostics)
+                LH_LOG(Renderer, error, "DebugDraw composition: {}", diagnostic.message);
+            return false;
+        }
+        RG::ResourceHandle finalOutput = finalViewLdr.handle;
         if (view.emitImGuiPass)
             AddImGuiPass(rg, finalOutput);
 

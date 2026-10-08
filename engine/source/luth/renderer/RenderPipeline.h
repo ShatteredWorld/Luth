@@ -487,6 +487,7 @@ namespace Luth
         std::unique_ptr<CompiledRenderPipeline> m_BloomComposition;
         std::unique_ptr<CompiledRenderPipeline> m_VisualizationComposition;
         std::unique_ptr<CompiledRenderPipeline> m_OutlineComposition;
+        std::unique_ptr<CompiledRenderPipeline> m_DebugDrawComposition;
         std::unique_ptr<CompiledRenderPipeline> m_SelectionMaskComposition;
         std::unique_ptr<CompiledRenderPipeline> m_GridComposition;
         std::unique_ptr<CompiledRenderPipeline> m_CompositeComposition;

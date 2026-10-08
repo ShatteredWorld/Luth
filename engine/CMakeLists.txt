@@ -69,6 +69,7 @@ add_library(Luth STATIC
     source/luth/renderer/features/ClusterVizViewState.cpp
     source/luth/renderer/subsystems/PostProcessSlimViz.cpp
     source/luth/renderer/features/OutlineFeature.cpp
+    source/luth/renderer/features/DebugDrawFeature.cpp
     source/luth/renderer/subsystems/EditorOverlayOutline.cpp
     source/luth/renderer/features/SelectionMaskFeature.cpp
     source/luth/renderer/subsystems/EditorOverlaySelection.cpp
@@ -152,6 +153,7 @@ add_library(Luth STATIC
     source/luth/renderer/shader/SlangCompiler.cpp
 
     source/luth/renderer/subsystems/DebugDrawSubsystem.cpp
+    source/luth/renderer/subsystems/DebugDrawRecording.cpp
     source/luth/renderer/subsystems/EditorOverlaysSubsystem.cpp
     source/luth/renderer/subsystems/GTAOSubsystem.cpp
     source/luth/renderer/subsystems/GeometrySubsystem.cpp

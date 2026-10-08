@@ -27,6 +27,7 @@ add_executable(LuthTests
     renderer/GiReservoirVizFeature.cpp
     renderer/ClusterVizViewState.cpp
     renderer/OutlineFeature.cpp
+    renderer/DebugDrawFeature.cpp
     renderer/SelectionMaskFeature.cpp
     renderer/GridFeature.cpp
     renderer/CompositeFeature.cpp
