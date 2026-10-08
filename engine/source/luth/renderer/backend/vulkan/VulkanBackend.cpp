@@ -1,4 +1,5 @@
 #include "luthpch.h"
+#include <atomic>
 #include "VulkanBackend.h"
 #include "VulkanContext.h"
 #include "PipelineCache.h"
@@ -137,12 +138,12 @@ namespace Luth
         return true;
     }
 
-    void VulkanBackend::SubmitView(u64 frameIndex, u32 viewSlot, QueueRecorders recorders,
+    SubmissionCompletionToken VulkanBackend::SubmitView(u64 frameIndex, u32 viewSlot, QueueRecorders recorders,
                                    bool hasComputeWork, bool isLastView)
     {
         LH_PROFILE_FUNCTION();
 
-        if (m_AcquiredImageIndex == UINT32_MAX) return;
+        if (m_AcquiredImageIndex == UINT32_MAX) return {};
         LH_CORE_ASSERT(viewSlot < MAX_VIEWS_PER_FRAME, "viewSlot exceeds MAX_VIEWS_PER_FRAME");
 
         const bool firstView = (viewSlot == 0);
@@ -191,13 +192,15 @@ namespace Luth
         gaInfo.pCommandBufferInfos      = &gaCmdInfo;
         gaInfo.signalSemaphoreInfoCount = 1;
         gaInfo.pSignalSemaphoreInfos    = &gaSignal;
-        if (!VulkanContext::Get().SubmitGraphics2(gaInfo, VK_NULL_HANDLE))
+        const bool graphicsAOk = VulkanContext::Get().SubmitGraphics2(gaInfo, VK_NULL_HANDLE);
+        if (!graphicsAOk)
             LH_LOG(Renderer, error, "VulkanBackend::SubmitView - graphics-A submit failed (frame {}, view {}).", frameIndex, viewSlot);
 
         // ---- async-compute submit ----
         // Only fires when the view's RG routed any pass to AsyncCompute. Compute waits the gA value at ALL_COMMANDS
         // (not COMPUTE_SHADER): gates the reader's TOP_OF_PIPE-src cross-queue layout transition of gA outputs. see arch/multi-queue.md
         u64 computeSignalValue = 0;
+        bool computeOk = true;
         if (hasComputeWork)
         {
             // First view also waits the PREVIOUS frame's last compute: frame K's in-place BLAS refit must
@@ -242,7 +245,8 @@ namespace Luth
             cInfo.pCommandBufferInfos      = &cCmdInfo;
             cInfo.signalSemaphoreInfoCount = 1;
             cInfo.pSignalSemaphoreInfos    = &cSignal;
-            if (!VulkanContext::Get().SubmitCompute2(cInfo, VK_NULL_HANDLE))
+            computeOk = VulkanContext::Get().SubmitCompute2(cInfo, VK_NULL_HANDLE);
+            if (!computeOk)
                 LH_LOG(Renderer, error, "VulkanBackend::SubmitView - compute submit failed (frame {}, view {}).", frameIndex, viewSlot);
             m_CurrentFrameLastComputeValue = computeSignalValue;
         }
@@ -306,7 +310,8 @@ namespace Luth
         gbInfo.pCommandBufferInfos      = &gbCmdInfo;
         gbInfo.signalSemaphoreInfoCount = gbSignalCount;
         gbInfo.pSignalSemaphoreInfos    = gbSignals;
-        if (!VulkanContext::Get().SubmitGraphics2(gbInfo, VK_NULL_HANDLE))
+        const bool graphicsBOk = VulkanContext::Get().SubmitGraphics2(gbInfo, VK_NULL_HANDLE);
+        if (!graphicsBOk)
             LH_LOG(Renderer, error, "VulkanBackend::SubmitView - graphics-B submit failed (frame {}, view {}).", frameIndex, viewSlot);
 
         // Cache per-frame final timeline values + present on the last view. AcquireImage reads these caches when
@@ -318,6 +323,17 @@ namespace Luth
             m_LastComputeValuePerFrame [frameSlot] = m_CurrentFrameLastComputeValue;  // 0 sentinel = no compute that frame
             m_Swapchain->Present(m_RenderFinishedSemaphores[m_AcquiredImageIndex]);
         }
+        return {m_SubmissionGeneration, gbSignalValue, computeSignalValue, frameIndex, viewSlot,
+            m_SubmissionGeneration != 0 && graphicsAOk && computeOk && graphicsBOk};
+    }
+
+    bool VulkanBackend::IsSubmissionComplete(const SubmissionCompletionToken& token) const
+    {
+        if (!token.valid || !m_SubmissionGeneration || token.generation != m_SubmissionGeneration)
+            return false;
+        const SubmissionCompletionProgress progress{m_SubmissionGeneration,
+            m_FrameTimeline.GetValue(), token.computeValue ? m_ComputeTimeline.GetValue() : 0};
+        return progress.Contains(token);
     }
 
     void VulkanBackend::OnResize(u32 width, u32 height)
@@ -361,6 +377,9 @@ namespace Luth
 
         m_FrameTimeline.Init(0);
         m_ComputeTimeline.Init(0);
+        static std::atomic<u64> nextGeneration{1};
+        m_SubmissionGeneration = m_FrameTimeline.GetHandle() && m_ComputeTimeline.GetHandle()
+            ? nextGeneration.fetch_add(1, std::memory_order_relaxed) : 0;
         m_NextAcquireSemIndex = 0;
 
         // Timelines just reset to 0 (resize rebuild); clear the per-frame value caches + submit counters so
@@ -384,6 +403,7 @@ namespace Luth
 
     void VulkanBackend::DestroySyncObjects()
     {
+        m_SubmissionGeneration = 0;
         LH_PROFILE_FUNCTION();
 
         VkDevice device = VulkanContext::Get().GetDevice();

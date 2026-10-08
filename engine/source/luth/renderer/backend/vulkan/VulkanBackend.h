@@ -22,8 +22,9 @@ namespace Luth
         virtual void Shutdown() override;
 
         virtual bool AcquireImage(u64 frameIndex) override;
-        virtual void SubmitView(u64 frameIndex, u32 viewSlot, QueueRecorders recorders,
+        virtual SubmissionCompletionToken SubmitView(u64 frameIndex, u32 viewSlot, QueueRecorders recorders,
                                 bool hasComputeWork, bool isLastView) override;
+        bool IsSubmissionComplete(const SubmissionCompletionToken&) const override;
         virtual void OnResize(u32 width, u32 height) override;
 
         // Accessors
@@ -72,6 +73,7 @@ namespace Luth
         // per view); m_ComputeTimeline tracks async-compute submits (one per view with AsyncCompute work). Per-submit
         // monotonic: multiple submits per frame mean multiple timeline values per frame, with the LAST value cached
         // in the per-frame ring below so AcquireImage knows which value gates GPU-N-2 retirement.
+        u64 m_SubmissionGeneration = 0;
         TimelineSemaphore m_FrameTimeline;
         TimelineSemaphore m_ComputeTimeline;
 

@@ -1270,6 +1270,8 @@ namespace Luth
 
         // Capture render graph snapshot for Frame Debugger panel
         auto& graphSnapshot = m_System.CaptureGraphSnapshot(rg);
+        m_System.PrepareViewProfiling(view.id, m_CurrentViewResources->generation,
+            Renderer::GetFrameData()->GetRenderFrameIndex(), rg);
 
         // Read GPU timing + pipeline stats from completed frames and fill snapshot. ReadStats must run
         // BEFORE ReadResults; they share the frame counter that ReadResults advances.

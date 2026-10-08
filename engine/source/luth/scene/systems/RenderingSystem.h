@@ -7,6 +7,7 @@
 #include "luth/renderer/DrawListBuilder.h"
 #include "luth/renderer/FrameDebugger.h"
 #include "luth/renderer/FrameTargets.h"
+#include "luth/renderer/debug/ProfilingProvenance.h"
 #include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/draw/DrawList.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
@@ -310,6 +311,9 @@ namespace Luth
         void BeginViewCapture(const RenderView& view);
         bool FinalizeViewCapture(const CaptureFinalizationInputs&, const RG::RenderGraphSnapshot&);
         RG::RenderGraphSnapshot& CaptureGraphSnapshot(const RG::RenderGraph&);
+        void PrepareViewProfiling(RenderViewId id, u64 generation, u64 renderFrame, const RG::RenderGraph& graph)
+        { m_Profiling.Prepare(id, generation, renderFrame, graph); }
+        const ProfileSubmissionProvenance* GetViewProfiling(RenderViewId id) const { return m_Profiling.Find(id); }
         void ResetPreviewCacheKeys();
         DebuggerState GetDebuggerState() const { return m_FrameDebugger.state; }
         const RG::CapturedFrame& GetCapturedFrame() const { return m_FrameDebugger.capturedFrame; }
@@ -370,6 +374,7 @@ namespace Luth
         std::unique_ptr<RenderPipeline> m_Pipeline;
         std::unique_ptr<FrameDebuggerContext> m_CaptureContext;
         RG::RenderGraphSnapshot m_GraphSnapshot;
+        ProfilingProvenance m_Profiling;
 
         // Editor-facing state.
         PostProcessSettings  m_PostProcessSettings;

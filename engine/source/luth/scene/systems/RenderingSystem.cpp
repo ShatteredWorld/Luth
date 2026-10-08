@@ -272,7 +272,7 @@ namespace Luth
         {
             QueueRecorders r = Renderer::BeginPrimaryCmd(frameIndex, viewSlot);
             const bool hasCompute = RecordView(v, r);
-            Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/false);
+            m_Profiling.Submit(v.id, Renderer::GetFrameData()->GetRenderFrameIndex(), Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/false));
             if (auto* state = m_Pipeline->GetViewResources(v.targets))
             {
                 state->cameraHistory.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
@@ -286,7 +286,7 @@ namespace Luth
 
         QueueRecorders r = Renderer::BeginPrimaryCmd(frameIndex, viewSlot);
         const bool hasCompute = RecordView(sceneView, r);
-        Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/true);
+        m_Profiling.Submit(sceneView.id, Renderer::GetFrameData()->GetRenderFrameIndex(), Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/true));
         if (auto* state = m_Pipeline->GetViewResources(sceneView.targets))
         {
             state->cameraHistory.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
@@ -372,6 +372,7 @@ namespace Luth
         auto* targets = static_cast<FrameTargets*>(const_cast<void*>(registered->targets));
         m_Pipeline->ReleaseViewResources(*targets);
         std::erase_if(m_QueuedViews, [id](const RenderView& view) { return view.id == id; });
+        m_Profiling.Release(id);
         m_Views.Release(id);
     }
 }

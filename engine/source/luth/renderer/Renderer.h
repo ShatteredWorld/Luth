@@ -48,8 +48,10 @@ namespace Luth
         // backend's SubmitView to decide whether to issue the compute submit at all.
         static QueueRecorders BeginPrimaryCmd(u64 frameIndex, u32 viewSlot);
         static bool RecordGraph(QueueRecorders recorders, RG::RenderGraph& graph, GPUTimerPool* timers = nullptr);
-        static void EndPrimaryCmdAndSubmit(QueueRecorders recorders, u64 frameIndex, u32 viewSlot,
+        static SubmissionCompletionToken EndPrimaryCmdAndSubmit(QueueRecorders recorders, u64 frameIndex, u32 viewSlot,
                                            bool hasComputeWork, bool isLastView);
+
+        static bool IsSubmissionComplete(const SubmissionCompletionToken&);
 
         static void OnResize(u32 width, u32 height);
 
