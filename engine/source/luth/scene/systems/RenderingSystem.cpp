@@ -6,6 +6,7 @@
 #include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/Renderer.h"
 #include "luth/renderer/debug/FrameDebuggerContext.h"
+#include "luth/renderer/debug/CaptureFinalization.h"
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
 #include "luth/renderer/backend/vulkan/VulkanBackend.h"
 #include "luth/assets/FileSystem.h"
@@ -70,6 +71,12 @@ namespace Luth
         m_CaptureContext->InitDebugBlitResources();
         m_CaptureContext->ResetPreviewCacheKeys();
         m_FrameDebugger.BeginCapture(VulkanContext::Get().GetDevice(), VulkanContext::Get().GetAllocator());
+    }
+
+    bool RenderingSystem::FinalizeViewCapture(const CaptureFinalizationInputs& inputs,
+        const RG::RenderGraphSnapshot& snapshot)
+    {
+        return Luth::FinalizeViewCapture(m_FrameDebugger, inputs, snapshot, m_Views);
     }
 
     void RenderingSystem::ResetPreviewCacheKeys()
