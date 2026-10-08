@@ -13,6 +13,7 @@ add_executable(LuthTests
     jobs/test_v5_inline.cpp
     jobs/test_workstealing.cpp
     jobs/test_waitcounter.cpp
+    renderer/CaptureRecordingSession.cpp
     renderer/RenderGraphSolver.cpp
     renderer/RenderBlackboard.cpp
     renderer/RenderPipelineCompiler.cpp

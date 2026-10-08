@@ -99,7 +99,7 @@ namespace Luth
                         const VkDeviceSize offset = 0; vkCmdBindVertexBuffers(cmd, 0, 1, &draw.vertex, &offset);
                         vkCmdBindIndexBuffer(cmd, draw.index, 0, VK_INDEX_TYPE_UINT32);
                         vkCmdDrawIndexed(cmd, draw.indexCount, 1, 0, 0, 0);
-                        if (debugger && debugger->state == DebuggerState::CaptureRequested)
+                        if (debugger && debugger->IsRecordingCapture())
                             debugger->CaptureDrawCall("SelectionMaskPass", draw.meshName, draw.entityName, draw.entityIndex,
                                 draw.indexCount, draw.constants, {"selectionMask", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
                                     draw.skinned, true, true, false});

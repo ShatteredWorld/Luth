@@ -26,6 +26,7 @@
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
 #include "luth/renderer/debug/FrameDebuggerContext.h"
+#include "luth/renderer/debug/CaptureRecordingSession.h"
 #include "luth/scene/systems/RenderingSystem.h"
 #include "luth/scene/systems/SystemRegistry.h"
 #include "luth/scene/systems/LightingSystem.h"
@@ -1330,46 +1331,16 @@ namespace Luth
 
             m_System.GetFrameDebugger().BeginCapture(VulkanContext::Get().GetDevice(),
                                             VulkanContext::Get().GetAllocator());
-            m_System.GetFrameDebugger().RegisterTrackedRT("SceneColor");
-            m_System.GetFrameDebugger().RegisterTrackedRT("SceneDepth");
-            // ShadowPass imports per-cascade resources named "ShadowMap.C<i>" (one per cascade, each a
-            // single-layer view onto the shared 4-layer array). Track each variant so the sink archives them;
-            // without this, cascade nodes have no primary output and the panel shows "no output preview".
-            for (u32 ci = 0; ci < k_ShadowCascadeCount; ++ci)
-                m_System.GetFrameDebugger().RegisterTrackedRT("ShadowMap.C" + std::to_string(ci));
-            m_System.GetFrameDebugger().RegisterTrackedRT("LDROutput");
-            m_System.GetFrameDebugger().RegisterTrackedRT("EntityID");
-            m_System.GetFrameDebugger().RegisterTrackedRT("BloomAFinal");
-            m_System.GetFrameDebugger().RegisterTrackedRT("GTAOLinearDepth");
-            m_System.GetFrameDebugger().RegisterTrackedRT("GTAORawAO");
-            m_System.GetFrameDebugger().RegisterTrackedRT("GTAOFinal");
-            // Slim G-buffer attachments. Archive sink copies all 4 after the pass.
-            m_System.GetFrameDebugger().RegisterTrackedRT("SlimNormal");
-            m_System.GetFrameDebugger().RegisterTrackedRT("SlimRoughness");
-            m_System.GetFrameDebugger().RegisterTrackedRT("SlimMotion");
-            m_System.GetFrameDebugger().RegisterTrackedRT("SlimMaterialID");
-            rg.SetArchiveSink(&m_System.GetFrameDebugger());
         }
 
-        // Only the capturing view needs serial Phase-1 dispatch: its lambdas push into shared FrameDebugger
-        // metadata vectors. Non-capturing views' pushes are suppressed below, so they record in parallel
-        // exactly as in non-capture frames.
-        if (view.captureRequested && m_System.GetFrameDebugger().state == DebuggerState::CaptureRequested)
-            rg.SetSerialize(true);
-
-        // Mask state to Inactive around non-capturing views' RG execute so their lambdas' BeginCapturePass /
-        // CaptureXX early-return: no pushes, no race, no need for SetSerialize.
-        const DebuggerState savedDbgState = m_System.GetFrameDebugger().state;
-        const bool suppressDebuggerMetadata = !view.captureRequested
-                                              && savedDbgState == DebuggerState::CaptureRequested;
-        if (suppressDebuggerMetadata)
-            m_System.GetFrameDebugger().state = DebuggerState::Inactive;
-
-        const bool hasComputeWork = Renderer::RecordGraph(recorders, rg, &m_GPUTimers);
-
-        if (suppressDebuggerMetadata)
-            m_System.GetFrameDebugger().state = savedDbgState;
-
+        bool hasComputeWork = false;
+        CaptureSource recordedSource = m_System.GetFrameDebugger().requestedSource;
+        {
+            CaptureRecordingSession recording(m_System.GetFrameDebugger(), rg, view.id,
+                m_CurrentViewResources ? m_CurrentViewResources->generation : 0, view.captureRequested);
+            recordedSource = recording.Source();
+            hasComputeWork = Renderer::RecordGraph(recorders, rg, &m_GPUTimers);
+        }
         // Non-primary views: transition LDR -> SHADER_READ so the scene view's ImGui pass can sample it (scene
         // view's RG already does this via ImGuiPass's builder.Read(sceneColor)).
         // Recorded into recorders.gB because the LDR is written by PBR / post-process in the gB segment; gA runs
@@ -1457,7 +1428,7 @@ namespace Luth
 
             cf.valid = true;
             // Snapshot which source produced this capture so viewport overlays survive the user toggling requestedSource between captures.
-            m_System.GetFrameDebugger().capturedSource = m_System.GetFrameDebugger().requestedSource;
+            m_System.GetFrameDebugger().capturedSource = recordedSource;
             m_System.GetFrameDebugger().state          = DebuggerState::Frozen;
         }
 

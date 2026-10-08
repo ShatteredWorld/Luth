@@ -1,4 +1,5 @@
 #include "luthpch.h"
+#include "luth/renderer/debug/CaptureRecordingSession.h"
 #include "luth/renderer/FrameDebugger.h"
 #include "luth/renderer/Renderer.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
@@ -266,7 +267,7 @@ namespace Luth
                                          const std::string& name, const std::string& activeTarget,
                                          bool isDepth, const RG::CapturedPipelineState& ps)
     {
-        if (state != DebuggerState::CaptureRequested) return;
+        if (!IsRecordingCapture()) return;
 
         RG::CapturedPass cp;
         cp.name               = name;
@@ -281,7 +282,7 @@ namespace Luth
 
     void FrameDebugger::EndCapturePass()
     {
-        if (state != DebuggerState::CaptureRequested) return;
+        if (!IsRecordingCapture()) return;
         if (capturedFrame.passes.empty()) return;
 
         auto& cp = capturedFrame.passes.back();
@@ -292,7 +293,7 @@ namespace Luth
                                         const std::string& entityName, u32 entityIndex, u32 indexCount,
                                         const ObjectPushConstants& pc, const RG::CapturedPipelineState& ps)
     {
-        if (state != DebuggerState::CaptureRequested) return;
+        if (!IsRecordingCapture()) return;
 
         RG::CapturedDrawCall cdc;
         cdc.globalIndex    = (u32)capturedFrame.drawCalls.size();
@@ -318,7 +319,7 @@ namespace Luth
                                             u32 gpuObjectIndex, VkDeviceSize indirectOffset,
                                             const RG::CapturedPipelineState& ps)
     {
-        if (state != DebuggerState::CaptureRequested) return;
+        if (!IsRecordingCapture()) return;
 
         RG::CapturedDrawCall cdc;
         cdc.globalIndex       = (u32)capturedFrame.drawCalls.size();
@@ -342,7 +343,7 @@ namespace Luth
     void FrameDebugger::CaptureComputeDispatch(const std::string& passName, const std::string& shaderName,
                                                u32 groupCountX, u32 groupCountY, u32 groupCountZ)
     {
-        if (state != DebuggerState::CaptureRequested) return;
+        if (!IsRecordingCapture()) return;
 
         RG::CapturedDrawCall cdc;
         cdc.globalIndex    = (u32)capturedFrame.drawCalls.size();
@@ -495,7 +496,8 @@ namespace Luth
     void FrameDebugger::OnPassExecuted(u32 passIdx, RG::RenderGraph& graph, VkCommandBuffer cmd,
                                        RG::QueueFamily queueFamily)
     {
-        if (state != DebuggerState::CaptureRequested) return;
+        if (!IsRecordingCapture()) return;
+        if (&m_RecordingSession->Graph() != &graph) return;
         if (archiveDevice == VK_NULL_HANDLE) return;
 
         const auto& passes = graph.GetPasses();
