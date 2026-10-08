@@ -4,6 +4,7 @@
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/features/RefractionBackdropBindings.h"
 #include "luth/renderer/features/TransparencyViewState.h"
+#include "luth/renderer/features/SortedTransparencyBindings.h"
 #include "luth/renderer/pipeline/PipelineManager.h"
 
 #include <memory>
@@ -58,6 +59,14 @@ namespace Luth
                                      RG::ResourceHandle refractionBackdrop,
                                      RG::BufferHandle indirectBufferHandle);
 
+        static std::vector<u32> SortedOrder(const DrawList&, const Mat4& view);
+        SortedTransparencyBindings PrepareSortedBindings(GeometrySubsystem&, const std::array<VkDescriptorSet, 7>&,
+            bool wireframe, bool captureDraws, const Mat4&, const VisibleDrawRange&, const DrawList&, const RenderSnapshot&,
+            TextureBindingRef fog, TextureBindingRef backdrop, const RtSubsystem*);
+        static std::array<RG::ResourceHandle, 3> AddSortedPass(RG::RenderGraph&, RG::ResourceHandle color,
+            RG::ResourceHandle picking, RG::ResourceHandle depth, const VisibleDrawRange&, u32 width, u32 height,
+            const SortedTransparencyBindings&, std::span<const RG::ResourceHandle>, std::span<const RG::BufferHandle>,
+            bool fogValid, FrameDebugger*);
         static RefractionBackdropBindings PrepareBackdropBindings(const std::shared_ptr<Texture>&, bool enabled);
         static GraphTextureRef AddBackdropCopyPass(RG::RenderGraph&, RG::ResourceHandle source,
             const RefractionBackdropBindings&);

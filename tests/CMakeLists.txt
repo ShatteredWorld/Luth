@@ -17,6 +17,7 @@ add_executable(LuthTests
     renderer/RenderBlackboard.cpp
     renderer/RenderPipelineCompiler.cpp
     renderer/RenderViewState.cpp
+    renderer/SortedTransparencyFeature.cpp
     renderer/TransparencyViewState.cpp
     renderer/RefractionBackdropFeature.cpp
     renderer/FogCompositeFeature.cpp
