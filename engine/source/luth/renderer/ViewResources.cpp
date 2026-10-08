@@ -23,11 +23,11 @@ namespace Luth
     // Per-view pool: cycled sets allocate MAX_FRAMES_IN_FLIGHT instances each. Capacity bumped on
     // every subsystem addition; silent vkAllocateDescriptorSets failure on overflow returns
     // VK_NULL_HANDLE handles and skips the draw with no log. Bump generously; pool memory is cheap.
-    static constexpr u32 k_ViewPoolMaxSets              = 205 - 9 * MAX_FRAMES_IN_FLIGHT - 3;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale + bloom pyramid sets
+    static constexpr u32 k_ViewPoolMaxSets              = 205 - 10 * MAX_FRAMES_IN_FLIGHT - 13;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale
     static constexpr u32 k_ViewPoolUniformBufferCount   = 48 - 2 * MAX_FRAMES_IN_FLIGHT;
-    static constexpr u32 k_ViewPoolStorageImageCount    = 248 - 6 * MAX_FRAMES_IN_FLIGHT - 3;  // + DiSpecular SVGF + restir Set 2 b8 + GI upscale b3 + DI upscale x2 + refl upscale b3 + bloom pyramid mips
+    static constexpr u32 k_ViewPoolStorageImageCount    = 248 - 7 * MAX_FRAMES_IN_FLIGHT - 13;  // + DiSpecular SVGF + restir Set 2 b8 + GI upscale b3 + DI upscale x2 + refl upscale b3
     static constexpr u32 k_ViewPoolStorageBufferCount   = 126 - 5 * MAX_FRAMES_IN_FLIGHT - 1;
-    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - 19 * MAX_FRAMES_IN_FLIGHT - 3;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels
+    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - 20 * MAX_FRAMES_IN_FLIGHT - 13;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels
     static constexpr u32 k_ViewPoolAccelStructCount     = 8;   // Set 0 binding 6 (TLAS) cycled per frame
 
     namespace {
@@ -79,6 +79,11 @@ namespace Luth
         vr.taa = std::move(taa);
         if (taaReplaced) vr.generation = m_System.InvalidateView(id);
 
+        auto bloom = m_PostProcess.EnsureBloomView(id, newW, newH);
+        const bool bloomReplaced = vr.bloom && vr.bloom != bloom;
+        vr.bloom = std::move(bloom);
+        if (bloomReplaced) vr.generation = m_System.InvalidateView(id);
+
         if (inserted || vr.descPool == VK_NULL_HANDLE)
         {
             // Borrow the owner's identity; native allocation does not mint a new view.
@@ -98,7 +103,6 @@ namespace Luth
             const u32 halfH = std::max(newH / 2, 1u);
             RecreateViewTextures(vr, newW, newH, halfW, halfH);
             m_PostProcess.WriteView(vr, targets);
-            m_PostProcess.WriteBloomView(vr);
             m_EditorOverlays.WriteOutlineView(vr, targets);
             m_EditorOverlays.WriteGridView(vr, targets);
             m_Rt.WriteShadowPassView(vr, targets);  // re-bind binding 2 (mask storage) to the new viewport-sized image
@@ -131,6 +135,7 @@ namespace Luth
         m_Volumetric.ReleaseView(id);
         m_Transparency.ReleaseView(id);
         m_PostProcess.ReleaseTaaView(id);
+        m_PostProcess.ReleaseBloomView(id);
         auto it = m_ViewResources.find(id.value);
         if (it == m_ViewResources.end()) return;
         DestroyViewResources(it->second);
@@ -226,17 +231,7 @@ namespace Luth
         };
 
         const VkDescriptorSetLayout ppLayout    = m_PostProcess.GetDescSetLayout();
-        const VkDescriptorSetLayout bloomLayout = m_PostProcess.GetBloomComputeLayout();
         allocCycled(m_Global.GetSetLayout(),             vr.globalDescriptorSet,   "View.Global");
-        allocCycled(bloomLayout,                         vr.bloomPrefilterDescSet, "View.BloomPrefilter");
-        for (u32 i = 0; i < ViewResources::kBloomMipCount - 1; ++i)
-        {
-            char tag[32];
-            std::snprintf(tag, sizeof(tag), "View.BloomDown%u", i);
-            allocSingle(bloomLayout, vr.bloomDownDescSet[i], tag);
-            std::snprintf(tag, sizeof(tag), "View.BloomUp%u", i);
-            allocSingle(bloomLayout, vr.bloomUpDescSet[i], tag);
-        }
         allocCycled(ppLayout,                            vr.compositeDescSet,      "View.Composite");
         allocSingle(m_EditorOverlays.GetOutlineLayout(), vr.outlineDescSet,       "View.Outline");
         allocCycled(m_EditorOverlays.GetGridLayout(),    vr.gridDescSet,          "View.Grid");
@@ -261,7 +256,6 @@ namespace Luth
         m_DenoiseDiSpec->AllocateViewSets(vr);
 
         m_PostProcess.WriteView(vr, targets);
-        m_PostProcess.WriteBloomView(vr);
         m_EditorOverlays.WriteOutlineView(vr, targets);
         m_EditorOverlays.WriteGridView(vr, targets);
         m_Lighting.WriteShadowView(vr);
@@ -306,23 +300,6 @@ namespace Luth
         const u32  reflW    = reflHalf ? halfW : fullW;
         const u32  reflH    = reflHalf ? halfH : fullH;
         vr.reflHalfCached   = reflHalf ? 1u : 0u;
-
-        // Bloom pyramid mips: RGBA16F STORAGE+SAMPLED, mip[0] at half-res then halving each level.
-        // STORAGE for the compute prefilter/down/up imageStore + SAMPLED (ctor) for the next stage's
-        // filtered taps. The ctor leaves them SHADER_READ_ONLY, so the bloomStrength==0 skip (passes
-        // not registered) keeps the composite's stale bloom binding valid; no bootstrap clear needed
-        // (every mip is fully written before read each frame; no cross-frame dependency).
-        for (u32 i = 0; i < ViewResources::kBloomMipCount; ++i)
-        {
-            const u32 mipW = std::max(halfW >> i, 1u);
-            const u32 mipH = std::max(halfH >> i, 1u);
-            vr.bloomMip[i] = std::make_shared<VKTexture>(
-                mipW, mipH, TextureFormat::RGBA16F,
-                /*arrayLayers*/ 1, /*createFlags*/ 0u, /*mipLevels*/ 1,
-                VK_IMAGE_USAGE_STORAGE_BIT);
-        }
-
-
 
         // RT sun-shadow mask: viewport-sized R8 storage. Written by rt_sun_shadows.comp on
         // AsyncCompute, sampled by pbr.frag (Set 3 binding 4) when ShadowingMode == RtShadows.
@@ -576,7 +553,7 @@ namespace Luth
     void RenderPipeline::DestroyViewResources(ViewResources& vr)
     {
         // Pool destruction frees every descriptor set allocated from it.
-        for (auto& mip : vr.bloomMip) mip.reset();
+        vr.bloom.reset();
         vr.fog.reset();
         vr.transparency.reset();
         vr.taa.reset();

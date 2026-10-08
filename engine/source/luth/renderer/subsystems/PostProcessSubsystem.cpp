@@ -273,6 +273,7 @@ namespace Luth
         LH_PROFILE_FUNCTION();
         VkDevice device = VulkanContext::Get().GetDevice();
         m_TaaStates.ReleaseAll([] { Renderer::WaitForGPU(); });
+        m_BloomStates.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_TaaResolvePipeline.reset();
         m_SlimVizPipeline.reset();
         m_PostProcessPipeline.reset();
@@ -381,12 +382,12 @@ namespace Luth
     void PostProcessSubsystem::WriteView(ViewResources& vr, FrameTargets& targets)
     {
         LH_PROFILE_FUNCTION();
-        if (vr.compositeDescSet[0] == VK_NULL_HANDLE) return;
+        if (!vr.bloom || vr.compositeDescSet[0] == VK_NULL_HANDLE) return;
 
         VkDevice device = VulkanContext::Get().GetDevice();
 
         auto sceneVk = std::static_pointer_cast<VKTexture>(targets.GetSceneColor());
-        auto mip0Vk  = std::static_pointer_cast<VKTexture>(vr.bloomMip[0]);
+        auto mip0Vk  = std::static_pointer_cast<VKTexture>(vr.bloom->mips[0]);
 
         auto makeImg = [&](VkImageView v) {
             VkDescriptorImageInfo info{};
@@ -459,19 +460,19 @@ namespace Luth
         }
     }
 
-    void PostProcessSubsystem::WriteBloomView(ViewResources& vr)
+    void PostProcessSubsystem::WriteBloomView(BloomViewState& state)
     {
         LH_PROFILE_FUNCTION();
-        if (!vr.bloomMip[0]) return;
+        if (!state.mips[0]) return;
         VkDevice device = VulkanContext::Get().GetDevice();
 
         // Per-mip image infos must outlive the single vkUpdateDescriptorSets; hold them in arrays.
         // sampled[i] = SHADER_READ_ONLY (filtered taps); storage[i] = GENERAL (imageStore dest).
-        std::array<VkDescriptorImageInfo, ViewResources::kBloomMipCount> sampled{};
-        std::array<VkDescriptorImageInfo, ViewResources::kBloomMipCount> storage{};
-        for (u32 i = 0; i < ViewResources::kBloomMipCount; ++i)
+        std::array<VkDescriptorImageInfo, BloomViewState::kMipCount> sampled{};
+        std::array<VkDescriptorImageInfo, BloomViewState::kMipCount> storage{};
+        for (u32 i = 0; i < BloomViewState::kMipCount; ++i)
         {
-            VkImageView view = std::static_pointer_cast<VKTexture>(vr.bloomMip[i])->GetImageView();
+            VkImageView view = std::static_pointer_cast<VKTexture>(state.mips[i])->GetImageView();
             sampled[i].sampler     = m_Sampler;
             sampled[i].imageView   = view;
             sampled[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -480,7 +481,7 @@ namespace Luth
         }
 
         std::vector<VkWriteDescriptorSet> writes;
-        writes.reserve(MAX_FRAMES_IN_FLIGHT + 4 * (ViewResources::kBloomMipCount - 1));
+        writes.reserve(MAX_FRAMES_IN_FLIGHT + 4 * (BloomViewState::kMipCount - 1));
         auto add = [&](VkDescriptorSet set, u32 binding, VkDescriptorType type, const VkDescriptorImageInfo* info) {
             if (set == VK_NULL_HANDLE) return;
             VkWriteDescriptorSet w{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
@@ -494,16 +495,16 @@ namespace Luth
 
         // Prefilter dest (b1 = mip0 storage); b0 source is rebound per frame by UpdateBloomCompositeInput.
         for (u32 s = 0; s < MAX_FRAMES_IN_FLIGHT; ++s)
-            add(vr.bloomPrefilterDescSet[s], 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &storage[0]);
+            add(state.prefilterSets[s], 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &storage[0]);
 
-        for (u32 i = 0; i < ViewResources::kBloomMipCount - 1; ++i)
+        for (u32 i = 0; i < BloomViewState::kMipCount - 1; ++i)
         {
             // Downsample i: mip[i] (sampled) -> mip[i+1] (storage).
-            add(vr.bloomDownDescSet[i], 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &sampled[i]);
-            add(vr.bloomDownDescSet[i], 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          &storage[i + 1]);
+            add(state.downSets[i], 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &sampled[i]);
+            add(state.downSets[i], 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          &storage[i + 1]);
             // Upsample i: mip[i+1] (sampled) -> mip[i] (storage, additive RMW).
-            add(vr.bloomUpDescSet[i],   0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &sampled[i + 1]);
-            add(vr.bloomUpDescSet[i],   1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          &storage[i]);
+            add(state.upSets[i],   0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &sampled[i + 1]);
+            add(state.upSets[i],   1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          &storage[i]);
         }
 
         if (!writes.empty())
@@ -533,10 +534,10 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-        if (!m_BloomDownPipeline || !m_BloomUpPipeline || !vr || !vr->bloomMip[0])
+        if (!m_BloomDownPipeline || !m_BloomUpPipeline || !vr || !vr->bloom || !vr->bloom->mips[0])
             return {};
 
-        constexpr u32 N = ViewResources::kBloomMipCount;
+        constexpr u32 N = BloomViewState::kMipCount;
 
         // Thread one handle per mip. Each mip is imported exactly once (at its producing pass); re-importing
         // a VkImage an upstream pass already imported aliases it onto two RG nodes with divergent state (arch
@@ -545,11 +546,11 @@ namespace Luth
         struct BloomData {};
 
         auto importMip = [&](u32 mip, RG::RenderPassBuilder& b) -> RG::ResourceHandle {
-            auto vk = std::static_pointer_cast<VKTexture>(vr->bloomMip[mip]);
+            auto vk = std::static_pointer_cast<VKTexture>(vr->bloom->mips[mip]);
             RG::TextureDesc desc;
             desc.name   = "BloomMip";
-            desc.width  = vr->bloomMip[mip]->GetWidth();
-            desc.height = vr->bloomMip[mip]->GetHeight();
+            desc.width  = vr->bloom->mips[mip]->GetWidth();
+            desc.height = vr->bloom->mips[mip]->GetHeight();
             desc.format = RG::TextureFormat::RGBA16_Float;
             RG::ResourceHandle handle = rg.ImportResource(desc,
                 (void*)vk->GetImage(), (void*)vk->GetImageView(), RG::ResourceState::Undefined);
@@ -567,11 +568,11 @@ namespace Luth
             {
                 ViewResources* vr  = m_Pipeline->GetCurrentViewResources();
                 const auto*    view = m_Pipeline->GetCurrentView();
-                if (!vr || !view || !view->targets->GetSceneColor() || !vr->bloomMip[0]) return;
+                if (!vr || !view || !view->targets->GetSceneColor() || !vr->bloom || !vr->bloom->mips[0]) return;
                 const auto& s  = m_Pipeline->GetSystem().GetPostProcessSettings();
                 const u32 srcW = view->targets->GetSceneColor()->GetWidth();
                 const u32 srcH = view->targets->GetSceneColor()->GetHeight();
-                const u32 dstW = vr->bloomMip[0]->GetWidth(), dstH = vr->bloomMip[0]->GetHeight();
+                const u32 dstW = vr->bloom->mips[0]->GetWidth(), dstH = vr->bloom->mips[0]->GetHeight();
                 const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
                 BloomDownPC pc{};
                 pc.srcTexel  = { 1.0f / float(srcW), 1.0f / float(srcH) };
@@ -579,7 +580,7 @@ namespace Luth
                 pc.threshold = s.bloomThreshold;
                 pc.knee      = 0.5f;
                 pc.prefilter = 1u;
-                RecordBloomDispatch(ctx, m_BloomDownPipeline.get(), vr->bloomPrefilterDescSet[slot],
+                RecordBloomDispatch(ctx, m_BloomDownPipeline.get(), vr->bloom->prefilterSets[slot],
                                     &pc, sizeof(pc), dstW, dstH, "BloomPrefilter", "bloom_downsample");
             });
 
@@ -595,14 +596,14 @@ namespace Luth
                 [this, i](BloomData&, RG::RenderPassContext& ctx)
                 {
                     ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                    if (!vr || !vr->bloomMip[i + 1]) return;
-                    const u32 srcW = vr->bloomMip[i]->GetWidth(),     srcH = vr->bloomMip[i]->GetHeight();
-                    const u32 dstW = vr->bloomMip[i + 1]->GetWidth(), dstH = vr->bloomMip[i + 1]->GetHeight();
+                    if (!vr || !vr->bloom || !vr->bloom->mips[i + 1]) return;
+                    const u32 srcW = vr->bloom->mips[i]->GetWidth(),     srcH = vr->bloom->mips[i]->GetHeight();
+                    const u32 dstW = vr->bloom->mips[i + 1]->GetWidth(), dstH = vr->bloom->mips[i + 1]->GetHeight();
                     BloomDownPC pc{};
                     pc.srcTexel  = { 1.0f / float(srcW), 1.0f / float(srcH) };
                     pc.dstSize   = { (i32)dstW, (i32)dstH };
                     pc.prefilter = 0u;
-                    RecordBloomDispatch(ctx, m_BloomDownPipeline.get(), vr->bloomDownDescSet[i],
+                    RecordBloomDispatch(ctx, m_BloomDownPipeline.get(), vr->bloom->downSets[i],
                                         &pc, sizeof(pc), dstW, dstH, "BloomDown", "bloom_downsample");
                 });
         }
@@ -625,14 +626,14 @@ namespace Luth
                 [this, i, radius](BloomData&, RG::RenderPassContext& ctx)
                 {
                     ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                    if (!vr || !vr->bloomMip[i + 1]) return;
-                    const u32 srcW = vr->bloomMip[i + 1]->GetWidth(), srcH = vr->bloomMip[i + 1]->GetHeight();
-                    const u32 dstW = vr->bloomMip[i]->GetWidth(),     dstH = vr->bloomMip[i]->GetHeight();
+                    if (!vr || !vr->bloom || !vr->bloom->mips[i + 1]) return;
+                    const u32 srcW = vr->bloom->mips[i + 1]->GetWidth(), srcH = vr->bloom->mips[i + 1]->GetHeight();
+                    const u32 dstW = vr->bloom->mips[i]->GetWidth(),     dstH = vr->bloom->mips[i]->GetHeight();
                     BloomUpPC pc{};
                     pc.srcTexel = { 1.0f / float(srcW), 1.0f / float(srcH) };
                     pc.dstSize  = { (i32)dstW, (i32)dstH };
                     pc.radius   = radius;
-                    RecordBloomDispatch(ctx, m_BloomUpPipeline.get(), vr->bloomUpDescSet[i],
+                    RecordBloomDispatch(ctx, m_BloomUpPipeline.get(), vr->bloom->upSets[i],
                                         &pc, sizeof(pc), dstW, dstH, "BloomUp", "bloom_upsample");
                 });
         }
@@ -829,7 +830,7 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         const u32 slot = frameAbs % MAX_FRAMES_IN_FLIGHT;
-        if (vr.bloomPrefilterDescSet[slot] == VK_NULL_HANDLE || vr.compositeDescSet[slot] == VK_NULL_HANDLE)
+        if (!vr.bloom || vr.bloom->prefilterSets[slot] == VK_NULL_HANDLE || vr.compositeDescSet[slot] == VK_NULL_HANDLE)
             return;
 
         if (!source.texture) throw std::invalid_argument("PostProcess: missing resolved HDR binding");
@@ -842,7 +843,7 @@ namespace Luth
 
         VkWriteDescriptorSet writes[2] = {};
         writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[0].dstSet          = vr.bloomPrefilterDescSet[slot];
+        writes[0].dstSet          = vr.bloom->prefilterSets[slot];
         writes[0].dstBinding      = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;

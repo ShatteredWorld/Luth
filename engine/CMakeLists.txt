@@ -58,6 +58,8 @@ add_library(Luth STATIC
     source/luth/renderer/subsystems/TransparencySorted.cpp
     source/luth/renderer/features/TaaFeature.cpp
     source/luth/renderer/subsystems/PostProcessTaa.cpp
+    source/luth/renderer/features/BloomViewState.cpp
+    source/luth/renderer/subsystems/PostProcessBloomState.cpp
     source/luth/renderer/features/TaaViewState.cpp
     source/luth/renderer/subsystems/PostProcessTaaState.cpp
     source/luth/renderer/features/TransparencyViewState.cpp

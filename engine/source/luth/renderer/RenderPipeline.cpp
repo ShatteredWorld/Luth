@@ -1397,8 +1397,8 @@ namespace Luth
         if (m_System.GetSceneTargets().GetEntityIDBuffer())m_NamedTextures["EntityID"]     = m_System.GetSceneTargets().GetEntityIDBuffer();
         // Scene-view bloom textures; Frame Debugger is scene-view-only.
         if (auto it = m_ViewResources.find(m_System.GetViews().Find(&m_System.GetSceneTargets()).value); it != m_ViewResources.end()) {
-            for (u32 i = 0; i < ViewResources::kBloomMipCount; ++i)
-                if (it->second.bloomMip[i]) m_NamedTextures["BloomMip" + std::to_string(i)] = it->second.bloomMip[i];
+            for (u32 i = 0; i < BloomViewState::kMipCount; ++i)
+                if (it->second.bloom && it->second.bloom->mips[i]) m_NamedTextures["BloomMip" + std::to_string(i)] = it->second.bloom->mips[i];
             if (it->second.fog && it->second.fog->volDensity)          m_NamedTextures["VolDensity"]           = it->second.fog->volDensity;
             if (it->second.fog && it->second.fog->volInScatter)        m_NamedTextures["VolInScatter"]         = it->second.fog->volInScatter;
             if (it->second.fog && it->second.fog->volInScatterHistA)   m_NamedTextures["VolInScatterHistA"]   = it->second.fog->volInScatterHistA;

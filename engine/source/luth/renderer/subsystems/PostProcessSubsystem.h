@@ -6,6 +6,7 @@
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 #include "luth/renderer/features/TaaViewState.h"
 #include "luth/renderer/features/TaaBindings.h"
+#include "luth/renderer/features/BloomViewState.h"
 
 #include <memory>
 #include <string>
@@ -28,6 +29,8 @@ namespace Luth
         void Shutdown();
         std::shared_ptr<TaaViewState> EnsureTaaView(RenderViewId, FrameTargets&);
         void ReleaseTaaView(RenderViewId);
+        std::shared_ptr<BloomViewState> EnsureBloomView(RenderViewId, u32 width, u32 height);
+        void ReleaseBloomView(RenderViewId);
         void InvalidateTaaView(RenderViewId);
         TaaBindings PrepareTaaBindings(const std::shared_ptr<TaaViewState>&, u64 frame,
             u64 generation, const Mat4& skyReproj, float alpha, bool enabled);
@@ -42,7 +45,7 @@ namespace Luth
 
         // Stable per-view writes for the bloom pyramid down/up sets (source mip -> b0, dest mip -> b1).
         // Written once per resize; the per-mip textures only change when the view resizes.
-        void WriteBloomView(ViewResources& vr);
+        void WriteBloomView(BloomViewState& state);
 
         // Stable per-view writes for the TAA resolve set (bindings 0/1/3: sceneColor / motion /
         // sceneDepth). Binding 2 (history-prev sampler) is rebound per-frame in WriteTaaResolvePerFrame.
@@ -82,6 +85,7 @@ namespace Luth
 
         RenderPipeline* m_Pipeline = nullptr;
         TaaViewStateStore m_TaaStates;
+        BloomViewStateStore m_BloomStates;
         u64 m_TaaShaderGeneration = 1;
 
         VkSampler             m_Sampler                 = VK_NULL_HANDLE;

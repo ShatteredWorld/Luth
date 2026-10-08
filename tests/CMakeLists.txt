@@ -19,6 +19,7 @@ add_executable(LuthTests
     renderer/RenderViewState.cpp
     renderer/SortedTransparencyFeature.cpp
     renderer/TaaFeature.cpp
+    renderer/BloomViewState.cpp
     renderer/TaaViewState.cpp
     renderer/TransparencyViewState.cpp
     renderer/RefractionBackdropFeature.cpp
