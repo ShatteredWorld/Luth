@@ -63,6 +63,7 @@ add_library(Luth STATIC
     source/luth/renderer/features/SlimVizViewState.cpp
     source/luth/renderer/subsystems/PostProcessSlimVizState.cpp
     source/luth/renderer/features/SlimVizFeature.cpp
+    source/luth/renderer/features/ClusterVizFeature.cpp
     source/luth/renderer/subsystems/PostProcessSlimViz.cpp
     source/luth/renderer/features/OutlineFeature.cpp
     source/luth/renderer/subsystems/EditorOverlayOutline.cpp
@@ -152,6 +153,7 @@ add_library(Luth STATIC
     source/luth/renderer/subsystems/GeometrySubsystem.cpp
     source/luth/renderer/subsystems/GlobalSubsystem.cpp
     source/luth/renderer/subsystems/LightingSubsystem.cpp
+    source/luth/renderer/subsystems/LightingClusterViz.cpp
     source/luth/renderer/subsystems/PathTraceSubsystem.cpp
     source/luth/renderer/subsystems/PostProcessSubsystem.cpp
     source/luth/renderer/subsystems/ReflectionsSubsystem.cpp

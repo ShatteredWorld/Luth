@@ -22,6 +22,7 @@ add_executable(LuthTests
     renderer/TaaFeature.cpp
     renderer/SlimVizViewState.cpp
     renderer/SlimVizFeature.cpp
+    renderer/ClusterVizFeature.cpp
     renderer/OutlineFeature.cpp
     renderer/SelectionMaskFeature.cpp
     renderer/GridFeature.cpp

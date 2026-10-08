@@ -8,6 +8,9 @@ namespace Luth
     struct SlimVizBindingRef { const SlimVizBindings* native = nullptr; };
     namespace SlimVizResources
     {
+        // Private intermediate in the ordered visualization chain; the final adapter exports VisualizedLDR.
+        inline constexpr ResourceKeyIdentity OutputIdentity{"SlimViz.LDR"};
+        inline constexpr RenderResourceKey<GraphTextureRef> Output{&OutputIdentity};
         inline constexpr ResourceKeyIdentity BindingsIdentity{"SlimViz.Bindings"};
         inline constexpr RenderResourceKey<SlimVizBindingRef> Bindings{&BindingsIdentity};
     }

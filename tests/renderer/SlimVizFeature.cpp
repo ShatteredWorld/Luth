@@ -60,7 +60,7 @@ namespace
                 optional(RenderResources::Roughness, sources[1]), optional(RenderResources::MotionVectors, sources[2]),
                 optional(RenderResources::MaterialID, sources[3])};
             FrameRenderInputs frame; frame.resources = inputs; ViewRenderInputs view; view.id = {1}; view.width = 640; view.height = 480;
-            const std::array exports{RenderOutputBinding::Capture(RenderResources::VisualizedLDR, output)};
+            const std::array exports{RenderOutputBinding::Capture(SlimVizResources::Output, output)};
             return pipeline->Build(graph, frame, view, scratch, exports);
         }
     };

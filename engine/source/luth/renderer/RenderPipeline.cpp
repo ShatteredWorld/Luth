@@ -18,6 +18,7 @@
 #include "luth/renderer/features/SelectionMaskFeature.h"
 #include "luth/renderer/features/OutlineFeature.h"
 #include "luth/renderer/features/SlimVizFeature.h"
+#include "luth/renderer/features/ClusterVizFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -200,15 +201,17 @@ namespace Luth
         auto transparencyCompiled = RenderPipelineCompiler{}.Compile(std::move(transparencyDefinition), {}, transparencyInputs);
         if (!transparencyCompiled.ReplaceIfValid(m_TransparencyComposition))
             throw std::runtime_error("Transparency definition failed semantic validation");
-        RenderPipelineDefinition slimVizDefinition;
-        slimVizDefinition.AddFeature<SlimVizFeature>(m_PostProcess, &m_System.GetFrameDebugger());
-        PipelineInputContract slimVizInputs;
-        slimVizInputs.resources = {{RenderResources::TonemappedLDR}, {SlimVizResources::Bindings},
+        RenderPipelineDefinition visualizationDefinition;
+        visualizationDefinition.AddFeature<SlimVizFeature>(m_PostProcess, &m_System.GetFrameDebugger());
+        visualizationDefinition.AddFeature<ClusterVizFeature>(m_Lighting, &m_System.GetFrameDebugger());
+        PipelineInputContract visualizationInputs;
+        visualizationInputs.resources = {{RenderResources::TonemappedLDR}, {SlimVizResources::Bindings}, {ClusterVizResources::Bindings},
+            {RenderResources::SurfaceDepth, ResourceOutputPresence::Optional}, {RenderResources::ClusterGrid, ResourceOutputPresence::Optional},
             {RenderResources::Normal, ResourceOutputPresence::Optional}, {RenderResources::Roughness, ResourceOutputPresence::Optional},
             {RenderResources::MotionVectors, ResourceOutputPresence::Optional}, {RenderResources::MaterialID, ResourceOutputPresence::Optional}};
-        auto slimVizCompiled = RenderPipelineCompiler{}.Compile(std::move(slimVizDefinition), {}, slimVizInputs);
-        if (!slimVizCompiled.ReplaceIfValid(m_SlimVizComposition))
-            throw std::runtime_error("SlimViz definition failed semantic validation");
+        auto visualizationCompiled = RenderPipelineCompiler{}.Compile(std::move(visualizationDefinition), {}, visualizationInputs);
+        if (!visualizationCompiled.ReplaceIfValid(m_VisualizationComposition))
+            throw std::runtime_error("Visualization definition failed semantic validation");
         RenderPipelineDefinition outlineDefinition;
         outlineDefinition.AddFeature<OutlineFeature>(m_EditorOverlays, &m_System.GetFrameDebugger());
         PipelineInputContract outlineInputs;
@@ -403,7 +406,7 @@ namespace Luth
         m_TransparencyComposition.reset();
         m_TaaComposition.reset();
         m_BloomComposition.reset();
-        m_SlimVizComposition.reset();
+        m_VisualizationComposition.reset();
         m_OutlineComposition.reset();
         m_SelectionMaskComposition.reset();
         m_GridComposition.reset();
@@ -1164,29 +1167,35 @@ namespace Luth
         const u32 slimMode = slimVizEnabled ? static_cast<u32>(shadeMode) - static_cast<u32>(ShadeMode::SlimNormal) : 0;
         const auto slimVizNative = m_PostProcess.PrepareSlimVizBindings(m_CurrentViewResources->slimViz, slimMode, 20.0f, slimVizEnabled);
         const SlimVizBindingRef slimVizBinding{&slimVizNative};
+        const std::array<VkDescriptorSet, 2> clusterVizSets{m_CurrentViewResources->clusterVizDescSet,
+            m_CurrentViewResources->lightDescSet[bloomFrame.renderFrameIndex % MAX_FRAMES_IN_FLIGHT]};
+        const auto clusterVizNative = m_Lighting.PrepareClusterVizBindings(clusterVizSets, view.targets->GetSceneDepth(),
+            clusterGridRegion, bloomView.width, bloomView.height, view.camera.nearZ, view.camera.farZ,
+            !ptEnabled && shadeMode == ShadeMode::ClustersDensity);
+        const ClusterVizBindingRef clusterVizBinding{&clusterVizNative};
         const auto optionalSlimInput = [](auto key, const GraphTextureRef& ref) {
             return ref.handle.IsValid() ? RenderInputBinding::Present(key, ref) : RenderInputBinding::Absent(key);
         };
-        const std::array slimVizResources{RenderInputBinding::Present(RenderResources::TonemappedLDR, tonemappedLdr),
+        const std::array visualizationResources{RenderInputBinding::Present(RenderResources::TonemappedLDR, tonemappedLdr),
             RenderInputBinding::Present(SlimVizResources::Bindings, slimVizBinding),
+            RenderInputBinding::Present(ClusterVizResources::Bindings, clusterVizBinding),
+            optionalSlimInput(RenderResources::SurfaceDepth, surfaceDepth),
+            clusterGrid.handle.IsValid() ? RenderInputBinding::Present(RenderResources::ClusterGrid, clusterGrid)
+                : RenderInputBinding::Absent(RenderResources::ClusterGrid),
             optionalSlimInput(RenderResources::Normal, normalOutput), optionalSlimInput(RenderResources::Roughness, roughnessOutput),
             optionalSlimInput(RenderResources::MotionVectors, motionVectors), optionalSlimInput(RenderResources::MaterialID, materialOutput)};
-        FrameRenderInputs slimVizFrame; slimVizFrame.renderFrameIndex = bloomFrame.renderFrameIndex; slimVizFrame.resources = slimVizResources;
-        GraphTextureRef slimVisualizedLdr;
-        const std::array slimVizExports{RenderOutputBinding::Capture(RenderResources::VisualizedLDR, slimVisualizedLdr)};
-        const auto slimVizBuild = m_SlimVizComposition->Build(rg, slimVizFrame, bloomView, s.GetFrameAllocator(), slimVizExports);
-        if (!slimVizBuild.success)
+        FrameRenderInputs visualizationFrame; visualizationFrame.renderFrameIndex = bloomFrame.renderFrameIndex; visualizationFrame.resources = visualizationResources;
+        GraphTextureRef visualizedStageLdr;
+        const std::array visualizationExports{RenderOutputBinding::Capture(RenderResources::VisualizedLDR, visualizedStageLdr)};
+        const auto visualizationBuild = m_VisualizationComposition->Build(rg, visualizationFrame, bloomView, s.GetFrameAllocator(), visualizationExports);
+        if (!visualizationBuild.success)
         {
-            for (const auto& diagnostic : slimVizBuild.diagnostics)
-                LH_LOG(Renderer, error, "SlimViz composition: {}", diagnostic.message);
+            for (const auto& diagnostic : visualizationBuild.diagnostics)
+                LH_LOG(Renderer, error, "Visualization composition: {}", diagnostic.message);
             return false;
         }
-        ldrOutput = slimVisualizedLdr.handle;
-        if (shadeMode == ShadeMode::ClustersDensity)
-        {
-            ldrOutput = m_Lighting.AddClusterVizPass(rg, ldrOutput, surfaceDepth.handle);
-        }
-        else if ((shadeMode == ShadeMode::VolumetricDensity ||
+        ldrOutput = visualizedStageLdr.handle;
+        if ((shadeMode == ShadeMode::VolumetricDensity ||
                   shadeMode == ShadeMode::VolumetricInScatter) &&
                  volResolvedHandle.IsValid() && m_CurrentViewResources)
         {

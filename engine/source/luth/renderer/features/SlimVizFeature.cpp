@@ -10,7 +10,7 @@ namespace Luth
         info.resources.reads = {{RenderResources::TonemappedLDR}, {SlimVizResources::Bindings},
             {RenderResources::Normal, ResourceReadRequirement::Optional}, {RenderResources::Roughness, ResourceReadRequirement::Optional},
             {RenderResources::MotionVectors, ResourceReadRequirement::Optional}, {RenderResources::MaterialID, ResourceReadRequirement::Optional}};
-        info.resources.writes = {{RenderResources::VisualizedLDR, ResourceOutputPresence::Required,
+        info.resources.writes = {{SlimVizResources::Output, ResourceOutputPresence::Required,
             ResourceKeyRef{RenderResources::TonemappedLDR}, true}};
         return info;
     }
@@ -48,6 +48,6 @@ namespace Luth
             }
             output.handle = m_Native.AddSlimVizPass(graph, input.handle, handles, *packet, m_Debugger);
         }
-        ctx.resources.Publish(RenderResources::VisualizedLDR, output);
+        ctx.resources.Publish(SlimVizResources::Output, output);
     }
 }

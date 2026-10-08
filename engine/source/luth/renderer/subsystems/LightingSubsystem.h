@@ -1,5 +1,6 @@
 #pragma once
 #include "luth/renderer/features/RenderResource.h"
+#include "luth/renderer/features/ClusterVizBindings.h"
 
 #include "luth/core/types/LuthTypes.h"
 #include "luth/core/FrameData.h"
@@ -125,9 +126,12 @@ namespace Luth
         // Cluster debug viz, gated by ShadeMode::ClustersDensity in BuildGraph. Samples SceneDepth
         // to derive the per-fragment Olsson slice, then reads the per-view cluster grid and heat-maps
         // the lights-per-cluster count over LDR.
+        ClusterVizBindings PrepareClusterVizBindings(const std::array<VkDescriptorSet, 2>& sets,
+            std::shared_ptr<Texture> depth, const Memory::GPUSubRegion& grid,
+            u32 width, u32 height, float nearZ, float farZ, bool enabled) const;
         RG::ResourceHandle AddClusterVizPass(RG::RenderGraph& rg, RG::ResourceHandle ldrInput,
-                                              RG::ResourceHandle sceneDepth);
-
+            RG::ResourceHandle sceneDepth, RG::BufferHandle grid,
+            const ClusterVizBindings& packet, FrameDebugger* debugger);
         // Per-view depth-sampler write for the ClusterViz pipeline. Stable across frames; called
         // once at AllocateViewResources time + on resize via FrameTargets re-allocation.
         void WriteClusterVizView(struct ViewResources& vr, class FrameTargets& targets);
