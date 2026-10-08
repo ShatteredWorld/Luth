@@ -498,8 +498,10 @@ namespace Luth
     RG::ResourceHandle RtRestirGiSubsystem::AddPasses(RG::RenderGraph& rg,
                                                       RG::ResourceHandle sceneDepth,
                                                       RG::ResourceHandle slimNormal,
-                                                      RG::ResourceHandle slimMotion)
+                                                      RG::ResourceHandle slimMotion, GraphBufferRef* spatialOutput)
     {
+        if (spatialOutput) *spatialOutput = {};
+        if (!m_Pipeline) return {};
         LH_PROFILE_FUNCTION();
         const RestirGiSettings& settings = m_Pipeline->GetSystem().GetRestirGiSettings();
         if (!settings.enabled || !m_InitialPipeline || !m_TemporalPipeline || !m_SpatialPipeline || !m_ShadePipeline) return {};
@@ -783,6 +785,8 @@ namespace Luth
                 vkCmdDispatch(cmd, groupX, groupY, 1);
             });
 
+        if (spatialOutput) *spatialOutput = {spatialHandle,
+            {&preflightVr->restirGiSpatial, spatialRes.offset, spatialRes.size}};
         return diHandle;
     }
 
@@ -808,59 +812,6 @@ namespace Luth
         w[1].dstSet = vr.giReservoirVizDescSet; w[1].dstBinding = 1;
         w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[1].descriptorCount = 1; w[1].pBufferInfo = &resInfo;
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 2, w, 0, nullptr);
-    }
-
-    RG::ResourceHandle RtRestirGiSubsystem::AddReservoirVizPass(RG::RenderGraph& rg,
-                                                               RG::ResourceHandle ldrInput,
-                                                               RG::ResourceHandle sceneDepth)
-    {
-        LH_PROFILE_FUNCTION();
-        if (!m_ReservoirVizPipeline) return ldrInput;
-        ViewResources* preflightVr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
-        if (!preflightVr || preflightVr->giReservoirVizDescSet == VK_NULL_HANDLE
-            || !preflightVr->restirGiSpatial.buffer) return ldrInput;
-
-        // Settings captured by value -> stable at record time. mCap approximates the max merged M
-        // (temporal cap x the spatial neighbour fan-in + the pixel's own sample).
-        const RestirGiSettings& s = m_Pipeline->GetSystem().GetRestirGiSettings();
-
-        struct VizData { RG::ResourceHandle output; RG::ResourceHandle depth; };
-        RG::ResourceHandle outHandle{};
-        rg.AddPass<VizData>("GiReservoirVizPass",
-            [&, ldrInput, sceneDepth](VizData& d, RG::RenderPassBuilder& builder) {
-                VkClearValue clearVal{ { { 0.f, 0.f, 0.f, 1.f } } };
-                d.output = builder.Write(ldrInput, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, clearVal);
-                if (sceneDepth.IsValid()) d.depth = builder.Read(sceneDepth);
-                outHandle = d.output;
-            },
-            [this, s](VizData&, RG::RenderPassContext& ctx) {
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                if (!vr || vr->giReservoirVizDescSet == VK_NULL_HANDLE) return;
-                VkCommandBuffer cmd = ctx.commandBuffer;
-
-                m_ReservoirVizPipeline->Bind(cmd);
-                VkDescriptorSet sets[1] = { vr->giReservoirVizDescSet };
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_ReservoirVizPipeline->GetLayout(), 0, 1, sets, 0, nullptr);
-
-                struct VizPC { float vx, vy, resW, resH, mCap, ageCap; } pc{};
-                pc.vx     = static_cast<float>(vr->width);
-                pc.vy     = static_cast<float>(vr->height);
-                auto giTex = std::static_pointer_cast<VKTexture>(vr->restirGiDI);
-                pc.resW   = giTex ? static_cast<float>(giTex->GetWidth())  : static_cast<float>(vr->width);
-                pc.resH   = giTex ? static_cast<float>(giTex->GetHeight()) : static_cast<float>(vr->height);
-                pc.mCap   = static_cast<float>(s.temporalMCap * (s.spatialNeighbours + 1u) + 1u);
-                pc.ageCap = static_cast<float>(s.maxReservoirAge);
-                vkCmdPushConstants(cmd, m_ReservoirVizPipeline->GetLayout(),
-                    VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(VizPC), &pc);
-
-                VkViewport vp{}; vp.width = (float)vr->width; vp.height = (float)vr->height; vp.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &vp);
-                VkRect2D sc{}; sc.extent = { vr->width, vr->height };
-                vkCmdSetScissor(cmd, 0, 1, &sc);
-                vkCmdDraw(cmd, 3, 1, 0, 0);
-            });
-        return outHandle;
     }
 
     void RtRestirGiSubsystem::WriteUpscaleView(ViewResources& vr, FrameTargets& targets)

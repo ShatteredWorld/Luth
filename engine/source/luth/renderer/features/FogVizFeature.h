@@ -7,6 +7,8 @@ namespace Luth
     struct FogVizBindingRef { const FogVizBindings* native = nullptr; };
     namespace FogVizResources
     {
+        inline constexpr ResourceKeyIdentity OutputIdentity{"FogViz.LDR"};
+        inline constexpr RenderResourceKey<GraphTextureRef> Output{&OutputIdentity};
         inline constexpr ResourceKeyIdentity BindingsIdentity{"FogViz.Bindings"};
         inline constexpr RenderResourceKey<FogVizBindingRef> Bindings{&BindingsIdentity};
     }

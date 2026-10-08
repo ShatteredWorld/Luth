@@ -65,6 +65,7 @@ add_library(Luth STATIC
     source/luth/renderer/features/SlimVizFeature.cpp
     source/luth/renderer/features/ClusterVizFeature.cpp
     source/luth/renderer/features/FogVizFeature.cpp
+    source/luth/renderer/features/rt/GiReservoirVizFeature.cpp
     source/luth/renderer/features/ClusterVizViewState.cpp
     source/luth/renderer/subsystems/PostProcessSlimViz.cpp
     source/luth/renderer/features/OutlineFeature.cpp
@@ -162,6 +163,7 @@ add_library(Luth STATIC
     source/luth/renderer/subsystems/PostProcessSubsystem.cpp
     source/luth/renderer/subsystems/ReflectionsSubsystem.cpp
     source/luth/renderer/subsystems/RtRestirGiSubsystem.cpp
+    source/luth/renderer/subsystems/RtGiReservoirViz.cpp
     source/luth/renderer/subsystems/RtRestirSubsystem.cpp
     source/luth/renderer/subsystems/RtSubsystem.cpp
     source/luth/renderer/subsystems/SkinningSubsystem.cpp

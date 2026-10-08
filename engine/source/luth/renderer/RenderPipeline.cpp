@@ -20,6 +20,7 @@
 #include "luth/renderer/features/SlimVizFeature.h"
 #include "luth/renderer/features/ClusterVizFeature.h"
 #include "luth/renderer/features/FogVizFeature.h"
+#include "luth/renderer/features/rt/GiReservoirVizFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -206,9 +207,11 @@ namespace Luth
         visualizationDefinition.AddFeature<SlimVizFeature>(m_PostProcess, &m_System.GetFrameDebugger());
         visualizationDefinition.AddFeature<ClusterVizFeature>(m_Lighting, &m_System.GetFrameDebugger());
         visualizationDefinition.AddFeature<FogVizFeature>(m_Volumetric, &m_System.GetFrameDebugger());
+        visualizationDefinition.AddFeature<GiReservoirVizFeature>(m_RestirGi);
         PipelineInputContract visualizationInputs;
         visualizationInputs.resources = {{RenderResources::TonemappedLDR}, {SlimVizResources::Bindings}, {ClusterVizResources::Bindings},
-            {FogVizResources::Bindings}, {RenderResources::FogDensity, ResourceOutputPresence::Optional},
+            {FogVizResources::Bindings}, {GiReservoirVizResources::Bindings},
+            {GiReservoirVizResources::SpatialReservoir, ResourceOutputPresence::Optional}, {RenderResources::FogDensity, ResourceOutputPresence::Optional},
             {RenderResources::ResolvedFog, ResourceOutputPresence::Optional},
             {RenderResources::SurfaceDepth, ResourceOutputPresence::Optional}, {RenderResources::ClusterGrid, ResourceOutputPresence::Optional},
             {RenderResources::Normal, ResourceOutputPresence::Optional}, {RenderResources::Roughness, ResourceOutputPresence::Optional},
@@ -793,9 +796,10 @@ namespace Luth
 
         // ReSTIR GI: 1-bounce indirect diffuse via per-pixel reservoir resampling. Returns the demodulated
         // GI image; restirParams.y gates the remodulation in pbr.frag. Invalid when disabled / no TLAS.
+        GraphBufferRef giSpatialReservoir;
         RG::ResourceHandle giDIHandle = ptEnabled
             ? RG::ResourceHandle{}
-            : m_RestirGi.AddPasses(rg, surfaceDepth.handle, slimGB.normal, slimGB.motion);
+            : m_RestirGi.AddPasses(rg, surfaceDepth.handle, slimGB.normal, slimGB.motion, &giSpatialReservoir);
 
         // Denoise the demodulated GI (second SVGF instance, DenoiserChannel::Gi). Same transparent-filter
         // contract as DI: consumes the GI handle, returns the denoised handle GeometryPass reads + Set 3 b6
@@ -1179,6 +1183,14 @@ namespace Luth
             fogVizMode ? fogVizSettings.vizScaleInScatter : fogVizSettings.vizScaleDensity, fogVizSettings.vizOpacity,
             fogVizEnabled && fogResolved.handle.IsValid());
         const FogVizBindingRef fogVizBinding{&fogVizNative};
+        const auto& giVizSettings = s.GetRestirGiSettings();
+        const auto& giVizTexture = m_CurrentViewResources->restirGiDI;
+        const auto giVizNative = m_RestirGi.PrepareReservoirVizBindings(m_CurrentViewResources->giReservoirVizDescSet,
+            view.targets->GetSceneDepth(), m_CurrentViewResources->restirGiSpatial, bloomView.width, bloomView.height,
+            giVizTexture ? giVizTexture->GetWidth() : bloomView.width, giVizTexture ? giVizTexture->GetHeight() : bloomView.height,
+            giVizSettings.temporalMCap, giVizSettings.spatialNeighbours, giVizSettings.maxReservoirAge,
+            !ptEnabled && shadeMode == ShadeMode::RestirGiReservoir && giVizSettings.enabled && giSpatialReservoir.handle.IsValid());
+        const GiReservoirVizBindingRef giVizBinding{&giVizNative};
         const auto optionalSlimInput = [](auto key, const GraphTextureRef& ref) {
             return ref.handle.IsValid() ? RenderInputBinding::Present(key, ref) : RenderInputBinding::Absent(key);
         };
@@ -1186,6 +1198,9 @@ namespace Luth
             RenderInputBinding::Present(SlimVizResources::Bindings, slimVizBinding),
             RenderInputBinding::Present(ClusterVizResources::Bindings, clusterVizBinding),
             RenderInputBinding::Present(FogVizResources::Bindings, fogVizBinding),
+            RenderInputBinding::Present(GiReservoirVizResources::Bindings, giVizBinding),
+            giSpatialReservoir.handle.IsValid() ? RenderInputBinding::Present(GiReservoirVizResources::SpatialReservoir, giSpatialReservoir)
+                : RenderInputBinding::Absent(GiReservoirVizResources::SpatialReservoir),
             optionalSlimInput(RenderResources::FogDensity, fogDensity), optionalSlimInput(RenderResources::ResolvedFog, fogResolved),
             optionalSlimInput(RenderResources::SurfaceDepth, surfaceDepth),
             clusterGrid.handle.IsValid() ? RenderInputBinding::Present(RenderResources::ClusterGrid, clusterGrid)
@@ -1203,11 +1218,6 @@ namespace Luth
             return false;
         }
         ldrOutput = visualizedStageLdr.handle;
-        if (shadeMode == ShadeMode::RestirGiReservoir && m_RestirGi.IsEnabled() && m_CurrentViewResources)
-        {
-            ldrOutput = m_RestirGi.AddReservoirVizPass(rg, ldrOutput, surfaceDepth.handle);
-        }
-
         // Selection outline + debug shapes need the raster G-buffer (entityID mask + scene depth), which
         // PT culls, so both are off in PT mode (the reference is an offline-accumulation view, not interactive).
         const auto outlineNative = m_EditorOverlays.PrepareOutlineBindings(m_CurrentViewResources->overlays,

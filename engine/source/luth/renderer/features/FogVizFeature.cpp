@@ -11,7 +11,7 @@ namespace Luth
             {RenderResources::SurfaceDepth, ResourceReadRequirement::Optional},
             {RenderResources::FogDensity, ResourceReadRequirement::Optional},
             {RenderResources::ResolvedFog, ResourceReadRequirement::Optional}};
-        info.resources.writes = {{RenderResources::VisualizedLDR, ResourceOutputPresence::Required,
+        info.resources.writes = {{FogVizResources::Output, ResourceOutputPresence::Required,
             ResourceKeyRef{ClusterVizResources::Output}, true}};
         return info;
     }
@@ -58,6 +58,6 @@ namespace Luth
                 throw std::invalid_argument("FogViz: incompatible depth or atlas extent");
             output.handle = m_Native.AddVizPass(graph, input.handle, density->handle, resolved->handle, depth->handle, *packet, m_Debugger);
         }
-        ctx.resources.Publish(RenderResources::VisualizedLDR, output);
+        ctx.resources.Publish(FogVizResources::Output, output);
     }
 }

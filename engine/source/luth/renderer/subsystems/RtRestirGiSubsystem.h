@@ -1,6 +1,7 @@
 #pragma once
 
 #include "luth/core/types/LuthTypes.h"
+#include "luth/renderer/features/rt/GiReservoirVizBindings.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 #include "luth/renderer/backend/vulkan/VulkanPipeline.h"
@@ -38,7 +39,8 @@ namespace Luth
         // irradiance) consumed by GeometryPass. No-op handle when disabled / no TLAS. slimMotion feeds
         // temporal reprojection.
         RG::ResourceHandle AddPasses(RG::RenderGraph& rg, RG::ResourceHandle sceneDepth,
-                                     RG::ResourceHandle slimNormal, RG::ResourceHandle slimMotion);
+                                     RG::ResourceHandle slimNormal, RG::ResourceHandle slimMotion,
+                                     GraphBufferRef* spatialOutput = nullptr);
 
         // Half-res GI bilateral upscale: reads the half-res denoised GI (svgfGiHalf) + full-res depth/normal
         // guides, writes the full-res svgfGiDenoised. Only wired when RestirGiSettings::halfResolution.
@@ -56,7 +58,10 @@ namespace Luth
         VkDescriptorSetLayout GetReservoirVizLayout() const { return m_ReservoirVizSetLayout; }
         void WriteReservoirVizView(ViewResources& vr, FrameTargets& targets);
         RG::ResourceHandle AddReservoirVizPass(RG::RenderGraph& rg, RG::ResourceHandle ldrInput,
-                                               RG::ResourceHandle sceneDepth);
+                                               RG::ResourceHandle sceneDepth, RG::BufferHandle reservoir, const GiReservoirVizBindings&);
+        GiReservoirVizBindings PrepareReservoirVizBindings(VkDescriptorSet, std::shared_ptr<Texture> depth,
+            const Memory::GPUSubRegion&, u32 width, u32 height, u32 resWidth, u32 resHeight,
+            u32 temporalMCap, u32 spatialNeighbours, u32 maxAge, bool enabled) const;
 
         // Per-view persistent reservoir buffer tag: Garlic large-tagged, freed only on resize. Reserved
         // high range DISJOINT from DI's 0xFFFF0000; both subsystems mint into the same heap.

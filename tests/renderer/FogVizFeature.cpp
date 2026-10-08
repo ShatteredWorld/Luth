@@ -56,7 +56,7 @@ namespace
                 resolvedPresent ? RenderInputBinding::Present(RenderResources::ResolvedFog, resolved) : RenderInputBinding::Absent(RenderResources::ResolvedFog)};
             FrameRenderInputs frame; frame.resources = inputs; frame.renderFrameIndex = bindings.renderFrameIndex;
             ViewRenderInputs view; view.id = {1}; view.width = 640; view.height = 480;
-            const std::array exports{RenderOutputBinding::Capture(RenderResources::VisualizedLDR, output)};
+            const std::array exports{RenderOutputBinding::Capture(FogVizResources::Output, output)};
             return pipeline->Build(graph, frame, view, scratch, exports);
         }
     };
