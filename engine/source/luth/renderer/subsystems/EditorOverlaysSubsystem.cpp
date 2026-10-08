@@ -1,21 +1,13 @@
 #include "luthpch.h"
 #include "luth/renderer/subsystems/EditorOverlaysSubsystem.h"
-#include "luth/renderer/subsystems/LightingSubsystem.h"
-#include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/Renderer.h"
-#include "luth/renderer/FrameTargets.h"
-#include "luth/scene/systems/RenderingSystem.h"
 #include "luth/scene/Entity.h"
 #include "luth/renderer/material/Material.h"
-#include "luth/renderer/material/MaterialSystem.h"
-#include "luth/renderer/resources/BoneMatrixBuffer.h"
 #include "luth/renderer/resources/Buffer.h"
-#include "luth/renderer/resources/Model.h"
 #include "luth/renderer/draw/DrawCommand.h"
 #include "luth/renderer/shader/ShaderLibrary.h"
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
 #include "luth/renderer/backend/vulkan/VulkanTexture.h"
-#include "luth/renderer/backend/vulkan/VulkanBuffer.h"
 
 namespace Luth
 {
@@ -42,10 +34,9 @@ namespace Luth
         }
     }
 
-    void EditorOverlaysSubsystem::Init(RenderPipeline& pipeline)
+    void EditorOverlaysSubsystem::Init()
     {
         LH_PROFILE_FUNCTION();
-        m_Pipeline = &pipeline;
 
         auto loadSpv = [](const char* relPath) -> std::vector<u32> {
             auto sh = ShaderLibrary::LoadEngine(relPath);
@@ -385,82 +376,6 @@ namespace Luth
                 CollectSelectedHandles(childVec, outHandles);
             }
         }
-    }
-
-    RG::ResourceHandle EditorOverlaysSubsystem::AddOutlinePass(
-        RG::RenderGraph& rg, RG::ResourceHandle ldrOutput, SelectionMaskOutput maskOutput, RG::ResourceHandle sceneDepth)
-    {
-        LH_PROFILE_FUNCTION();
-        const auto* view = m_Pipeline->GetCurrentView();
-        if (!m_OutlinePipeline || !view->targets->GetLDROutput()) return ldrOutput;
-
-        struct OutlinePassData {
-            RG::ResourceHandle output;
-            RG::ResourceHandle maskInput;
-            RG::ResourceHandle selDepthInput;
-            RG::ResourceHandle scnDepthInput;
-        };
-        RG::ResourceHandle outputHandle;
-
-        rg.AddPass<OutlinePassData>("OutlinePass",
-            [&, ldrOutput, maskOutput, sceneDepth](OutlinePassData& data, RG::RenderPassBuilder& builder)
-            {
-                data.output = builder.Write(ldrOutput,
-                    VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
-                data.maskInput     = builder.Read(maskOutput.mask);
-                data.selDepthInput = builder.Read(maskOutput.depth);
-                data.scnDepthInput = builder.Read(sceneDepth);
-                outputHandle = data.output;
-            },
-            [this](OutlinePassData& data, RG::RenderPassContext& ctx)
-            {
-                auto& sys = m_Pipeline->GetSystem();
-                const auto* view = m_Pipeline->GetCurrentView();
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "OutlinePass", "LDROutput", false,
-                    { "outline", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, true });
-
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                m_OutlinePipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_OutlinePipeline->GetLayout(), 0, 1, &vr->overlays->outlineSet, 0, nullptr);
-
-                u32 w = view->targets->GetLDROutput()->GetWidth();
-                u32 h = view->targets->GetLDROutput()->GetHeight();
-                VkViewport vp{}; vp.width = (float)w; vp.height = (float)h; vp.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &vp);
-                VkRect2D sc{}; sc.extent = { w, h };
-                vkCmdSetScissor(cmd, 0, 1, &sc);
-
-                // Push constants flow EditorSettings -> EditorViewportState -> CameraParams (App.cpp).
-                const auto& cp = sys.GetCameraParams();
-                struct OutlinePushConstants {
-                    float outlineWidth;
-                    float texelSizeX, texelSizeY;
-                    float outlineColorR, outlineColorG, outlineColorB, outlineColorA;
-                    float occludedAlpha;
-                } pc;
-                pc.outlineWidth     = cp.outlineWidth;
-                pc.texelSizeX       = 1.0f / (float)w;
-                pc.texelSizeY       = 1.0f / (float)h;
-                pc.outlineColorR    = cp.outlineColor.r;
-                pc.outlineColorG    = cp.outlineColor.g;
-                pc.outlineColorB    = cp.outlineColor.b;
-                pc.outlineColorA    = cp.outlineColor.a;
-                pc.occludedAlpha    = cp.outlineOccludedAlpha;
-                vkCmdPushConstants(cmd, m_OutlinePipeline->GetLayout(),
-                    VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
-
-                vkCmdDraw(cmd, 3, 1, 0, 0);
-
-                ObjectPushConstants dummyPC{};
-                sys.GetFrameDebugger().CaptureDrawCall("OutlinePass", "FullscreenTriangle", "OutlinePass", 0, 0, dummyPC,
-                    { "outline", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, true });
-                sys.GetFrameDebugger().EndCapturePass();
-            }
-        );
-        return outputHandle;
     }
 
 }

@@ -6,6 +6,7 @@
 #include "luth/renderer/features/EditorOverlayViewState.h"
 #include "luth/renderer/features/GridBindings.h"
 #include "luth/renderer/features/SelectionMaskBindings.h"
+#include "luth/renderer/features/OutlineBindings.h"
 
 #include <entt/entt.hpp>
 #include <memory>
@@ -17,9 +18,8 @@ namespace Luth
 {
     class Entity;
     class FrameTargets;
-    class RenderPipeline;
-    struct ViewResources;
-    struct SelectionMaskOutput;
+
+
     struct CameraParams;
     struct FrameDebugger;
     struct DrawList;
@@ -33,7 +33,7 @@ namespace Luth
     class EditorOverlaysSubsystem
     {
     public:
-        void Init(RenderPipeline& pipeline);
+        void Init();
         void BuildPipelines(const std::vector<VkDescriptorSetLayout>& geoLayouts);
         void Shutdown();
 
@@ -49,8 +49,10 @@ namespace Luth
             const std::array<VkDescriptorSet, 5>&, const CameraParams&, Vec2 jitter,
             const DrawList&, const RenderSnapshot&, bool enabled) const;
         SelectionMaskGraphOutput AddSelectionMaskPass(RG::RenderGraph&, const SelectionMaskBindings&, FrameDebugger*);
-        RG::ResourceHandle  AddOutlinePass(RG::RenderGraph& rg, RG::ResourceHandle ldrOutput,
-                                            SelectionMaskOutput maskOutput, RG::ResourceHandle sceneDepth);
+        OutlineBindings PrepareOutlineBindings(std::shared_ptr<EditorOverlayViewState>, const CameraParams&,
+            u32 width, u32 height, bool enabled) const;
+        RG::ResourceHandle AddOutlinePass(RG::RenderGraph&, RG::ResourceHandle color, RG::ResourceHandle mask,
+            RG::ResourceHandle selectedDepth, RG::ResourceHandle depth, const OutlineBindings&, FrameDebugger*);
         GridBindings PrepareGridBindings(std::shared_ptr<EditorOverlayViewState>, const CameraParams&, Vec2 jitter, u64 frame, bool enabled) const;
         RG::ResourceHandle AddGridPass(RG::RenderGraph&, RG::ResourceHandle color, RG::ResourceHandle depth, const GridBindings&, FrameDebugger*);
 
@@ -66,7 +68,7 @@ namespace Luth
         void BuildOutlinePipeline();
         void BuildGridPipeline();
 
-        RenderPipeline* m_Pipeline = nullptr;
+
         EditorOverlayViewStateStore m_ViewStates;
 
         // Selection mask (5-set graphics, push-constant per draw).

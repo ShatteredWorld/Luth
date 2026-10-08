@@ -16,6 +16,7 @@
 #include "luth/renderer/features/CompositeFeature.h"
 #include "luth/renderer/features/GridFeature.h"
 #include "luth/renderer/features/SelectionMaskFeature.h"
+#include "luth/renderer/features/OutlineFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -83,7 +84,7 @@ namespace Luth
         m_Global.Init(*this);
 
         BoneMatrixBuffer::Init();
-        m_EditorOverlays.Init(*this);
+        m_EditorOverlays.Init();
         m_DebugDraw.Init(*this);
         m_PostProcess.Init(*this);
 
@@ -198,6 +199,16 @@ namespace Luth
         auto transparencyCompiled = RenderPipelineCompiler{}.Compile(std::move(transparencyDefinition), {}, transparencyInputs);
         if (!transparencyCompiled.ReplaceIfValid(m_TransparencyComposition))
             throw std::runtime_error("Transparency definition failed semantic validation");
+        RenderPipelineDefinition outlineDefinition;
+        outlineDefinition.AddFeature<OutlineFeature>(m_EditorOverlays, &m_System.GetFrameDebugger());
+        PipelineInputContract outlineInputs;
+        outlineInputs.resources = {{RenderResources::VisualizedLDR}, {OutlineResources::Bindings},
+            {RenderResources::SelectionMask, ResourceOutputPresence::Optional},
+            {RenderResources::SelectionDepth, ResourceOutputPresence::Optional},
+            {RenderResources::LitDepth, ResourceOutputPresence::Optional}};
+        auto outlineCompiled = RenderPipelineCompiler{}.Compile(std::move(outlineDefinition), {}, outlineInputs);
+        if (!outlineCompiled.ReplaceIfValid(m_OutlineComposition))
+            throw std::runtime_error("Outline definition failed semantic validation");
         RenderPipelineDefinition selectionDefinition;
         selectionDefinition.AddFeature<SelectionMaskFeature>(m_EditorOverlays, &m_System.GetFrameDebugger());
         PipelineInputContract selectionInputs; selectionInputs.resources = {{SelectionMaskResources::Bindings}};
@@ -382,6 +393,7 @@ namespace Luth
         m_TransparencyComposition.reset();
         m_TaaComposition.reset();
         m_BloomComposition.reset();
+        m_OutlineComposition.reset();
         m_SelectionMaskComposition.reset();
         m_GridComposition.reset();
         m_CompositeComposition.reset();
@@ -831,10 +843,10 @@ namespace Luth
 
 
         // Real-time lit chain (geometry -> skybox -> fog composite -> transparent -> TAA). Skipped in PT; the
-        // megakernel output drives the post chain via hdrForPost below. geoOutput/maskOutput/resolvedHdr hoisted
+        // megakernel output drives the post chain via hdrForPost below. geoOutput/selection outputs/resolvedHdr hoisted
         // for the overlays + post chain; default-invalid in PT (the overlays that read them are !ptActive too).
         GeometryOutput      geoOutput{};
-        SelectionMaskOutput maskOutput{};
+        GraphTextureRef selectionMask, selectionDepth;
         GraphTextureRef resolvedHdr;
         if (!ptEnabled)
         {
@@ -904,7 +916,7 @@ namespace Luth
             selectionFrame.resources = selectionResources;
             ViewRenderInputs selectionView; selectionView.id = view.id;
             selectionView.width = view.targets->GetSceneColor()->GetWidth(); selectionView.height = view.targets->GetSceneColor()->GetHeight();
-            GraphTextureRef selectionMask, selectionDepth;
+
             const std::array selectionExports{RenderOutputBinding::Capture(RenderResources::SelectionMask, selectionMask),
                 RenderOutputBinding::Capture(RenderResources::SelectionDepth, selectionDepth)};
             const auto selectionBuild = m_SelectionMaskComposition->Build(rg, selectionFrame, selectionView,
@@ -915,7 +927,7 @@ namespace Luth
                     LH_LOG(Renderer, error, "SelectionMask composition: {}", diagnostic.message);
                 return false;
             }
-            maskOutput = {selectionMask.handle, selectionDepth.handle};
+
             const u32 skySlot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
             const std::array<VkDescriptorSet, 5> skySets{m_CurrentViewResources->globalDescriptorSet[skySlot],
                 VulkanContext::Get().GetBindlessSet().GetSet(), MaterialSystem::GetDescriptorSet(skySlot),
@@ -1159,9 +1171,32 @@ namespace Luth
 
         // Selection outline + debug shapes need the raster G-buffer (entityID mask + scene depth), which
         // PT culls, so both are off in PT mode (the reference is an offline-accumulation view, not interactive).
-        RG::ResourceHandle finalOutput = (view.drawSelectionOutline && !ptActive)
-                                         ? m_EditorOverlays.AddOutlinePass(rg, ldrOutput, maskOutput, geoOutput.depth)
-                                         : ldrOutput;
+        const auto outlineNative = m_EditorOverlays.PrepareOutlineBindings(m_CurrentViewResources->overlays,
+            view.camera, bloomView.width, bloomView.height, view.drawSelectionOutline && !ptActive);
+        const OutlineBindingRef outlineBinding{&outlineNative};
+        const GraphTextureRef visualizedLdr{ldrOutput, tonemappedLdr.binding};
+        const GraphTextureRef outlineDepth{geoOutput.depth, surfaceDepth.binding};
+        const auto optionalOutlineInput = [](auto key, const GraphTextureRef& ref) {
+            return ref.handle.IsValid() ? RenderInputBinding::Present(key, ref) : RenderInputBinding::Absent(key);
+        };
+        const std::array outlineResources{RenderInputBinding::Present(RenderResources::VisualizedLDR, visualizedLdr),
+            RenderInputBinding::Present(OutlineResources::Bindings, outlineBinding),
+            optionalOutlineInput(RenderResources::SelectionMask, selectionMask),
+            optionalOutlineInput(RenderResources::SelectionDepth, selectionDepth),
+            !ptActive ? RenderInputBinding::Present(RenderResources::LitDepth, outlineDepth)
+                : RenderInputBinding::Absent(RenderResources::LitDepth)};
+        FrameRenderInputs outlineFrame; outlineFrame.renderFrameIndex = bloomFrame.renderFrameIndex;
+        outlineFrame.resources = outlineResources;
+        GraphTextureRef outlinedLdr;
+        const std::array outlineExports{RenderOutputBinding::Capture(RenderResources::OutlinedLDR, outlinedLdr)};
+        const auto outlineBuild = m_OutlineComposition->Build(rg, outlineFrame, bloomView, s.GetFrameAllocator(), outlineExports);
+        if (!outlineBuild.success)
+        {
+            for (const auto& diagnostic : outlineBuild.diagnostics)
+                LH_LOG(Renderer, error, "Outline composition: {}", diagnostic.message);
+            return false;
+        }
+        RG::ResourceHandle finalOutput = outlinedLdr.handle;
         if (view.drawDebugShapes && !ptActive)
             finalOutput = m_DebugDraw.AddDebugDrawPass(rg, finalOutput);
         if (view.emitImGuiPass)

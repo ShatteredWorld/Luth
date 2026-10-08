@@ -170,11 +170,6 @@ namespace Luth
         RG::ResourceHandle materialID; // R16U:  bindless material slot
     };
 
-    struct SelectionMaskOutput {
-        RG::ResourceHandle mask;
-        RG::ResourceHandle depth;
-    };
-
     // ECS-glue layer for the renderer. Owns frame-level scene inputs (CameraParams, DrawList,
     // FrameTargets) and orchestrates per-frame work by invoking RenderPipeline. Lighting inputs
     // (gatherer, cascade fit, shadow params) live on LightingSystem; RenderingSystem looks it up

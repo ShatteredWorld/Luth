@@ -20,6 +20,7 @@ add_executable(LuthTests
     renderer/SortedTransparencyFeature.cpp
     renderer/BloomFeature.cpp
     renderer/TaaFeature.cpp
+    renderer/OutlineFeature.cpp
     renderer/SelectionMaskFeature.cpp
     renderer/GridFeature.cpp
     renderer/CompositeFeature.cpp

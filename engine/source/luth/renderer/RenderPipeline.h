@@ -51,7 +51,6 @@ namespace Luth
     class RenderingSystem;
     class FrameDebuggerContext;
     struct GeometryOutput;
-    struct SelectionMaskOutput;
     struct RenderSnapshot;
     namespace fs = std::filesystem;
 
@@ -486,6 +485,7 @@ namespace Luth
         std::unique_ptr<CompiledRenderPipeline> m_TransparencyComposition;
         std::unique_ptr<CompiledRenderPipeline> m_TaaComposition;
         std::unique_ptr<CompiledRenderPipeline> m_BloomComposition;
+        std::unique_ptr<CompiledRenderPipeline> m_OutlineComposition;
         std::unique_ptr<CompiledRenderPipeline> m_SelectionMaskComposition;
         std::unique_ptr<CompiledRenderPipeline> m_GridComposition;
         std::unique_ptr<CompiledRenderPipeline> m_CompositeComposition;
