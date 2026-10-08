@@ -299,64 +299,6 @@ namespace Luth
         return name != "fullscreen.slang";
     }
 
-    void PostProcessSubsystem::UpdateUBO()
-    {
-        LH_PROFILE_FUNCTION();
-        ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-        if (!vr || !vr->composite || vr->composite->sets[0] == VK_NULL_HANDLE) return;
-
-        const auto& s = m_Pipeline->GetSystem().GetPostProcessSettings();
-        PostProcessUBO ubo{};
-        ubo.bloomThreshold      = s.bloomThreshold;
-        ubo.bloomStrength       = s.bloomStrength;
-        ubo.exposure            = s.exposure;
-        ubo.contrast            = s.contrast;
-        ubo.saturation          = s.saturation;
-        // Data debug modes (normals/IDs/[0,1] channels) must not be tonemapped or graded; a negative
-        // tonemapOp tells postprocess.slang to skip straight to the sRGB encode. PT forces the lit path.
-        const ShadeMode ppShadeMode = (m_Pipeline->GetSystem().GetRenderMode() == RenderMode::PathTrace)
-                                      ? ShadeMode::Lit : m_Pipeline->GetSystem().GetShadeMode();
-        ubo.tonemapOp           = IsDataDebugMode(ppShadeMode) ? -1 : static_cast<int>(s.tonemapOp);
-        ubo.vignetteAmount      = s.vignetteAmount;
-        ubo.vignetteHardness    = s.vignetteHardness;
-        ubo.grainAmount         = s.grainAmount;
-        ubo.sharpness           = s.sharpness;
-        ubo.chromaticAberration = s.chromaticAberration;
-        ubo.time                = Time::GetTime();
-        ubo.shadowBalance       = s.shadowBalance;
-        ubo.midtoneBalance      = s.midtoneBalance;
-        ubo.highlightBalance    = s.highlightBalance;
-
-        // invariant: the composite UBO write rides one tagged-heap region against the per-frame slot.
-        auto* jobCtx = JobSystem::GetCurrentJobContext();
-        if (!jobCtx) return;
-        const u32 frameAbs = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
-        const u32 slot     = frameAbs % MAX_FRAMES_IN_FLIGHT;
-        jobCtx->GpuCache.CurrentTag = frameAbs;
-
-        auto& heap   = Memory::GPUTaggedPageAllocator::Get();
-        const u64 al = VulkanContext::Get().GetMinUniformBufferAlignment();
-        Memory::GPUSubRegion region = heap.Allocate(jobCtx->GpuCache, sizeof(PostProcessUBO), al);
-        if (!region.buffer) return;
-
-        memcpy(region.mappedPtr, &ubo, sizeof(PostProcessUBO));
-        heap.FlushRegion(region);
-
-        VkDescriptorBufferInfo bi{};
-        bi.buffer = region.buffer;
-        bi.offset = region.offset;
-        bi.range  = region.size;
-
-        if (vr->composite->sets[slot] == VK_NULL_HANDLE) return;
-        VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        write.dstSet          = vr->composite->sets[slot];
-        write.dstBinding      = 2;
-        write.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        write.descriptorCount = 1;
-        write.pBufferInfo     = &bi;
-        vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 1, &write, 0, nullptr);
-    }
-
     void PostProcessSubsystem::WriteView(ViewResources& vr, FrameTargets& targets)
     {
         LH_PROFILE_FUNCTION();
@@ -449,74 +391,6 @@ namespace Luth
 
         if (!writes.empty())
             vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
-    }
-
-    RG::ResourceHandle PostProcessSubsystem::AddCompositePass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor, RG::ResourceHandle bloomResult)
-    {
-        LH_PROFILE_FUNCTION();
-        const auto* view = m_Pipeline->GetCurrentView();
-        if (!m_PostProcessPipeline || !view->targets->GetLDROutput())
-            return sceneColor;
-
-        struct PostProcessPassData {
-            RG::ResourceHandle output;
-            RG::ResourceHandle hdrInput;
-            RG::ResourceHandle bloomInput;
-        };
-        RG::ResourceHandle outputHandle;
-        auto ldrVk = std::static_pointer_cast<VKTexture>(view->targets->GetLDROutput());
-
-        rg.AddPass<PostProcessPassData>("PostProcess",
-            [&, sceneColor, bloomResult, ldrVk](PostProcessPassData& data, RG::RenderPassBuilder& builder)
-            {
-                const auto* v = m_Pipeline->GetCurrentView();
-                RG::TextureDesc desc;
-                desc.name   = "LDROutput";
-                desc.width  = v->targets->GetLDROutput()->GetWidth();
-                desc.height = v->targets->GetLDROutput()->GetHeight();
-                desc.format = RG::TextureFormat::RGBA8_Unorm;
-
-                data.output = rg.ImportResource(desc,
-                    (void*)ldrVk->GetImage(), (void*)ldrVk->GetImageView(),
-                    RG::ResourceState::ShaderResource);
-                data.output = builder.Write(data.output);
-
-                data.hdrInput = builder.Read(sceneColor);
-                if (bloomResult.IsValid())
-                    data.bloomInput = builder.Read(bloomResult);
-
-                outputHandle = data.output;
-            },
-            [this](PostProcessPassData& data, RG::RenderPassContext& ctx)
-            {
-                auto& sys = m_Pipeline->GetSystem();
-                const auto* v = m_Pipeline->GetCurrentView();
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "PostProcess", "LDROutput", false,
-                    { "postprocess", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, false });
-
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                m_PostProcessPipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_PostProcessPipeline->GetLayout(), 0, 1, &vr->composite->sets[slot], 0, nullptr);
-
-                u32 w = v->targets->GetLDROutput()->GetWidth();
-                u32 h = v->targets->GetLDROutput()->GetHeight();
-                VkViewport vp{}; vp.width = (float)w; vp.height = (float)h; vp.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &vp);
-                VkRect2D sc{}; sc.extent = { w, h };
-                vkCmdSetScissor(cmd, 0, 1, &sc);
-                vkCmdDraw(cmd, 3, 1, 0, 0);
-
-                ObjectPushConstants dummyPC{};
-                sys.GetFrameDebugger().CaptureDrawCall("PostProcess", "FullscreenTriangle", "PostProcess", 0, 0, dummyPC,
-                    { "postprocess", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, false });
-                sys.GetFrameDebugger().EndCapturePass();
-            }
-        );
-        return outputHandle;
     }
 
     RG::ResourceHandle PostProcessSubsystem::AddSlimVizPass(RG::RenderGraph& rg, RG::ResourceHandle ldrInput,
@@ -636,18 +510,6 @@ namespace Luth
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), idx, writes, 0, nullptr);
     }
 
-    void PostProcessSubsystem::UpdateCompositeInput(CompositeViewState& state, TextureBindingRef source, u64 frameAbs)
-    {
-        const u32 slot = frameAbs % MAX_FRAMES_IN_FLIGHT;
-        if (!state.sets[slot]) return;
-        if (!source.texture) throw std::invalid_argument("PostProcess: missing resolved HDR binding");
-        VkDescriptorImageInfo image{m_Sampler, static_cast<const VKTexture*>(source.texture)->GetImageView(),
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        write.dstSet = state.sets[slot]; write.dstBinding = 0; write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; write.pImageInfo = &image;
-        vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 1, &write, 0, nullptr);
-    }
     void PostProcessSubsystem::WriteTaaResolvePerFrame(TaaViewState& state, u64 frameAbs)
     {
         LH_PROFILE_FUNCTION();

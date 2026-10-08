@@ -281,7 +281,7 @@ namespace Luth
         // Light UBO (Set 3) is hoisted to Update: view-independent, and a single global Set 3 would
         // race across views otherwise.
         m_Pipeline->UpdateGlobalUniforms(view.camera, lighting->GetCascades(), lighting->GetShadowParams());
-        m_Pipeline->UpdatePostProcessUBO();
+
         m_Pipeline->UpdateGTAOUBO();
 
         return m_Pipeline->Execute(view, recorders);

@@ -102,7 +102,7 @@ namespace Luth
         // Compatibility bridge; the volumetric domain owns allocation and lifecycle.
         std::shared_ptr<FogViewState> fog;
 
-        // Composite remains cycled; UpdateUBO rebinds its per-frame uniform slot.
+        // Composite remains cycled; native preparation rebinds its per-frame uniform slot.
         std::shared_ptr<CompositeViewState> composite;
 
 
@@ -353,7 +353,7 @@ namespace Luth
         // on this Pipeline for the remainder of the view (Execute + CaptureSnapshot read them through
         // m_FrameCascades / m_FrameShadowParams).
         void UpdateGlobalUniforms(const CameraParams& camera, const CascadeData& cascades, const DirectionalLightShadowParams& shadowParams);
-        void UpdatePostProcessUBO();
+
         void UpdateGTAOUBO();
         // Allocates this frame's Object + Indirect regions from GPUTaggedPageAllocator, populates them from
         // snapshot, and rewrites Set 5 + cull descriptors. Tagged with the absolute render-frame index so
@@ -486,6 +486,7 @@ namespace Luth
         std::unique_ptr<CompiledRenderPipeline> m_TransparencyComposition;
         std::unique_ptr<CompiledRenderPipeline> m_TaaComposition;
         std::unique_ptr<CompiledRenderPipeline> m_BloomComposition;
+        std::unique_ptr<CompiledRenderPipeline> m_CompositeComposition;
         std::unique_ptr<CompiledRenderPipeline> m_SkyComposition;
         std::unique_ptr<CompiledRenderPipeline> m_ForwardComposition;
         std::unique_ptr<IDenoiser> m_Denoise;     // DI SVGF; swappable to NRD/RELAX via the settings toggle

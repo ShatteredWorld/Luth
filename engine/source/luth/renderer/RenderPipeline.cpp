@@ -13,6 +13,7 @@
 #include "luth/renderer/features/TransparencyFeature.h"
 #include "luth/renderer/features/TaaFeature.h"
 #include "luth/renderer/features/BloomFeature.h"
+#include "luth/renderer/features/CompositeFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -195,6 +196,13 @@ namespace Luth
         auto transparencyCompiled = RenderPipelineCompiler{}.Compile(std::move(transparencyDefinition), {}, transparencyInputs);
         if (!transparencyCompiled.ReplaceIfValid(m_TransparencyComposition))
             throw std::runtime_error("Transparency definition failed semantic validation");
+        RenderPipelineDefinition compositeDefinition;
+        compositeDefinition.AddFeature<CompositeFeature>(m_PostProcess, &m_System.GetFrameDebugger());
+        PipelineInputContract compositeInputs;
+        compositeInputs.resources = {{RenderResources::GridHDR}, {RenderResources::BloomOutput, ResourceOutputPresence::Optional}, {CompositeResources::Bindings}};
+        auto compositeCompiled = RenderPipelineCompiler{}.Compile(std::move(compositeDefinition), {}, compositeInputs);
+        if (!compositeCompiled.ReplaceIfValid(m_CompositeComposition))
+            throw std::runtime_error("Composite definition failed semantic validation");
         RenderPipelineDefinition bloomDefinition;
         bloomDefinition.AddFeature<BloomFeature>(m_PostProcess, &m_System.GetFrameDebugger());
         PipelineInputContract bloomInputs;
@@ -357,6 +365,7 @@ namespace Luth
         m_TransparencyComposition.reset();
         m_TaaComposition.reset();
         m_BloomComposition.reset();
+        m_CompositeComposition.reset();
         m_SkyComposition.reset();
         m_ForwardComposition.reset();
         m_Skinning.Shutdown();
@@ -1011,9 +1020,6 @@ namespace Luth
         // Native downstream descriptors follow the actual selected stage, including cold TAA pass-through.
         const TextureBindingRef postSource = ptActive ? TextureBindingRef{m_CurrentViewResources->ptColor.get()}
             : resolvedHdr.binding;
-        if (m_CurrentViewResources)
-            m_PostProcess.UpdateCompositeInput(*m_CurrentViewResources->composite, postSource,
-                Renderer::GetFrameData()->GetRenderFrameIndex());
         // HDR source for the post chain: the PT megakernel output replaces the raster sceneColor when PT
         // is active (the realtime chain is not registered). Grid is editor-overlay-only -> off in PT.
         RG::ResourceHandle hdrForPost  = ptActive ? ptColorHandle : resolvedHdr.handle;
@@ -1041,11 +1047,34 @@ namespace Luth
                 LH_LOG(Renderer, error, "Bloom composition: {}", diagnostic.message);
             return false;
         }
-        const auto bloomResult = bloomOutput.handle;
+
         RG::ResourceHandle gridColor   = (view.drawGrid && !ptActive)
                                          ? m_EditorOverlays.AddGridPass(rg, hdrForPost, geoOutput.depth)
                                          : hdrForPost;
-        RG::ResourceHandle ldrOutput = m_PostProcess.AddCompositePass(rg, gridColor, bloomResult);
+        const auto compositeParameters = MakeCompositeUniforms(bloomSettings,
+            IsDataDebugMode(s.GetRenderMode() == RenderMode::PathTrace ? ShadeMode::Lit : shadeMode),
+            bloomOutput.handle.IsValid(), Time::GetTime());
+        const auto compositeNative = m_PostProcess.PrepareCompositeBindings(m_CurrentViewResources->composite,
+            postSource, bloomOutput.binding, view.targets->GetLDROutput(), bloomFrame.renderFrameIndex, compositeParameters);
+        const CompositeBindingRef compositeBinding{&compositeNative};
+        const GraphTextureRef gridStage{gridColor, postSource};
+        const std::array compositeResources{RenderInputBinding::Present(RenderResources::GridHDR, gridStage),
+            bloomOutput.handle.IsValid() ? RenderInputBinding::Present(RenderResources::BloomOutput, bloomOutput)
+                : RenderInputBinding::Absent(RenderResources::BloomOutput),
+            RenderInputBinding::Present(CompositeResources::Bindings, compositeBinding)};
+        FrameRenderInputs compositeFrame; compositeFrame.renderFrameIndex = bloomFrame.renderFrameIndex;
+        compositeFrame.resources = compositeResources;
+        GraphTextureRef tonemappedLdr;
+        const std::array compositeExports{RenderOutputBinding::Capture(RenderResources::TonemappedLDR, tonemappedLdr)};
+        const auto compositeBuild = m_CompositeComposition->Build(rg, compositeFrame, bloomView,
+            s.GetFrameAllocator(), compositeExports);
+        if (!compositeBuild.success)
+        {
+            for (const auto& diagnostic : compositeBuild.diagnostics)
+                LH_LOG(Renderer, error, "Composite composition: {}", diagnostic.message);
+            return false;
+        }
+        RG::ResourceHandle ldrOutput = tonemappedLdr.handle;
 
         // Slim G-buffer ShadeMode toggles overwrite LDROutput with a decoded attachment. Mode index = enum offset
         // from ShadeMode::SlimNormal (0..3). Motion scale hardcoded: the frame-debugger panel exposes a slider for
@@ -1495,7 +1524,7 @@ namespace Luth
         return m_Geometry.EnsureMaterialRegistered(material);
     }
 
-    void RenderPipeline::UpdatePostProcessUBO() { m_PostProcess.UpdateUBO(); }
+
     void RenderPipeline::UpdateGTAOUBO()
     {
         if (!m_CurrentViewResources) return;

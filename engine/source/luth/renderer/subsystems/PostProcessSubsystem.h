@@ -7,7 +7,7 @@
 #include "luth/renderer/features/TaaViewState.h"
 #include "luth/renderer/features/TaaBindings.h"
 #include "luth/renderer/features/BloomBindings.h"
-#include "luth/renderer/features/CompositeViewState.h"
+#include "luth/renderer/features/CompositeBindings.h"
 
 #include <memory>
 #include <string>
@@ -21,8 +21,8 @@ namespace Luth
     struct SlimGBufferOutput;
     struct FrameDebugger;
 
-    // Owns the PostProcess descriptor layout/sampler, the bloom extract + bloom blur + tonemap-composite
-    // pipelines, and the per-frame PP UBO upload (rebound to all 4 PP descriptor sets in one batched write).
+    // Owns the PostProcess descriptor layout/sampler, bloom pyramid and tonemap-composite
+    // pipelines, and native per-view preparation of the cycled PP uniform/source bindings.
     class PostProcessSubsystem
     {
     public:
@@ -41,9 +41,6 @@ namespace Luth
 
         bool OnShaderReloaded(const std::string& name, const std::vector<u32>& spv);
 
-        // Per-render-stage rebind of the shared PostProcess UBO (binding 2 of all 4 PP sets).
-        void UpdateUBO();
-
         // Stable slim visualization bindings; composite bindings belong to CompositeViewState.
         void WriteView(ViewResources& vr, FrameTargets& targets);
 
@@ -56,14 +53,15 @@ namespace Luth
         void WriteTaaResolveView(TaaViewState& state, FrameTargets& targets);
         void WriteTaaResolvePerFrame(TaaViewState& state, u64 frameAbs);
 
-        // Rebind downstream descriptors to the actual HDR stage selected by composition.
-        void UpdateCompositeInput(CompositeViewState& state, TextureBindingRef source, u64 frameAbs);
-
         // Render-graph contributions.
         BloomBindings PrepareBloomBindings(const std::shared_ptr<BloomViewState>&, TextureBindingRef source,
             u64 frame, float threshold, float radius, bool enabled);
         RG::ResourceHandle AddBloomPasses(RG::RenderGraph&, RG::ResourceHandle, const BloomBindings&, FrameDebugger*);
-        RG::ResourceHandle AddCompositePass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor, RG::ResourceHandle bloomResult);
+        CompositeBindings PrepareCompositeBindings(const std::shared_ptr<CompositeViewState>&,
+            TextureBindingRef source, TextureBindingRef bloom, const std::shared_ptr<Texture>& output,
+            u64 frame, const PostProcessUBO&);
+        RG::ResourceHandle AddCompositePass(RG::RenderGraph&, RG::ResourceHandle, RG::ResourceHandle,
+            const CompositeBindings&, FrameDebugger*);
         // TAA Resolve (Karis14 YCoCg-clip recipe). Reads sceneColor + motion + sceneDepth + the
         // parity-picked history-prev (bound by WriteTaaResolvePerFrame); writes the parity-picked
         // history-curr. Returned handle is what downstream bloom + grid + composite consume.
