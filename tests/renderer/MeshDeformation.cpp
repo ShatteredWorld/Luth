@@ -3,6 +3,7 @@
 #include "luth/renderer/backend/vulkan/VulkanAccelerationStructure.h"
 #include "luth/renderer/resources/Mesh.h"
 #include <limits>
+#include "luth/renderer/backend/vulkan/TlasBuilder.h"
 using namespace Luth;
 
 TEST_CASE("MeshDeformation: interleaved current and previous slices preserve absolute frame parity")
@@ -127,4 +128,60 @@ TEST_CASE("MeshDeformation: raster bootstrap aliases current and cold preparatio
         CHECK_FALSE(cold.IsReady(std::numeric_limits<u64>::max()));
         CHECK(cold.PreviousForRaster(true) == 0);
     }
+}
+
+TEST_CASE("MeshDeformation: prepared TLAS empty and reuse preserve paired bindings without recording")
+{
+    const std::unordered_map<UUID, u32, UUIDHash> slots;
+    const auto empty = TlasBuilder::PrepareTlas({}, 0, {}, slots, 7, false);
+    CHECK(empty.result.tlas == VK_NULL_HANDLE);
+    CHECK(empty.result.geomTableBDA == 0);
+    CHECK(empty.result.instanceCount == 0);
+    CHECK(empty.result.blasReadyGen == 7);
+    CHECK_FALSE(empty.command);
+    CHECK_NOTHROW(empty.Record(VK_NULL_HANDLE));
+    auto prior = empty.result;
+    prior.tlas = reinterpret_cast<VkAccelerationStructureKHR>(uintptr_t(17));
+    prior.geomTableBDA = 29;
+    const auto reused = TlasBuilder::PrepareTlas({}, 1, prior, slots, 7, false);
+    CHECK(reused.result.reused);
+    CHECK(reused.result.tlas == prior.tlas);
+    CHECK(reused.result.geomTableBDA == prior.geomTableBDA);
+    CHECK_FALSE(reused.command);
+    CHECK_NOTHROW(reused.Record(VK_NULL_HANDLE));
+    const auto changed = TlasBuilder::PrepareTlas({}, 2, prior, slots, 8, false);
+    CHECK_FALSE(changed.result.reused);
+    CHECK(changed.result.tlas == VK_NULL_HANDLE);
+    CHECK(changed.result.geomTableBDA == 0);
+    CHECK(changed.result.blasReadyGen == 8);
+}
+TEST_CASE("MeshDeformation: prepared TLAS copies retain native build input addresses")
+{
+    static const TlasBuildCommand* expected;
+    static u32 calls;
+    calls = 0;
+    auto command = std::make_shared<TlasBuildCommand>();
+    expected = command.get();
+    command->buildInfo.pGeometries = &command->geom;
+    command->range.primitiveCount = 3;
+    command->record = [](VkCommandBuffer, uint32_t count,
+        const VkAccelerationStructureBuildGeometryInfoKHR* info,
+        const VkAccelerationStructureBuildRangeInfoKHR* const* ranges) {
+        ++calls;
+        CHECK(count == 1);
+        CHECK(info == &expected->buildInfo);
+        CHECK(info->pGeometries == &expected->geom);
+        CHECK(ranges == &expected->rangePtr);
+        CHECK(*ranges == &expected->range);
+        CHECK((*ranges)->primitiveCount == 3);
+    };
+    PreparedTlasBuild prepared{{}, command};
+    const std::weak_ptr<const TlasBuildCommand> lifetime = command;
+    auto retained = prepared;
+    command.reset(); prepared = {};
+    CHECK_FALSE(lifetime.expired());
+    retained.Record(VK_NULL_HANDLE);
+    CHECK(calls == 1);
+    retained = {};
+    CHECK(lifetime.expired());
 }
