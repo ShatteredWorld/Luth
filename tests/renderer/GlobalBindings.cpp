@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 #include "luth/renderer/backend/vulkan/VulkanGlobalBindings.h"
 #include "luth/renderer/backend/vulkan/VulkanLightBindings.h"
+#include "luth/renderer/backend/vulkan/VulkanViewPool.h"
 using namespace Luth;
 
 TEST_CASE("GlobalBindings: raster omits TLAS while shared bindings retain the hybrid ABI")
@@ -30,8 +31,6 @@ TEST_CASE("GlobalBindings: raster omits TLAS while shared bindings retain the hy
     CHECK(raster.bindings[5].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
     for (uint32_t i = 1; i <= 4; ++i)
         CHECK(raster.bindings[i].descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-    CHECK(VulkanGlobalBindings::ViewPoolTypeCount(false) == 4);
-    CHECK(VulkanGlobalBindings::ViewPoolTypeCount(true) == 5);
 }
 
 TEST_CASE("GlobalBindings: query-only TLAS visibility excludes RT pipeline stages")
@@ -72,5 +71,37 @@ TEST_CASE("GlobalBindings: raster lighting prefix excludes hybrid surface signal
         CHECK(hybrid.bindings[i].stageFlags == (VK_SHADER_STAGE_FRAGMENT_BIT | (i == 4 ? VK_SHADER_STAGE_RAYGEN_BIT_KHR : 0)));
         CHECK(query.bindings[i].stageFlags == VK_SHADER_STAGE_FRAGMENT_BIT);
         CHECK(hybrid.flags[i] == 0);
+    }
+}
+TEST_CASE("GlobalBindings: raster view pool fits shared layouts without RT descriptor types")
+{
+    for (const uint32_t frames : {2u, 3u})
+    {
+        const VulkanViewPool raster(false, frames), hybrid(true, frames);
+        const VulkanGlobalBindings global;
+        const VulkanLightBindings light;
+        REQUIRE(raster.count == 3);
+        CHECK(raster.maxSets == 4 * frames);
+        for (uint32_t i = 0; i < raster.count; ++i)
+        {
+            const auto& size = raster.sizes[i];
+            CHECK(size.descriptorCount > 0);
+            CHECK(size.type != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+            CHECK(size.type != VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
+            uint32_t required = size.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ? 7 : 0; // Cluster build + assignment.
+            for (uint32_t b = 0; b < global.count; ++b)
+                if (global.bindings[b].descriptorType == size.type) required += global.bindings[b].descriptorCount;
+            for (uint32_t b = 0; b < light.count; ++b)
+                if (light.bindings[b].descriptorType == size.type) required += light.bindings[b].descriptorCount;
+            CHECK(size.descriptorCount == required * frames);
+        }
+        CHECK(hybrid.count == 5);
+        CHECK(hybrid.maxSets == 205 - 12 * frames - 16);
+        CHECK(hybrid.sizes[0].descriptorCount == 48 - 4 * frames);
+        CHECK(hybrid.sizes[1].descriptorCount == 248 - 7 * frames - 13);
+        CHECK(hybrid.sizes[2].descriptorCount == 317 - 23 * frames - 21);
+        CHECK(hybrid.sizes[3].descriptorCount == 126 - 5 * frames - 1);
+        CHECK(hybrid.sizes[4].type == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
+        CHECK(hybrid.sizes[4].descriptorCount == 8);
     }
 }

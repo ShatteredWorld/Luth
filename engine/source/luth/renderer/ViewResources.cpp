@@ -1,5 +1,5 @@
 #include "luthpch.h"
-#include "luth/renderer/backend/vulkan/VulkanGlobalBindings.h"
+#include "luth/renderer/backend/vulkan/VulkanViewPool.h"
 #include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/Renderer.h"
 #include "luth/renderer/subsystems/GlobalSubsystem.h"
@@ -24,12 +24,6 @@ namespace Luth
     // Per-view pool: cycled sets allocate MAX_FRAMES_IN_FLIGHT instances each. Capacity bumped on
     // every subsystem addition; silent vkAllocateDescriptorSets failure on overflow returns
     // VK_NULL_HANDLE handles and skips the draw with no log. Bump generously; pool memory is cheap.
-    static constexpr u32 k_ViewPoolMaxSets              = 205 - 12 * MAX_FRAMES_IN_FLIGHT - 16;  // + DiSpecular SVGF x7 + GI upscale + DI upscale x2 + refl upscale
-    static constexpr u32 k_ViewPoolUniformBufferCount   = 48 - 4 * MAX_FRAMES_IN_FLIGHT;
-    static constexpr u32 k_ViewPoolStorageImageCount    = 248 - 7 * MAX_FRAMES_IN_FLIGHT - 13;  // + DiSpecular SVGF + restir Set 2 b8 + GI upscale b3 + DI upscale x2 + refl upscale b3
-    static constexpr u32 k_ViewPoolStorageBufferCount   = 126 - 5 * MAX_FRAMES_IN_FLIGHT - 1;
-    static constexpr u32 k_ViewPoolCombinedSamplerCount = 317 - 23 * MAX_FRAMES_IN_FLIGHT - 21;  // + DiSpecular SVGF + restir Set 2 b7 + GI upscale b0-b2 + DI upscale x2 b0-b2 + refl upscale b0-b2 + SVGF reproject b10 / atrous b5 x4 channels
-    static constexpr u32 k_ViewPoolAccelStructCount     = 8;   // Set 0 binding 6 (TLAS) cycled per frame
 
     namespace {
         // Build the per-view Set 0 write context from RP-side state.
@@ -109,9 +103,9 @@ namespace Luth
             AllocateViewResources(vr, targets);
         }
         else if (vr.width != newW || vr.height != newH ||
-                 vr.giHalfCached != (m_System.GetRestirGiSettings().halfResolution ? 1u : 0u) ||
-                 vr.diHalfCached != (m_System.GetRestirSettings().halfResolution ? 1u : 0u) ||
-                 vr.reflHalfCached != (m_System.GetReflectionsSettings().halfResolution ? 1u : 0u))
+                 (m_RtNativeInitialized && (vr.giHalfCached != (m_System.GetRestirGiSettings().halfResolution ? 1u : 0u) ||
+                   vr.diHalfCached != (m_System.GetRestirSettings().halfResolution ? 1u : 0u) ||
+                   vr.reflHalfCached != (m_System.GetReflectionsSettings().halfResolution ? 1u : 0u))))
         {
             // Stable descriptor slots may still be referenced by earlier submissions.
             Renderer::WaitForGPU();
@@ -192,23 +186,12 @@ namespace Luth
     {
         VkDevice device = VulkanContext::Get().GetDevice();
 
-        VkDescriptorPoolSize poolSizes[5] = {};
-        poolSizes[0].type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        poolSizes[0].descriptorCount = k_ViewPoolUniformBufferCount;
-        poolSizes[1].type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        poolSizes[1].descriptorCount = k_ViewPoolStorageImageCount;
-        poolSizes[2].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSizes[2].descriptorCount = k_ViewPoolCombinedSamplerCount;
-        poolSizes[3].type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        poolSizes[3].descriptorCount = k_ViewPoolStorageBufferCount;
-        poolSizes[4].type            = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-        poolSizes[4].descriptorCount = k_ViewPoolAccelStructCount;
-
+        const VulkanViewPool budget(m_RtNativeInitialized, MAX_FRAMES_IN_FLIGHT);
         VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         poolInfo.flags         = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
-        poolInfo.maxSets       = k_ViewPoolMaxSets;
-        poolInfo.poolSizeCount = VulkanGlobalBindings::ViewPoolTypeCount(VulkanContext::Get().SupportsRayTracing());
-        poolInfo.pPoolSizes    = poolSizes;
+        poolInfo.maxSets       = budget.maxSets;
+        poolInfo.poolSizeCount = budget.count;
+        poolInfo.pPoolSizes    = budget.sizes.data();
         vkCreateDescriptorPool(device, &poolInfo, nullptr, &vr.descPool);
 
         // Set 0 UBO bindings (0 + 5) and Grid set binding 0 are written per render-stage
@@ -301,6 +284,9 @@ namespace Luth
 
     void RenderPipeline::RecreateViewTextures(ViewResources& vr, u32 fullW, u32 fullH, u32 halfW, u32 halfH)
     {
+        // This remaining compatibility allocation group is entirely RT-owned.
+        if (!m_RtNativeInitialized) return;
+
         // Half-res GI (RestirGiSettings::halfResolution): GI reservoirs + restirGiDI + svgfGi* history
         // allocate at half extent; svgfGiDenoised stays full (the bilateral-upscale output). giHalfCached
         // lets EnsureViewResources detect a runtime toggle and realloc (like other allocation settings).

@@ -31,7 +31,5 @@ namespace Luth
             }
         }
         bool HasTlasBinding() const { return count == 7; }
-        static constexpr uint32_t ViewPoolTypeCount(bool accelerationStructuresEnabled)
-        { return accelerationStructuresEnabled ? 5 : 4; }
     };
 }
