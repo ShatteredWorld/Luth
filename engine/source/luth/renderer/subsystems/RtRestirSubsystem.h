@@ -3,6 +3,7 @@
 #include "luth/core/types/LuthTypes.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
+#include "luth/renderer/features/rt/RestirDiViewState.h"
 
 #include <memory>
 #include <string>
@@ -17,7 +18,7 @@ namespace Luth
     // ReSTIR DI (Bitterli 2020): spatiotemporal reservoir resampling for the point lights.
     // Owns 4 compute pipelines (initial RIS+visibility, temporal reuse, spatial reuse + final
     // visibility, demodulated shade) + the pass-local descriptor layout. Single scratch reservoir +
-    // spatial/history buffer + DI image are per-view (allocated in ViewResources); temporal history
+    // spatial/history buffer + DI images are owned by the DI view-state store; temporal history
     // is the previous frame's SPATIAL output. rayQuery-in-compute (initial + spatial) reads the TLAS
     // via Set 0 binding 6. see arch/rendering-pipeline.md
     class RtRestirSubsystem
@@ -30,7 +31,9 @@ namespace Luth
 
         // Stable per-view Set 2 writes: b0 depth, b1 slimNormal, b2 scratch reservoir, b3 DI image,
         // b4 history (= the spatial buffer), b5 motion, b6 spatial output (same buffer as b4).
-        void WriteView(ViewResources& vr, FrameTargets& targets);
+        std::shared_ptr<RestirDiViewState> EnsureView(RenderViewId, const FrameTargets&, bool half);
+        void ReleaseView(RenderViewId);
+        void WriteView(RestirDiViewState&, const FrameTargets&);
 
         // Initial RIS + visibility, temporal reuse, spatial reuse, then demodulated shade. Returns the
         // demodulated diffuse (di) + specular (spec) DI image handles consumed by GeometryPass +
@@ -53,7 +56,10 @@ namespace Luth
 
         // Per-view persistent reservoir buffer tag: Garlic large-tagged, freed only on resize.
         // Reserved high range, disjoint from the per-frame FreeTag(N-2) sweep.
-        u32 NextReservoirTag() { return m_NextTag++; }
+        u32 NextReservoirTag() {
+            if (m_NextTag >= 0xFFFF8000u) throw std::overflow_error("ReSTIR DI reservoir tags exhausted");
+            return m_NextTag++;
+        }
 
         // Backed by RestirSettings::enabled on the RenderingSystem (the editor toggles the setting).
         // GlobalSubsystem reads IsEnabled() to gate restirParams.x; keep it pointing at the setting
@@ -82,5 +88,7 @@ namespace Luth
         std::vector<u32> m_UpscaleSpv;
 
         u32  m_NextTag = 0xFFFF0000u;  // reserved range for persistent reservoir allocations
+        RestirDiViewStates m_Views;
+        u64 m_NextSourceGeneration = 1;
     };
 }

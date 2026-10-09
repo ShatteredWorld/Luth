@@ -71,8 +71,8 @@ TEST_CASE("RtSunShadowViewState: local pool removes exactly its descriptors from
         CHECK(local.sizes[0].descriptorCount == 2 * frames);
         CHECK(local.sizes[1].type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         CHECK(local.sizes[1].descriptorCount == frames);
-        CHECK(shared.maxSets + local.maxSets == 205 - 12 * frames - 16);
-        CHECK(shared.sizes[1].descriptorCount + local.sizes[1].descriptorCount == 248 - 7 * frames - 13);
-        CHECK(shared.sizes[2].descriptorCount + local.sizes[0].descriptorCount == 317 - 23 * frames - 21);
+        CHECK(shared.maxSets + local.maxSets == 205 - 13 * frames - 16);
+        CHECK(shared.sizes[1].descriptorCount + local.sizes[1].descriptorCount == 248 - 9 * frames - 13);
+        CHECK(shared.sizes[2].descriptorCount + local.sizes[0].descriptorCount == 317 - 27 * frames - 21);
     }
 }

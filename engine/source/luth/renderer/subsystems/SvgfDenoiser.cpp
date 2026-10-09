@@ -90,7 +90,7 @@ namespace Luth
                     && std::static_pointer_cast<VKTexture>(vr.svgfDiSpecColorHist[0])->GetWidth()
                        < std::static_pointer_cast<VKTexture>(vr.svgfDiSpecDenoised)->GetWidth();
                 return { vr.svgfDiSpecColorHist, vr.svgfDiSpecMoments, vr.svgfDiSpecGeom, vr.svgfDiSpecAtrous,
-                         diSpecHalf ? &vr.svgfDiSpecHalf : &vr.svgfDiSpecDenoised, &vr.restirDISpec,
+                         diSpecHalf ? &vr.svgfDiSpecHalf : &vr.svgfDiSpecDenoised, vr.restirDi ? &vr.restirDi->restirDISpec : nullptr,
                          &vr.svgfDiSpecPassthroughDescSet, vr.svgfDiSpecReprojectDescSet,
                          vr.svgfDiSpecMomentsDescSet, vr.svgfDiSpecAtrousDescSet };
             }
@@ -111,7 +111,7 @@ namespace Luth
                 && std::static_pointer_cast<VKTexture>(vr.svgfColorHist[0])->GetWidth()
                    < std::static_pointer_cast<VKTexture>(vr.svgfDenoised)->GetWidth();
             return { vr.svgfColorHist, vr.svgfMoments, vr.svgfGeom, vr.svgfAtrous,
-                     diHalf ? &vr.svgfDiHalf : &vr.svgfDenoised, &vr.restirDI,
+                     diHalf ? &vr.svgfDiHalf : &vr.svgfDenoised, vr.restirDi ? &vr.restirDi->restirDI : nullptr,
                      &vr.svgfPassthroughDescSet, vr.svgfReprojectDescSet,
                      vr.svgfMomentsDescSet, vr.svgfAtrousDescSet };
         }
@@ -434,7 +434,7 @@ namespace Luth
         };
 
         // Passthrough set: b0 noisy input sampler, b1 denoised storage.
-        if (*c.passthroughSet != VK_NULL_HANDLE && *c.noisy && *c.denoised)
+        if (*c.passthroughSet != VK_NULL_HANDLE && c.noisy && *c.noisy && *c.denoised)
         {
             VkDescriptorImageInfo diIn{ m_Sampler, viewOf(*c.noisy), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
             VkDescriptorImageInfo outImg{ VK_NULL_HANDLE, viewOf(*c.denoised), VK_IMAGE_LAYOUT_GENERAL };
@@ -454,7 +454,7 @@ namespace Luth
         // is written for every channel (layout parity); only the motion variant's shader reads it.
         const std::shared_ptr<Texture> b3Tex = (m_Channel == DenoiserChannel::Reflections)
             ? targets.GetSlimRoughness() : targets.GetSlimMotion();
-        if (c.reprojectSet[0] != VK_NULL_HANDLE && *c.noisy
+        if (c.reprojectSet[0] != VK_NULL_HANDLE && c.noisy && *c.noisy
             && c.colorHist[0] && c.moments[0] && c.geom[0]
             && targets.GetSceneDepth() && targets.GetSlimNormal() && b3Tex
             && targets.GetSlimMaterialID())

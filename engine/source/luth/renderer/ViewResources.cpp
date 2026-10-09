@@ -100,6 +100,12 @@ namespace Luth
         vr.rtShadow = std::move(shadow);
         if (shadowReplaced) vr.generation = m_System.InvalidateView(id);
 
+        auto restirDi = m_RtNativeInitialized ? m_Restir.EnsureView(id, targets,
+            m_System.GetRestirSettings().halfResolution) : nullptr;
+        const bool restirDiReplaced = vr.restirDi && vr.restirDi != restirDi;
+        vr.restirDi = std::move(restirDi);
+        if (restirDiReplaced) vr.generation = m_System.InvalidateView(id);
+
         if (inserted || vr.descPool == VK_NULL_HANDLE)
         {
             // Borrow the owner's identity; native allocation does not mint a new view.
@@ -122,7 +128,6 @@ namespace Luth
 
             if (m_RtNativeInitialized)
             {
-                m_Restir.WriteView(vr, targets);        // re-bind Set 2 depth/normal + reservoir + new DI image
                 m_RestirGi.WriteView(vr, targets);      // re-bind GI Set 2 depth/normal + reservoir + new GI image
                 m_RestirGi.WriteReservoirVizView(vr, targets);  // re-bind GI reservoir-viz depth + spatial reservoir
                 m_RestirGi.WriteUpscaleView(vr, targets);       // re-bind GI upscale half-input + full output
@@ -144,6 +149,10 @@ namespace Luth
         vr.height = newH;
         // Source views can change without an extent change. Refresh the consumer's mask binding.
         if (shadowReplaced) m_Lighting.WriteShadowView(vr);
+        if (restirDiReplaced && m_RtNativeInitialized) {
+            m_Denoise->WriteView(vr, targets);
+            m_DenoiseDiSpec->WriteView(vr, targets);
+        }
         return vr;
     }
 
@@ -153,6 +162,7 @@ namespace Luth
         if (m_GtaoPipeline) m_GtaoPipeline->ReleaseView(id);
         m_Volumetric.ReleaseView(id);
         m_Rt.ReleaseShadowView(id);
+        m_Restir.ReleaseView(id);
         m_Transparency.ReleaseView(id);
         m_PostProcess.ReleaseTaaView(id);
         m_EditorOverlays.ReleaseView(id);
@@ -253,7 +263,6 @@ namespace Luth
         allocCycled(m_Lighting.GetLightAssignLayout(),   vr.lightAssignDescSet,   "View.LightAssign");
         if (m_RtNativeInitialized)
         {
-            allocCycled(m_Restir.GetSetLayout(),             vr.restirDescSet,        "View.Restir");
             allocCycled(m_RestirGi.GetSetLayout(),           vr.restirGiDescSet,      "View.RestirGi");
             allocSingle(m_RestirGi.GetReservoirVizLayout(),  vr.giReservoirVizDescSet,"View.GiReservoirViz");
             allocSingle(m_RestirGi.GetUpscaleLayout(),       vr.giUpscaleDescSet,     "View.GiUpscale");
@@ -270,7 +279,6 @@ namespace Luth
         m_Lighting.WriteShadowView(vr);
         if (m_RtNativeInitialized)
         {
-            m_Restir.WriteView(vr, targets);
             m_RestirGi.WriteView(vr, targets);
             m_RestirGi.WriteReservoirVizView(vr, targets);
             m_RestirGi.WriteUpscaleView(vr, targets);
@@ -313,20 +321,6 @@ namespace Luth
         const u32  reflW    = reflHalf ? halfW : fullW;
         const u32  reflH    = reflHalf ? halfH : fullH;
         vr.reflHalfCached   = reflHalf ? 1u : 0u;
-
-        // ReSTIR DI demodulated-irradiance image: DI working res (half when halfResolution). STORAGE for
-        // the shade pass's imageStore + SAMPLED (ctor) for the denoiser input.
-        vr.restirDI = std::make_shared<VKTexture>(
-            diW, diH, TextureFormat::RGBA16F,
-            /*arrayLayers*/ 1, /*createFlags*/ 0u, /*mipLevels*/ 1,
-            VK_IMAGE_USAGE_STORAGE_BIT);
-
-        // ReSTIR-DI demodulated SPECULAR image: same DI working res; shade's b8 imageStore + SAMPLED (ctor)
-        // for the DiSpecular denoiser. Written each frame, so no bootstrap clear.
-        vr.restirDISpec = std::make_shared<VKTexture>(
-            diW, diH, TextureFormat::RGBA16F,
-            /*arrayLayers*/ 1, /*createFlags*/ 0u, /*mipLevels*/ 1,
-            VK_IMAGE_USAGE_STORAGE_BIT);
 
         // ReSTIR GI demodulated indirect-diffuse image: GI working res (half when halfResolution).
         // STORAGE for the GI shade pass's imageStore + SAMPLED (ctor) for the denoiser input.
@@ -423,32 +417,6 @@ namespace Luth
         vr.svgfDiSpecAtrous[1] = std::make_shared<VKTexture>(diW, diH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
         // Half-res DI specular a-trous final (upscale input); svgfDiSpecDenoised stays full.
         vr.svgfDiSpecHalf = std::make_shared<VKTexture>(diW, diH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-
-        // ReSTIR scratch reservoir: a SINGLE Garlic device-local large-tagged buffer (initial ->
-        // temporal in-place, same-frame lifetime), reused across frames. Destroyed via
-        // FreeTagAndDestroy on resize (deferred N+2; resize-sized, so recycling would orphan the old
-        // size). The tags stay in the reserved high range so the per-frame FreeTag(N-2) sweep never
-        // touches them. Re-allocate here, sized w*h.
-        if (vr.restirReservoirTag != 0)
-        {
-            Memory::GPUTaggedPageAllocator::Get().FreeTagAndDestroy(vr.restirReservoirTag);
-            vr.restirReservoir = {};
-        }
-        vr.restirReservoirTag = m_Restir.NextReservoirTag();
-        vr.restirReservoir = Memory::GPUTaggedPageAllocator::Get().AllocateLargeTaggedDeviceLocal(
-            vr.restirReservoirTag, static_cast<u64>(diW) * static_cast<u64>(diH) * 32u, 16);
-
-        // ReSTIR spatial-reuse output AND temporal history (post-spatial topology): temporal reads it
-        // as prev (b4), spatial overwrites it (b6), shade consumes it, then it persists as next
-        // frame's history. One reserved tag, freed on resize/destroy.
-        if (vr.restirSpatialTag != 0)
-        {
-            Memory::GPUTaggedPageAllocator::Get().FreeTagAndDestroy(vr.restirSpatialTag);
-            vr.restirSpatial = {};
-        }
-        vr.restirSpatialTag = m_Restir.NextReservoirTag();
-        vr.restirSpatial = Memory::GPUTaggedPageAllocator::Get().AllocateLargeTaggedDeviceLocal(
-            vr.restirSpatialTag, static_cast<u64>(diW) * static_cast<u64>(diH) * 32u, 16);
 
         // ReSTIR GI scratch reservoir: same lifecycle as the DI one but 64 B/pixel (a GIReservoir is
         // a world-space path vertex). Tags from the GI subsystem's disjoint 0xFFFF8000 range.
@@ -567,8 +535,7 @@ namespace Luth
         vr.transparency.reset();
         vr.taa.reset();
         vr.rtShadow.reset();
-        vr.restirDI.reset();
-        vr.restirDISpec.reset();
+        vr.restirDi.reset();
         vr.restirGiDI.reset();
         vr.svgfDenoised.reset();
         for (u32 i = 0; i < 2; ++i)
@@ -613,21 +580,6 @@ namespace Luth
         }
         vr.svgfDiSpecAtrous[0].reset();
         vr.svgfDiSpecAtrous[1].reset();
-        // Release the reservoir reserved-range tags. The buffers are destroyed (deferred N+2), not
-        // recycled (they're resize-sized); the high tags keep them out of the per-frame FreeTag(N-2) sweep.
-        if (vr.restirReservoirTag != 0)
-        {
-            Memory::GPUTaggedPageAllocator::Get().FreeTagAndDestroy(vr.restirReservoirTag);
-            vr.restirReservoirTag = 0;
-            vr.restirReservoir = {};
-        }
-        if (vr.restirSpatialTag != 0)
-        {
-            Memory::GPUTaggedPageAllocator::Get().FreeTagAndDestroy(vr.restirSpatialTag);
-            vr.restirSpatialTag = 0;
-            vr.restirSpatial = {};
-        }
-
         // ReSTIR GI reserved-range tags: same deferred-destroy path as the DI tags above.
         if (vr.restirGiReservoirTag != 0)
         {

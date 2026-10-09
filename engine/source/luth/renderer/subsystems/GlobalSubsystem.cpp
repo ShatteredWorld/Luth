@@ -206,7 +206,7 @@ namespace Luth
         // image exists AND a TLAS is available (the conditions under which AddPasses actually writes
         // the DI). Otherwise pbr.frag must run its own point-light loop, so leave x = 0.
         const bool restirActive = m_TlasBindingEnabled && m_Pipeline->GetRestir().IsEnabled()
-                               && vr && vr->restirDI
+                               && vr && vr->restirDi && vr->restirDi->restirDI
                                && m_Pipeline->GetRt().GetTlas() != VK_NULL_HANDLE;
         // .y mirrors .x for the GI path; pbr.frag adds the demodulated indirect-diffuse image when set.
         const bool restirGiActive = m_TlasBindingEnabled && m_Pipeline->GetRestirGi().IsEnabled()

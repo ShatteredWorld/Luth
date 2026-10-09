@@ -153,27 +153,7 @@ namespace Luth
 
         std::shared_ptr<RtSunShadowViewState> rtShadow; // Borrowed RT-domain view-state bridge.
 
-        // ReSTIR DI (Bitterli 2020). restirReservoir is a SINGLE Garlic device-local large-tagged
-        // scratch buffer (w*h*32 B): initial writes it, temporal merges history into it in-place
-        // (Set 2 b2); same-frame lifetime only. Destroyed on resize via FreeTagAndDestroy; tags stay
-        // in NextReservoirTag's reserved high range, disjoint from the per-frame FreeTag(N-2) sweep.
-        // restirDI is viewport-sized rgba16f STORAGE+SAMPLED (demodulated diffuse irradiance,
-        // consumed by pbr.frag Set 3 b5). The cycled set carries Set 2's depth/normal + motion
-        // samplers + reservoir SSBOs + DI storage image.
-        Memory::GPUSubRegion restirReservoir{};
-        u32 restirReservoirTag = 0;
-        // Spatial-reuse output AND temporal history (post-spatial topology): temporal reads it as
-        // prev (Set 2 b4), spatial overwrites it (b6, RG WAR barrier on the shared import), shade
-        // consumes it; it then persists as next frame's history with final visibility already folded
-        // into W. Reserved high tag, freed only on resize/destroy.
-        Memory::GPUSubRegion restirSpatial{};
-        u32 restirSpatialTag = 0;
-        std::shared_ptr<Texture> restirDI;
-        // Demodulated specular DI: rgb = Li*[D*G/(4*NoL*NoV)]*NdotL*W (F0-free, remodulated by
-        // pbr.frag's split-sum envBRDF at Set 3 b8). Shade writes it at Set 2 b8; the DiSpecular SVGF
-        // channel denoises it. Same shape as restirDI; written every frame so no bootstrap clear.
-        std::shared_ptr<Texture> restirDISpec;
-        std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT> restirDescSet{};
+        std::shared_ptr<RestirDiViewState> restirDi; // Borrowed DI-domain state bridge.
 
         // ReSTIR GI (Ouyang 2021): sibling of the DI buffers above, w*h*64 B each (GIReservoir is
         // a world-space path vertex, not a light index). Same scratch + spatial/history shape;
