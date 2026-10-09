@@ -91,7 +91,7 @@ namespace Luth
         // One SPIR-V target + the two load-bearing parity knobs (column-major matrices match our std430
         // Mat4 push constants; precise fp blocks FMA reassociation so the GLSL A/B closes to a few ULP).
         // Debug info + direct-SPIRV backend (kDefaultTargetFlags) are the codegen path under test.
-        bool MakeSession(slang::IGlobalSession* global, const fs::path& srcDir, Slang::ComPtr<slang::ISession>& out)
+        bool MakeSession(slang::IGlobalSession* global, const fs::path& srcDir, Slang::ComPtr<slang::ISession>& out, ShaderCompileVariant variant)
         {
             slang::TargetDesc target{};
             target.format = SLANG_SPIRV;
@@ -130,7 +130,9 @@ namespace Luth
             searchPaths.push_back(commonDir.c_str());
             searchPaths.push_back(registryDir.c_str());
 
+            slang::PreprocessorMacroDesc macro{"LUTH_RASTER_ONLY", variant == ShaderCompileVariant::Raster ? "1" : "0"};
             slang::SessionDesc desc{};
+            if (variant != ShaderCompileVariant::Legacy) { desc.preprocessorMacros = &macro; desc.preprocessorMacroCount = 1; }
             desc.targets = &target;
             desc.targetCount = 1;
             desc.defaultMatrixLayoutMode = SLANG_MATRIX_LAYOUT_COLUMN_MAJOR;
@@ -148,7 +150,7 @@ namespace Luth
         // outGlobal is created here and must outlive outSession (the caller keeps both alive).
         slang::IModule* PrepareModule(const fs::path& src,
                                       Slang::ComPtr<slang::IGlobalSession>& outGlobal,
-                                      Slang::ComPtr<slang::ISession>& outSession)
+                                      Slang::ComPtr<slang::ISession>& outSession, ShaderCompileVariant variant = ShaderCompileVariant::Legacy)
         {
             LH_PROFILE_FUNCTION();
             if (!CreateGlobal(outGlobal)) return nullptr;
@@ -159,7 +161,7 @@ namespace Luth
                 LH_LOG(Shaders, error, "SlangCompiler: cannot read source '{}'", src.string());
                 return nullptr;
             }
-            if (!MakeSession(outGlobal.get(), src.parent_path(), outSession))
+            if (!MakeSession(outGlobal.get(), src.parent_path(), outSession, variant))
             {
                 LH_LOG(Shaders, error, "SlangCompiler: createSession failed for '{}'", src.string());
                 return nullptr;
@@ -236,14 +238,14 @@ namespace Luth
         return BlobToWords(spirv);
     }
 
-    SlangCompiler::CompileOutput SlangCompiler::CompileReflectStage(const fs::path& sourcePath, const char* entryPoint)
+    SlangCompiler::CompileOutput SlangCompiler::CompileReflectStage(const fs::path& sourcePath, const char* entryPoint, ShaderCompileVariant variant)
     {
         LH_PROFILE_FUNCTION();
         CompileOutput out;
 
         Slang::ComPtr<slang::IGlobalSession> global;   // must outlive `session` below
         Slang::ComPtr<slang::ISession> session;
-        slang::IModule* module = PrepareModule(sourcePath, global, session);
+        slang::IModule* module = PrepareModule(sourcePath, global, session, variant);
         if (!module) return out;
 
         // No such entry -> not a single-'main' shader (a multi-entry probe, or a module). Skip quietly so

@@ -158,6 +158,7 @@ add_library(Luth STATIC
     source/luth/renderer/shader/Shader.cpp
     source/luth/renderer/shader/ShaderCompiler.cpp
     source/luth/renderer/shader/ShaderLibrary.cpp
+    source/luth/renderer/shader/ShaderVariantCache.cpp
     source/luth/renderer/shader/ShaderWatcher.cpp
     source/luth/renderer/shader/SlangCompiler.cpp
 

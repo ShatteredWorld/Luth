@@ -22,6 +22,9 @@ namespace Luth
             // IBL precompute blobs refresh in ShaderLibrary; skybox rebaking remains explicit.
         });
         m_Started = true;
+        ShaderLibrary::SetVariantReloadCallback([this](const std::string& name, const std::vector<u32>& spirv) {
+            m_Consumers.Notify(name, spirv);
+        });
         m_Watcher.Start(directory);
     }
 
@@ -30,6 +33,7 @@ namespace Luth
         if (!m_Started) return;
         m_Watcher.Stop();
         ShaderLibrary::SetReloadCallback(nullptr);
+        ShaderLibrary::SetVariantReloadCallback(nullptr);
         m_Started = false;
     }
 }

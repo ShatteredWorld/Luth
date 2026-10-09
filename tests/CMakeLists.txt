@@ -16,6 +16,7 @@ add_executable(LuthTests
     renderer/MeshDeformation.cpp
     renderer/MeshBufferUsage.cpp
     renderer/GlobalBindings.cpp
+    renderer/ShaderVariants.cpp
     renderer/DebugOutputCatalog.cpp
     renderer/ViewPresentation.cpp
     renderer/ShaderReloadFanout.cpp

@@ -8,6 +8,7 @@
 
 namespace Luth
 {
+    enum class ShaderCompileVariant { Legacy, Raster, Hybrid };
     // In-process Slang -> SPIR-V compiler; the engine's only shader compiler. Nothing loads
     // slang-compiler.dll until the first call. Each compile spins a fresh global session + ISession
     // (shared sessions race under concurrent module loads; see the invariant in the .cpp) with
@@ -30,7 +31,8 @@ namespace Luth
         // unreflectable stage yields an empty result so the importer skips quietly instead of erroring.
         struct CompileOutput { std::vector<u32> spirv; ShaderStage stage = ShaderStage::Unknown; };
         static CompileOutput CompileReflectStage(const std::filesystem::path& sourcePath,
-                                                 const char* entryPoint = "main");
+                                                 const char* entryPoint = "main",
+                                                 ShaderCompileVariant variant = ShaderCompileVariant::Legacy);
 
         // Compose ALL the named entry points into ONE linked program, then emit SPIR-V per entry: the
         // "one body, link-specialized per stage" shape (slang#9578). Returns one blob per request, in

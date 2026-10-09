@@ -9,7 +9,7 @@
 
 namespace Luth
 {
-    // Background detections queue shader names for main-thread ShaderLibrary reload.
+    // Background detections queue source paths for main-thread ShaderLibrary reload.
     // Owned by RenderingSystem through ShaderReloadCoordinator. Poll runs once in
     // RenderingSystem::Update before frozen/normal view recording; stop precedes native teardown.
     class ShaderWatcher
@@ -24,11 +24,9 @@ namespace Luth
         void Poll();
 
     private:
-        void Enqueue(const std::string& shaderName);
-
         FileWatcher           m_Watcher;
         std::filesystem::path m_ProjectDir;
         std::mutex            m_Mutex;
-        std::set<std::string> m_Pending;
+        std::set<std::filesystem::path> m_PendingSources;
     };
 }
