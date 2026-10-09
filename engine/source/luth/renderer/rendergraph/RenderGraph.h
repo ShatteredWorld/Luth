@@ -1,6 +1,7 @@
 #pragma once
 
 #include "luth/renderer/rendergraph/RenderGraphResources.h"
+#include "luth/renderer/rendergraph/RenderPassMetadata.h"
 #include "luth/renderer/QueueRecorders.h"
 #include "luth/memory/Memory.h"
 #include "luth/jobs/JobSystem.h"
@@ -66,6 +67,7 @@ namespace Luth::RG
         // Required for passes like TlasBuildPass that don't declare Write/Read on RG resources
         // but produce values consumed later (m_LastResult.tlas -> Set 0 binding 6 via UpdateUBO).
         void SetHasSideEffect();
+        void SetDebugMetadata(RenderPassMetadata metadata);
 
     private:
         RenderGraph& m_Graph;
@@ -93,6 +95,7 @@ namespace Luth::RG
 
     class RenderGraph
     {
+        friend class RenderPassBuilder;
     public:
         struct PassAttachment
         {
@@ -105,6 +108,7 @@ namespace Luth::RG
         struct PassNode
         {
             std::string name;
+            RenderPassMetadata debugMetadata;
             std::function<void(RenderPassContext&)> execute;
             bool isCompute = false;  // Compute passes skip BeginRendering and secondary cmd
             QueueFamily queueFamily = QueueFamily::Graphics;  // AsyncCompute routes to the compute primary.

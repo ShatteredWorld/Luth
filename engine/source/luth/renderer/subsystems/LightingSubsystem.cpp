@@ -869,8 +869,11 @@ namespace Luth
         const std::string passName = "ShadowPass.C" + std::to_string(cascadeIndex);
         const std::string resName = "ShadowMap.C" + std::to_string(cascadeIndex);
         RG::ResourceHandle output;
+        auto metadata = RG::RenderPassMetadata::Graphics("shadowDepth", true, true, false, VK_CULL_MODE_FRONT_BIT, 0);
+        metadata.indirectDraws = true; metadata.AddDraws(packets);
         rg.AddPass<ShadowPassData>(passName,
             [&, targetDepth](ShadowPassData& data, RG::RenderPassBuilder& builder) {
+                builder.SetDebugMetadata(metadata);
                 VkClearValue clear{};
                 clear.depthStencil = {1.0f, 0};
                 data.depthTex = builder.WriteDepth(targetDepth,
@@ -945,6 +948,7 @@ namespace Luth
         RG::ResourceHandle output;
         graph.AddPass<Data>("SkyboxPass",
             [&](Data& data, RG::RenderPassBuilder& builder) {
+                builder.SetDebugMetadata(RG::RenderPassMetadata::Graphics("skybox", true, false, false, VK_CULL_MODE_BACK_BIT, bindings.pipeline && bindings.vertex ? 1 : 0));
                 data.color = builder.Write(sceneColor, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
                 // Preserve the existing attachment policy. Sky shader depth writes are disabled.
                 data.depth = builder.WriteDepth(sceneDepth, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_DONT_CARE);

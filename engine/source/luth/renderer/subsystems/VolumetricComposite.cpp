@@ -40,6 +40,7 @@ namespace Luth
         rg.AddPass<CompositeData>("VolumetricComposite",
             [&, sceneColor, sceneDepth, resolvedInScatter](CompositeData& data, RG::RenderPassBuilder& builder)
             {
+                builder.SetDebugMetadata(RG::RenderPassMetadata::Graphics("volumetric_composite", false, false, true, VK_CULL_MODE_NONE));
                 data.color = builder.Write(sceneColor,
                     VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
                 data.depth = builder.Read(sceneDepth);

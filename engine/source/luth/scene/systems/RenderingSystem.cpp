@@ -106,7 +106,7 @@ namespace Luth
 
     RG::RenderGraphSnapshot& RenderingSystem::CaptureGraphSnapshot(const RG::RenderGraph& graph, RenderViewId id, u64 generation)
     {
-        m_GraphSnapshot = Luth::CaptureGraphSnapshot(graph, m_DrawList);
+        m_GraphSnapshot = Luth::CaptureGraphSnapshot(graph);
         m_GraphSnapshot.viewId = id.value;
         m_GraphSnapshot.resourceGeneration = generation;
         return m_GraphSnapshot;

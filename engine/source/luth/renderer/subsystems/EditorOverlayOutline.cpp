@@ -30,6 +30,7 @@ namespace Luth
         RG::ResourceHandle output;
         graph.AddPass<Data>("OutlinePass",
             [&](Data& data, RG::RenderPassBuilder& builder) {
+                builder.SetDebugMetadata(RG::RenderPassMetadata::Graphics("outline", false, false, true, VK_CULL_MODE_NONE));
                 output = data.output = builder.Write(color, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
                 data.mask = builder.Read(mask); data.selectedDepth = builder.Read(selectedDepth); data.depth = builder.Read(depth);
             },

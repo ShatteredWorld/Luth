@@ -55,6 +55,7 @@ namespace Luth
         struct Data { RG::ResourceHandle output; };
         graph.AddPass<Data>("TaaResolve",
             [&](Data& data, RG::RenderPassBuilder& builder) {
+                builder.SetDebugMetadata(RG::RenderPassMetadata::Graphics("taa_resolve", false, false, false, VK_CULL_MODE_NONE, 1));
                 builder.Read(color); builder.Read(motion); builder.Read(depth); builder.Read(previous);
                 data.output = builder.Write(output, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_STORE);
                 output = data.output;

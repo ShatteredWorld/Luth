@@ -116,6 +116,11 @@ namespace Luth::RG
         m_Graph.MarkPassHasSideEffect(m_PassIndex);
     }
 
+    void RenderPassBuilder::SetDebugMetadata(RenderPassMetadata metadata)
+    {
+        m_Graph.m_Passes.at(m_PassIndex).debugMetadata = std::move(metadata);
+    }
+
     BufferHandle RenderPassBuilder::ReadIndirectBuffer(BufferHandle buffer)
     {
         m_Graph.RegisterBufferRead(m_PassIndex, buffer, ResourceState::IndirectRead);

@@ -847,8 +847,11 @@ namespace Luth
         const VkBuffer indirectBuffer = visible.indirect.binding.slice->buffer;
         struct DepthPrepassData { RG::ResourceHandle depthTex; RG::BufferHandle indirectBuf; };
         RG::ResourceHandle output;
+        auto metadata = RG::RenderPassMetadata::Graphics("depthPrepass", true, true, false, VK_CULL_MODE_BACK_BIT, 0);
+        metadata.indirectDraws = true; metadata.AddDraws(packets);
         rg.AddPass<DepthPrepassData>("DepthPrepass",
             [&, targetDepth](DepthPrepassData& data, RG::RenderPassBuilder& builder) {
+                builder.SetDebugMetadata(metadata);
                 VkClearValue clear{};
                 clear.depthStencil = {1.0f, 0};
                 data.depthTex = builder.WriteDepth(targetDepth,
@@ -983,8 +986,12 @@ namespace Luth
         const VkBuffer indirectBuffer = visible.indirect.binding.slice->buffer;
         struct Data { std::array<RG::ResourceHandle, 5> images; RG::BufferHandle indirect; };
         std::array<RG::ResourceHandle, 5> output;
+        auto metadata = RG::RenderPassMetadata::Graphics("slim_gbuffer", true, false, false, VK_CULL_MODE_BACK_BIT, 0);
+        metadata.indirectDraws = true; metadata.pipelineStateMixed = !cutout.empty();
+        metadata.AddDraws(opaque); metadata.AddDraws(cutout);
         rg.AddPass<Data>("SlimGBufferPass",
             [&](Data& data, RG::RenderPassBuilder& builder) {
+                builder.SetDebugMetadata(metadata);
                 std::array<VkClearValue, 4> clears{};
                 clears[0].color.float32[0] = 0.5f; clears[0].color.float32[1] = 0.5f;
                 clears[1].color.float32[0] = 1.0f;
@@ -1146,8 +1153,12 @@ namespace Luth
         struct Data { RG::ResourceHandle color, depth, picking; };
         std::array<RG::ResourceHandle, 3> output;
         const auto indirectBuffer = visible.indirect.binding.slice->buffer;
+        auto metadata = RG::RenderPassMetadata::Graphics("pbr", true, true, false, VK_CULL_MODE_BACK_BIT, 0);
+        metadata.indirectDraws = true; metadata.pipelineStateMixed = true; // Material and overlay PSO variants.
+        if (bindings.initialLayout) { metadata.AddDraws(bindings.draws); metadata.AddDraws(bindings.overlays); }
         graph.AddPass<Data>("GeometryPass",
             [&](Data& data, RG::RenderPassBuilder& builder) {
+                builder.SetDebugMetadata(metadata);
                 data.depth = builder.WriteDepth(depth, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
                 data.color = builder.Write(color);
                 VkClearValue clear{};

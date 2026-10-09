@@ -8,7 +8,7 @@
 
 namespace Luth::RG
 {
-    // Read-only view of last frame's compiled graph. RenderGraph::Execute populates it; the
+    // Read-only view of last frame's compiled graph. Graph instrumentation populates it; the
     // Frame Debugger panel and the ProfilerPanel pass-time chart consume it. Decoupled from the
     // live RenderGraph so the editor can read across frame boundaries without grabbing any lock.
     struct PassSnapshotResource
@@ -58,6 +58,7 @@ namespace Luth::RG
         float gpuTimeMs = -1.0f;  // -1 = no data yet
 
         // Pipeline state
+        bool pipelineStateAvailable = false, pipelineStateMixed = false;
         bool  depthTest    = false;
         bool  depthWrite   = false;
         bool  blendEnabled = false;
@@ -65,6 +66,7 @@ namespace Luth::RG
         std::string shaderName;
 
         // Geometry stats
+        bool geometryStatsAvailable = false, indirectDraws = false;
         u32 drawCalls = 0;
         u32 indices   = 0;
 

@@ -33,6 +33,7 @@ namespace Luth
         struct Data { RG::ResourceHandle output; };
         RG::ResourceHandle output;
         graph.AddPass<Data>("DebugDrawPass", [&](Data& data, RG::RenderPassBuilder& builder) {
+            builder.SetDebugMetadata(RG::RenderPassMetadata::Graphics("debugDraw", false, false, true, VK_CULL_MODE_NONE));
             output = data.output = builder.Write(input, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
         }, [packet, debugger](Data& data, RG::RenderPassContext& ctx) {
             if (debugger) debugger->BeginCapturePass(ctx.passIndex, "DebugDrawPass", "LDROutput", false,

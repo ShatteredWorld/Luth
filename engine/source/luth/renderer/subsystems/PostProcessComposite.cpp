@@ -68,6 +68,7 @@ namespace Luth
         struct Data {};
         graph.AddPass<Data>("PostProcess",
             [&](Data&, RG::RenderPassBuilder& builder) {
+                builder.SetDebugMetadata(RG::RenderPassMetadata::Graphics("postprocess", false, false, false, VK_CULL_MODE_NONE, 1));
                 output = builder.Write(output); builder.Read(hdr); if (bloom.IsValid()) builder.Read(bloom);
             },
             [packet, debugger](Data&, RG::RenderPassContext& ctx) {

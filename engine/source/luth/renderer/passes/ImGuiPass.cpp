@@ -17,6 +17,9 @@ namespace Luth
             RG::ResourceState::Undefined, RG::ResourceState::Present);
         graph.AddPass<Data>("ImGuiPass",
             [backbuffer, sceneLdr, draws = inputs.drawData](Data& data, RG::RenderPassBuilder& builder) {
+                auto metadata = RG::RenderPassMetadata::Graphics("imgui", false, false, true, VK_CULL_MODE_NONE, 0);
+                metadata.geometryStatsAvailable = false;
+                builder.SetDebugMetadata(std::move(metadata));
                 data.backbuffer = builder.Write(backbuffer);
                 data.draws = draws;
                 if (sceneLdr.IsValid()) data.sceneTexture = builder.Read(sceneLdr);

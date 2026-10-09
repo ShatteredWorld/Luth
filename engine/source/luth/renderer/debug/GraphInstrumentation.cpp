@@ -1,12 +1,10 @@
 #include "luthpch.h"
 #include "luth/renderer/debug/GraphInstrumentation.h"
-#include "luth/renderer/resources/Model.h"
-#include "luth/renderer/resources/Buffer.h"
 #include "luth/core/diagnostics/Profiler.h"
 
 namespace Luth
 {
-    RG::RenderGraphSnapshot CaptureGraphSnapshot(const RG::RenderGraph& rg, const DrawList& drawList)
+    RG::RenderGraphSnapshot CaptureGraphSnapshot(const RG::RenderGraph& rg)
     {
         LH_PROFILE_FUNCTION();
 
@@ -68,77 +66,21 @@ namespace Luth
                     ps.primaryOutputIndex = (int)(idx - 1);
             }
 
+            const auto& metadata = pass.debugMetadata;
+            ps.shaderName = metadata.shaderName;
+            ps.pipelineStateAvailable = metadata.pipelineStateAvailable;
+            ps.pipelineStateMixed = metadata.pipelineStateMixed;
+            ps.depthTest = metadata.depthTest; ps.depthWrite = metadata.depthWrite;
+            ps.blendEnabled = metadata.blendEnabled; ps.cullMode = metadata.cullMode;
+            ps.geometryStatsAvailable = metadata.geometryStatsAvailable;
+            ps.indirectDraws = metadata.indirectDraws;
+            if (!pass.culled) { ps.drawCalls = metadata.drawCalls; ps.indices = metadata.indices; }
             snapshot.passes.push_back(std::move(ps));
         }
 
         // Barrier inspector: fill from the solved graph when capture is on (off by default).
         if (RG::RenderGraph::BarrierCapture())
             rg.CaptureBarrierRecords(snapshot);
-
-        // Compute geometry stats from the current DrawList (built before pass dispatch)
-        u32 totalDraws = (u32)(drawList.opaque.size() + drawList.cutout.size() + drawList.transparent.size());
-        u32 totalIndices = 0;
-        auto sumIndices = [&](const std::vector<DrawCommand>& draws) {
-            for (auto& dc : draws)
-            {
-                if (!dc.model) continue;
-                auto mesh = dc.model->GetMesh(dc.meshIndex);
-                if (mesh && mesh->GetIndexBuffer())
-                    totalIndices += mesh->GetIndexBuffer()->GetCount();
-            }
-        };
-        sumIndices(drawList.opaque);
-        sumIndices(drawList.cutout);
-        sumIndices(drawList.transparent);
-
-        // Enrich per-pass pipeline state (known at RenderingSystem level, not RenderGraph)
-        for (auto& ps : snapshot.passes)
-        {
-            if (ps.culled) continue;
-
-            if (ps.name == "ShadowPass")
-            {
-                ps.depthTest = true; ps.depthWrite = true;
-                ps.blendEnabled = false;
-                ps.cullMode = VK_CULL_MODE_FRONT_BIT;
-                ps.shaderName = "shadowDepth";
-                ps.drawCalls = totalDraws;
-                ps.indices = totalIndices;
-            }
-            else if (ps.name == "GeometryPass")
-            {
-                ps.depthTest = true; ps.depthWrite = true;
-                ps.blendEnabled = false;
-                ps.cullMode = VK_CULL_MODE_BACK_BIT;
-                ps.shaderName = "pbr";
-                ps.drawCalls = totalDraws;
-                ps.indices = totalIndices;
-            }
-            else if (ps.name == "SkyboxPass")
-            {
-                ps.depthTest = true; ps.depthWrite = false;
-                ps.blendEnabled = false;
-                ps.cullMode = VK_CULL_MODE_BACK_BIT;
-                ps.shaderName = "skybox";
-                ps.drawCalls = 1; ps.indices = 0;
-            }
-            else if (ps.name == "PostProcess")
-            {
-                ps.depthTest = false; ps.depthWrite = false;
-                ps.blendEnabled = false;
-                ps.cullMode = VK_CULL_MODE_NONE;
-                ps.shaderName = "postprocess";
-                ps.drawCalls = 1; ps.indices = 0;
-            }
-            else if (ps.name == "ImGuiPass")
-            {
-                ps.depthTest = false; ps.depthWrite = false;
-                ps.blendEnabled = true;
-                ps.cullMode = VK_CULL_MODE_NONE;
-                ps.shaderName = "imgui";
-                ps.drawCalls = 0; ps.indices = 0; // ImGui manages its own draws
-            }
-        }
 
         return snapshot;
     }

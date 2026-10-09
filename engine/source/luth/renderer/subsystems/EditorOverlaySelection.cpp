@@ -62,6 +62,9 @@ namespace Luth
         struct Data { RG::ResourceHandle mask, depth; }; SelectionMaskGraphOutput output;
         graph.AddPass<Data>("SelectionMaskPass",
             [&](Data& data, RG::RenderPassBuilder& builder) {
+                auto metadata = RG::RenderPassMetadata::Graphics("selectionMask", true, true, false, VK_CULL_MODE_NONE, 0);
+                metadata.AddDraws(packet.draws);
+                builder.SetDebugMetadata(std::move(metadata));
                 RG::TextureDesc desc; desc.name = "SelectionMask"; desc.width = packet.width; desc.height = packet.height;
                 desc.format = RG::TextureFormat::RGBA8_Unorm;
                 data.mask = graph.ImportResource(desc, (void*)packet.images[0], (void*)packet.views[0], RG::ResourceState::Undefined);

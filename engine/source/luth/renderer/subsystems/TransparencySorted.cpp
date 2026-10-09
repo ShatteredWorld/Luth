@@ -87,6 +87,10 @@ namespace Luth
         const auto indirect = visible.indirect.binding.slice->buffer;
         graph.AddPass<Data>("TransparentPass",
             [&](Data& data, RG::RenderPassBuilder& builder) {
+                auto metadata = RG::RenderPassMetadata::Graphics("pbr_transparent", true, false, true, VK_CULL_MODE_BACK_BIT, 0);
+                metadata.AddDraws(packet.draws);
+                metadata.indirectDraws = true; metadata.pipelineStateMixed = true;
+                builder.SetDebugMetadata(std::move(metadata));
                 data.color = builder.Write(color, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
                 data.picking = builder.Write(picking, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
                 data.depth = builder.WriteDepth(depth, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, {});

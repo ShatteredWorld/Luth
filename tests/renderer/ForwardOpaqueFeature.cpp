@@ -95,6 +95,8 @@ TEST_CASE("ForwardOpaqueFeature: native attachment and typed output contracts pr
     REQUIRE(fixture.Build(graph, scratch, 0, true).success);
     REQUIRE(graph.GetPasses().size() == 1);
     const auto& pass = graph.GetPasses()[0];
+    CHECK(pass.debugMetadata.shaderName == "pbr"); CHECK(pass.debugMetadata.pipelineStateMixed);
+    CHECK(pass.debugMetadata.geometryStatsAvailable); CHECK(pass.debugMetadata.indirectDraws);
     CHECK(pass.name == "GeometryPass"); CHECK_FALSE(pass.isCompute); CHECK(pass.queueFamily == RG::QueueFamily::Graphics);
     REQUIRE(pass.colorAttachments.size() == 2);
     CHECK(pass.colorAttachments[0].handle == fixture.color.handle);
@@ -112,6 +114,24 @@ TEST_CASE("ForwardOpaqueFeature: native attachment and typed output contracts pr
     CHECK(fixture.color.handle.version == 1); CHECK(fixture.depth.handle.version == 1);
     graph.Compile(); CHECK_FALSE(graph.GetPasses()[0].culled);
 }
+TEST_CASE("ForwardOpaqueFeature: native command budgets are frozen from prepared packets [renderfeatures]")
+{
+    Fixture fixture;
+    ForwardDrawPacket packet;
+    packet.pipeline = Native<VkPipeline>(10); packet.layout = Native<VkPipelineLayout>(11);
+    packet.vertex = Native<VkBuffer>(12); packet.index = Native<VkBuffer>(13);
+    packet.indirectOffset = fixture.indirect.offset; packet.indexCount = 120;
+    fixture.bindings.draws.push_back(packet);
+    packet.indexCount = 6; fixture.bindings.overlays.push_back(packet);
+    Memory::LinearAllocator scratch(64 * 1024); RG::RenderGraph graph(scratch);
+    REQUIRE(fixture.Build(graph, scratch).success);
+    const auto& metadata = graph.GetPasses()[0].debugMetadata;
+    CHECK(metadata.drawCalls == 2); CHECK(metadata.indices == 126);
+    CHECK(metadata.pipelineStateMixed); CHECK(metadata.indirectDraws);
+    fixture.bindings.draws.clear(); fixture.bindings.overlays.clear();
+    CHECK(metadata.drawCalls == 2); CHECK(metadata.indices == 126);
+}
+
 TEST_CASE("ForwardOpaqueFeature: hybrid compatibility signals are declared separately from raster [renderfeatures]")
 {
     Fixture fixture(true);

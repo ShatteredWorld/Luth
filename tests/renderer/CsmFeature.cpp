@@ -77,6 +77,8 @@ TEST_CASE("CsmFeature: four layer imports preserve attachment and indirect contr
         {
             const auto& pass = graph.GetPasses()[i];
             CHECK(pass.name == "ShadowPass.C" + std::to_string(i));
+            CHECK(pass.debugMetadata.shaderName == "shadowDepth");
+            CHECK(pass.debugMetadata.pipelineStateAvailable); CHECK(pass.debugMetadata.indirectDraws);
             CHECK(pass.queueFamily == RG::QueueFamily::Graphics);
             CHECK_FALSE(pass.isCompute);
             CHECK(pass.hasDepth);

@@ -191,6 +191,9 @@ namespace Luth
         rg.AddPass<DebugBlitData>("DebugDisplayBlit",
             [&](DebugBlitData& data, RG::RenderPassBuilder& builder)
             {
+                builder.SetDebugMetadata(RG::RenderPassMetadata::Graphics(
+                    isDepth && sys.GetFrameDebugger().depthPipeline ? "debugDepth" : "debugBlit",
+                    false, false, false, VK_CULL_MODE_NONE));
                 auto ldrVk = std::static_pointer_cast<VKTexture>(sys.GetSceneTargets().GetLDROutput());
                 RG::TextureDesc desc;
                 desc.name   = "LDROutput";

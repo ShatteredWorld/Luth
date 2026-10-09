@@ -63,6 +63,9 @@ namespace Luth
         RG::ResourceHandle storedDepth;
         graph.AddPass<Store>("OITStore",
             [&](Store& data, RG::RenderPassBuilder& builder) {
+                auto metadata = RG::RenderPassMetadata::Graphics("pbr_oit_store", true, false, false, VK_CULL_MODE_BACK_BIT, 0); metadata.AddDraws(packet.draws);
+                metadata.indirectDraws = true; metadata.pipelineStateMixed = true;
+                builder.SetDebugMetadata(std::move(metadata));
                 data.depth = builder.WriteDepth(depth, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, {});
                 data.heads = builder.WriteStorageImageFragment(heads); data.nodes = builder.WriteBufferFragment(nodes);
                 for (auto image : images) builder.Read(image);
@@ -77,6 +80,7 @@ namespace Luth
         std::array<RG::ResourceHandle, 3> outputs;
         graph.AddPass<Resolve>("OITResolve",
             [&](Resolve& data, RG::RenderPassBuilder& builder) {
+                builder.SetDebugMetadata(RG::RenderPassMetadata::Graphics("oit_resolve", false, false, true, VK_CULL_MODE_NONE));
                 data.color = builder.Write(color, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
                 data.picking = builder.Write(picking, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
                 builder.ReadStorageImageFragment(heads); builder.ReadBufferFragment(nodes);

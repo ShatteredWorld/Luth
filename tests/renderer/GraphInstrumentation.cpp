@@ -29,12 +29,11 @@ TEST_CASE("GraphInstrumentation: compiled topology and primary outputs survive g
     graph.AddPass<Data>("Dead", [](Data&, RG::RenderPassBuilder&) {}, [](Data&, RG::RenderPassContext&) {});
     graph.AddPass<Data>("DepthPrepass", [&](Data&, RG::RenderPassBuilder& builder) { builder.WriteDepth(depth); },
         [](Data&, RG::RenderPassContext&) {});
-    graph.AddPass<Data>("GeometryPass", [&](Data&, RG::RenderPassBuilder& builder) { builder.Read(depth); builder.Write(color); },
+    graph.AddPass<Data>("GeometryPass", [&](Data&, RG::RenderPassBuilder& builder) { builder.Read(depth); builder.Write(color); builder.SetDebugMetadata(RG::RenderPassMetadata::Graphics("pbr", true, true, false, VK_CULL_MODE_BACK_BIT, 4)); },
         [](Data&, RG::RenderPassContext&) {});
     graph.Compile();
-    DrawList draws; draws.opaque.resize(2); draws.cutout.resize(1); draws.transparent.resize(1);
     const RG::RenderGraph& compiled = graph;
-    auto snapshot = CaptureGraphSnapshot(compiled, draws);
+    auto snapshot = CaptureGraphSnapshot(compiled);
     REQUIRE(snapshot.passes.size() == 3);
     REQUIRE(snapshot.resources.size() == 2);
     CHECK(snapshot.passes[0].culled);
@@ -49,7 +48,7 @@ TEST_CASE("GraphInstrumentation: compiled topology and primary outputs survive g
     CHECK(snapshot.passes[2].reads[0].name == "Depth");
     CHECK(snapshot.passes[2].writes[0].name == "Color");
     CHECK(snapshot.passes[2].drawCalls == 4);
-    CHECK(snapshot.passes[2].indices == 0); // No mesh resources in this headless draw list.
+    CHECK(snapshot.passes[2].indices == 0); // Explicit non-indexed command budget.
     CHECK(snapshot.passes[2].shaderName == "pbr");
     CHECK(snapshot.passes[2].depthTest);
     CHECK(snapshot.passes[2].depthWrite);
@@ -61,7 +60,7 @@ TEST_CASE("GraphInstrumentation: compiled topology and primary outputs survive g
     CHECK(snapshot.barriers.empty());
     CHECK(snapshot.passes[2].gpuTimeMs == -1);
     graph.GetResources()[0].desc.name = "Changed";
-    draws.Clear();
+
     CHECK(snapshot.resources[0].name == "Color");
     CHECK(snapshot.passes[2].drawCalls == 4);
 }
@@ -76,43 +75,63 @@ TEST_CASE("GraphInstrumentation: barrier inspection is detached and honors captu
     graph.AddPass<Data>("Reader", [&](Data&, RG::RenderPassBuilder& builder) { builder.Read(color); builder.SetHasSideEffect(); },
         [](Data&, RG::RenderPassContext&) {});
     graph.Compile();
-    const auto snapshot = CaptureGraphSnapshot(graph, {});
+    const auto snapshot = CaptureGraphSnapshot(graph);
     CHECK_FALSE(snapshot.barriers.empty());
     CHECK(snapshot.numImageBarriers > 0);
     CHECK(snapshot.passes[1].numImageBarriers > 0);
     CHECK(snapshot.barriers.back().resource == "Output");
     RG::RenderGraph::SetBarrierCapture(false);
-    const auto disabled = CaptureGraphSnapshot(graph, {});
+    const auto disabled = CaptureGraphSnapshot(graph);
     CHECK(disabled.barriers.empty());
     CHECK(disabled.numImageBarriers == 0);
     CHECK_FALSE(snapshot.barriers.empty());
 }
 
-TEST_CASE("GraphInstrumentation: legacy enrichment and empty graphs keep default query state")
+TEST_CASE("GraphInstrumentation: names never invent metadata and empty graphs retain defaults")
 {
     BarrierCaptureScope capture(false);
     Memory::LinearAllocator scratch(65536); RG::RenderGraph graph(scratch);
     graph.Compile();
-    const auto empty = CaptureGraphSnapshot(graph, {});
-    CHECK(empty.resources.empty());
-    CHECK(empty.passes.empty());
-    CHECK(empty.totalGpuTimeMs == 0);
-    CHECK_FALSE(empty.totalStats.valid);
-    for (const auto* name : {"ShadowPass", "SkyboxPass", "PostProcess", "ImGuiPass", "Custom"})
+    const auto empty = CaptureGraphSnapshot(graph);
+    CHECK(empty.resources.empty()); CHECK(empty.passes.empty());
+    CHECK(empty.totalGpuTimeMs == 0); CHECK_FALSE(empty.totalStats.valid);
+    for (const auto* name : {"ShadowPass", "SkyboxPass", "PostProcess", "ImGuiPass", "GeometryPass"})
         graph.AddPass<Data>(name, [](Data&, RG::RenderPassBuilder& builder) { builder.SetHasSideEffect(); },
             [](Data&, RG::RenderPassContext&) {});
     graph.Compile();
-    DrawList draws; draws.opaque.resize(3);
-    const auto snapshot = CaptureGraphSnapshot(graph, draws);
+    const auto snapshot = CaptureGraphSnapshot(graph);
+    for (const auto& pass : snapshot.passes)
+    {
+        CHECK(pass.shaderName.empty()); CHECK_FALSE(pass.pipelineStateAvailable);
+        CHECK_FALSE(pass.geometryStatsAvailable); CHECK(pass.drawCalls == 0);
+        CHECK(pass.primaryOutputIndex == -1);
+    }
+}
+
+TEST_CASE("GraphInstrumentation: renamed duplicate and culled passes retain their own frozen metadata")
+{
+    Memory::LinearAllocator scratch(65536); RG::RenderGraph graph(scratch);
+    auto metadata = RG::RenderPassMetadata::Graphics("shadowDepth", true, true, false, VK_CULL_MODE_FRONT_BIT, 2, 120);
+    metadata.indirectDraws = true;
+    const auto add = [&](bool live) {
+        graph.AddPass<Data>("Custom", [&](Data&, RG::RenderPassBuilder& builder) {
+            builder.SetDebugMetadata(metadata); if (live) builder.SetHasSideEffect();
+        }, [](Data&, RG::RenderPassContext&) {});
+    };
+    add(true);
+    metadata.shaderName = "materialVariant"; metadata.drawCalls = 5; metadata.indices = 420;
+    metadata.pipelineStateMixed = true; add(true); add(false);
+    graph.Compile();
+    const auto snapshot = CaptureGraphSnapshot(graph);
+    REQUIRE(snapshot.passes.size() == 3);
     CHECK(snapshot.passes[0].shaderName == "shadowDepth");
     CHECK(snapshot.passes[0].cullMode == VK_CULL_MODE_FRONT_BIT);
-    CHECK(snapshot.passes[0].drawCalls == 3);
-    CHECK(snapshot.passes[1].shaderName == "skybox");
-    CHECK_FALSE(snapshot.passes[1].depthWrite);
-    CHECK(snapshot.passes[1].drawCalls == 1);
-    CHECK(snapshot.passes[2].shaderName == "postprocess");
-    CHECK(snapshot.passes[3].shaderName == "imgui");
-    CHECK(snapshot.passes[3].blendEnabled);
-    CHECK(snapshot.passes[4].shaderName.empty());
-    CHECK(snapshot.passes[4].primaryOutputIndex == -1);
+    CHECK(snapshot.passes[0].drawCalls == 2); CHECK(snapshot.passes[0].indices == 120);
+    CHECK(snapshot.passes[0].indirectDraws);
+    CHECK(snapshot.passes[1].shaderName == "materialVariant");
+    CHECK(snapshot.passes[1].pipelineStateMixed); CHECK(snapshot.passes[1].drawCalls == 5);
+    CHECK(snapshot.passes[2].culled); CHECK(snapshot.passes[2].drawCalls == 0);
+    CHECK(snapshot.passes[2].indices == 0);
+    metadata.shaderName = "Changed"; add(true);
+    CHECK(snapshot.passes[0].shaderName == "shadowDepth");
 }

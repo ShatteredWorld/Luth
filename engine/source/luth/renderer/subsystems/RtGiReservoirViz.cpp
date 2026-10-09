@@ -20,6 +20,7 @@ namespace Luth
         struct Data { RG::ResourceHandle output, depth; RG::BufferHandle reservoir; };
         RG::ResourceHandle output;
         graph.AddPass<Data>("GiReservoirVizPass", [&](Data& data, RG::RenderPassBuilder& builder) {
+            builder.SetDebugMetadata(RG::RenderPassMetadata::Graphics("restir_gi_reservoir_viz", false, false, false, VK_CULL_MODE_NONE));
             VkClearValue clear{}; clear.color = {{0, 0, 0, 1}};
             output = data.output = builder.Write(input, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, clear);
             data.depth = builder.Read(depth); data.reservoir = builder.ReadBufferFragment(reservoir);

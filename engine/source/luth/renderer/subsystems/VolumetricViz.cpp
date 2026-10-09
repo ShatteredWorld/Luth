@@ -53,6 +53,7 @@ namespace Luth
         struct Data { RG::ResourceHandle output, depth, density, resolved; };
         RG::ResourceHandle output;
         graph.AddPass<Data>("VolumetricVizPass", [&](Data& data, RG::RenderPassBuilder& builder) {
+            builder.SetDebugMetadata(RG::RenderPassMetadata::Graphics("volumetric_viz", false, false, true, VK_CULL_MODE_NONE, 1));
             VkClearValue clear{}; clear.color = {{0, 0, 0, 1}};
             output = data.output = builder.Write(input, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, clear);
             data.depth = builder.Read(depth); data.density = builder.Read(density); data.resolved = builder.Read(resolved);

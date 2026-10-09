@@ -31,6 +31,7 @@ namespace Luth
         RG::ResourceHandle output;
         graph.AddPass<Data>("GridPass",
             [&](Data& data, RG::RenderPassBuilder& builder) {
+                builder.SetDebugMetadata(RG::RenderPassMetadata::Graphics("grid", false, false, true, VK_CULL_MODE_NONE));
                 output = data.color = builder.Write(color, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
                 data.depth = builder.Read(depth);
             },
