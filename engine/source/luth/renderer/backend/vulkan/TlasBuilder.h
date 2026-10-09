@@ -4,6 +4,7 @@
 #include "luth/core/types/LuthMath.h"
 #include "luth/core/UUID.h"
 #include "VulkanAllocator.h"
+#include "VulkanAccelerationStructure.h"
 
 #include <span>
 #include <memory>
@@ -69,7 +70,8 @@ namespace Luth
         static PreparedTlasBuild PrepareTlas(std::span<const MeshDrawSnapshot> instances,
             u32 frameAbs, const TlasBuildResult& prev,
             const std::unordered_map<UUID, u32, UUIDHash>& materialSlotMap,
-            u64 blasReadyGen, bool markEmitters);
+            u64 blasReadyGen, bool markEmitters,
+            std::span<const PreparedBlasBuild> scheduled = {});
 
         // Per-frame TLAS rebuild from a pre-captured snapshot.
         //   `cmd`        - open command buffer, queue supports compute.
@@ -108,5 +110,7 @@ namespace Luth
         static u32 RefitSkinnedBLASes(VkCommandBuffer cmd,
                                       std::span<const MeshDrawSnapshot> instances,
                                       u32 frameAbs);
+        static PreparedBlasBuild PrepareSkinnedBLASes(
+            std::span<const MeshDrawSnapshot> instances, u32 frameAbs);
     };
 }

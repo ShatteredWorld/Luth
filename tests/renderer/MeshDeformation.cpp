@@ -185,3 +185,81 @@ TEST_CASE("MeshDeformation: prepared TLAS copies retain native build input addre
     retained = {};
     CHECK(lifetime.expired());
 }
+
+TEST_CASE("MeshDeformation: scheduled BLAS readiness is local and commits only at recording")
+{
+    auto first = std::make_shared<VKAccelerationStructure>();
+    auto update = std::make_shared<VKAccelerationStructure>();
+    update->MarkBuildRecorded(8);
+    auto unrelated = std::make_shared<VKAccelerationStructure>();
+    auto command = std::make_shared<BlasBuildCommand>();
+    command->frameAbs = 9;
+    command->infos.resize(2); command->geoms.resize(2);
+    command->ranges.resize(2); command->rangePtrs.resize(2);
+    command->targets = {first, update}; command->firstBuilds = {true, false};
+    for (size_t i = 0; i < 2; ++i)
+    {
+        command->infos[i].pGeometries = &command->geoms[i];
+        command->rangePtrs[i] = &command->ranges[i];
+    }
+    static const BlasBuildCommand* expected;
+    static u32 calls;
+    expected = command.get(); calls = 0;
+    command->record = [](VkCommandBuffer, uint32_t count,
+        const VkAccelerationStructureBuildGeometryInfoKHR* infos,
+        const VkAccelerationStructureBuildRangeInfoKHR* const* ranges) {
+        ++calls;
+        CHECK(count == 2);
+        CHECK(infos == expected->infos.data());
+        CHECK(ranges == expected->rangePtrs.data());
+        CHECK_FALSE(expected->targets[0]->IsBuildRecorded());
+        for (size_t i = 0; i < count; ++i)
+        {
+            CHECK(infos[i].pGeometries == &expected->geoms[i]);
+            CHECK(ranges[i] == &expected->ranges[i]);
+        }
+    };
+    PreparedBlasBuild batch{{command}};
+    const PreparedBlasBuild scheduled[]{batch};
+    CHECK(batch.FirstBuildCount() == 1);
+    CHECK_FALSE(first->IsBuildRecorded());
+    CHECK_FALSE(IsBlasReadyForTlas(first.get(), {}, 9));
+    CHECK(IsBlasReadyForTlas(first.get(), scheduled, 9));
+    CHECK_FALSE(IsBlasReadyForTlas(first.get(), scheduled, 10));
+    CHECK(IsBlasReadyForTlas(update.get(), {}, 9));
+    CHECK_FALSE(IsBlasReadyForTlas(unrelated.get(), scheduled, 9));
+    CHECK_FALSE(IsBlasReadyForTlas(nullptr, scheduled, 9));
+    const std::weak_ptr<const BlasBuildCommand> lifetime = command;
+    auto retained = batch;
+    command.reset(); batch = {};
+    CHECK_FALSE(lifetime.expired());
+    retained.Record(VK_NULL_HANDLE);
+    CHECK(first->IsBuildRecorded());
+    CHECK(first->GetBuildFrameAbs() == 9);
+    CHECK(update->GetBuildFrameAbs() == 8);
+    retained.Record(VK_NULL_HANDLE); // Copies share recording state; no duplicate native build.
+    scheduled[0].Record(VK_NULL_HANDLE);
+    CHECK(calls == 1);
+}
+
+TEST_CASE("MeshDeformation: abandoned BLAS batches retry without publishing recorded readiness")
+{
+    auto target = std::make_shared<VKAccelerationStructure>();
+    u32 retries = 0;
+    {
+        auto command = std::make_shared<BlasBuildCommand>();
+        command->targets = {target}; command->firstBuilds = {true};
+        command->abandon = [&]() { ++retries; };
+        PreparedBlasBuild prepared{{command}};
+        command.reset();
+        CHECK(prepared.IsScheduled(target.get(), 0));
+        CHECK_FALSE(target->IsBuildRecorded());
+    }
+    CHECK(retries == 1);
+    CHECK_FALSE(target->IsBuildRecorded());
+    const auto empty = TlasBuilder::PrepareSkinnedBLASes({}, 0);
+    CHECK(empty.commands.empty());
+    CHECK(empty.FirstBuildCount() == 0);
+    CHECK_FALSE(empty.IsScheduled(target.get(), 0));
+    CHECK_NOTHROW(empty.Record(VK_NULL_HANDLE));
+}

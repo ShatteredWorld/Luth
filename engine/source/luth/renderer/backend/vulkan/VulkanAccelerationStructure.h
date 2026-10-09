@@ -6,11 +6,47 @@
 
 #include <memory>
 #include <utility>
+#include <vector>
+#include <functional>
+#include <span>
 #include <vulkan/vulkan.h>
 
 namespace Luth
 {
     class Mesh;
+    class VKVertexBuffer;
+    class VKIndexBuffer;
+    class VKAccelerationStructure;
+
+    // Vectors are sized before establishing native self-references; packets share stable storage.
+    struct BlasBuildCommand
+    {
+        std::vector<VkAccelerationStructureBuildGeometryInfoKHR> infos;
+        std::vector<VkAccelerationStructureGeometryKHR> geoms;
+        std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
+        std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> rangePtrs;
+        std::vector<std::shared_ptr<VKAccelerationStructure>> targets;
+        std::vector<std::shared_ptr<Mesh>> meshes;
+        std::vector<bool> firstBuilds;
+        PFN_vkCmdBuildAccelerationStructuresKHR record = nullptr;
+        u32 frameAbs = 0;
+        mutable bool recorded = false;
+        std::function<void()> abandon;
+        BlasBuildCommand() = default;
+        BlasBuildCommand(const BlasBuildCommand&) = delete;
+        BlasBuildCommand& operator=(const BlasBuildCommand&) = delete;
+        ~BlasBuildCommand() { if (!recorded && abandon) abandon(); }
+        void Record(VkCommandBuffer) const;
+    };
+
+    struct PreparedBlasBuild
+    {
+        std::vector<std::shared_ptr<const BlasBuildCommand>> commands;
+        u32 FirstBuildCount() const;
+        bool IsScheduled(const VKAccelerationStructure*, u32 frameAbs) const;
+        void Record(VkCommandBuffer cmd) const
+        { for (const auto& command : commands) command->Record(cmd); }
+    };
 
     // RAII wrapper for a single VkAccelerationStructureKHR + its persistent backing VkBuffer.
     // Used for both BLAS (per-mesh, owned by Mesh) and TLAS (per-frame, owned by RtSubsystem).
@@ -74,12 +110,14 @@ namespace Luth
         // and aligned to minAccelerationStructureScratchOffsetAlignment. Deformable reads its CURR
         // deformed region for `frameAbs`; static reads its fixed source VB. Sets IsBuildRecorded().
         void RecordBuild(VkCommandBuffer cmd, VkDeviceAddress scratchBda, u32 frameAbs);
+        std::shared_ptr<BlasBuildCommand> PrepareBuild(VkDeviceAddress scratchBda, u32 frameAbs) const;
 
         // Drains pending static BLAS builds onto `cmd` (the async-compute AS pass): records the MODE_BUILD
         // for each queued static BLAS whose VB/IB upload fence has retired (non-blocking poll), batching one
         // device-local scratch. A mesh evicted before its build cancels via weak_ptr expiry. Returns the
         // number of builds recorded (a null->ready transition the TLAS must fold in). see arch/rendering-pipeline.md
         static u32 DrainPendingStaticBuilds(VkCommandBuffer cmd, u32 frameAbs);
+        static PreparedBlasBuild PreparePendingStaticBuilds(u32 frameAbs);
 
     private:
         VkAccelerationStructureKHR m_Handle          = VK_NULL_HANDLE;
@@ -94,16 +132,29 @@ namespace Luth
         u64             m_UpdateScratchSize = 0;
         bool            m_IsDeformable     = false;
 
-        // Deferred initial build. The object is created up-front; RecordBuild replays this recipe onto a
-        // command buffer later (the async-compute AS pass), so no Mesh / VB shared_ptr is retained.
+        // Deferred initial build. The native recipe retains source buffers without retaining Mesh.
         bool                                 m_BuildRecorded     = false;
         u32                                  m_BuildFrameAbs     = ~0u;   // frameAbs of RecordBuild; ~0u = built at load
         VkDeviceAddress                      m_BuildVbBda        = 0;     // static source VB (deformable uses CURR region)
         VkDeviceAddress                      m_BuildIbBda        = 0;
+        // Retain the buffers behind the native recipe while a prepared build holds this AS.
+        std::shared_ptr<VKVertexBuffer>       m_BuildVertexBuffer;
+        std::shared_ptr<VKIndexBuffer>        m_BuildIndexBuffer;
         u32                                  m_BuildVertexStride = 0;
         u32                                  m_BuildMaxVertex    = 0;
         u64                                  m_BuildScratchSize  = 0;     // MODE_BUILD scratch (aligned)
         VkGeometryFlagsKHR                   m_GeomFlags         = 0;
         VkBuildAccelerationStructureFlagsKHR m_BuildFlags        = 0;
     };
+
+    // Scheduled readiness requires these retained batches to record before the matching TLAS.
+    inline bool IsBlasReadyForTlas(const VKAccelerationStructure* blas,
+        std::span<const PreparedBlasBuild> scheduled, u32 frameAbs)
+    {
+        if (!blas) return false;
+        if (blas->IsBuildRecorded()) return true;
+        for (const auto& batch : scheduled)
+            if (batch.IsScheduled(blas, frameAbs)) return true;
+        return false;
+    }
 }
