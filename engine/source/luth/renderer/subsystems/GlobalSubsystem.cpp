@@ -4,6 +4,7 @@
 #include "luth/renderer/Renderer.h"
 #include "luth/renderer/TaaJitter.h"
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
+#include "luth/renderer/backend/vulkan/VulkanGlobalBindings.h"
 #include "luth/scene/systems/RenderingSystem.h"
 #include "luth/core/FrameData.h"
 #include "luth/core/time/Time.h"
@@ -39,60 +40,18 @@ namespace Luth
         MaterialLayoutGuard::Validate(FileSystem::EngineAssetsPath("shaders/common/globals.slang"),
                                       "GlobalUniforms", kGuFields, sizeof(GlobalUniforms));
 
-        // Set 0 layout: 0 = GlobalUBO, 1-3 = IBL samplers, 4 = GTAO sampler, 5 = GTAO UBO, 6 = TLAS.
-        VkDescriptorSetLayoutBinding bindings[7] = {};
-
-        bindings[0].binding = 0;
-        bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        bindings[0].descriptorCount = 1;
-        // COMPUTE added so VolumetricSubsystem's inject pass + rt_sun_shadows.comp can sample
-        // camera/CSM uniforms (viewProjection / rtShadowParams) via rayQuery-in-compute.
-        bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
-                               | VK_SHADER_STAGE_COMPUTE_BIT;
-
-        for (u32 i = 1; i <= 4; ++i)
-        {
-            bindings[i].binding = i;
-            bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            bindings[i].descriptorCount = 1;
-            // COMPUTE added so VolumetricSubsystem's inject pass can sample IBL irradiance (b1)
-            // for the 2nd-order multi-scatter ambient term.
-            bindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
-        }
-
-        bindings[5].binding = 5;
-        bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        bindings[5].descriptorCount = 1;
-        bindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-        // TLAS binding. Stage flags span ray-query (frag/compute) + future RT-pipeline consumers.
-        // PARTIALLY_BOUND keeps boot / scene-empty frames legal: shaders that don't statically
-        // access binding 6 don't require the descriptor to be populated.
-        bindings[6].binding         = 6;
-        bindings[6].descriptorType  = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-        bindings[6].descriptorCount = 1;
-        bindings[6].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT
-                                    | VK_SHADER_STAGE_COMPUTE_BIT
-                                    | VK_SHADER_STAGE_RAYGEN_BIT_KHR
-                                    | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
-                                    | VK_SHADER_STAGE_MISS_BIT_KHR;
-
-        // invariant: cycled per-frame slots still need UAB; write-vs-still-pending
-        // races slip past the slot rotation in practice (validation layer 03047).
-        VkDescriptorBindingFlags bindingFlags[7] = {};
-        for (u32 i = 0; i < 6; ++i)
-            bindingFlags[i] = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
-        bindingFlags[6] = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
-                        | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+        const VulkanGlobalBindings nativeBindings(VulkanBarrierCapabilities::ForEnabledRtPackage(
+            VulkanContext::Get().SupportsRayTracing()));
+        m_TlasBindingEnabled = nativeBindings.HasTlasBinding();
         VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsCI{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO };
-        bindingFlagsCI.bindingCount  = 7;
-        bindingFlagsCI.pBindingFlags = bindingFlags;
+        bindingFlagsCI.bindingCount  = nativeBindings.count;
+        bindingFlagsCI.pBindingFlags = nativeBindings.flags.data();
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
         layoutInfo.pNext        = &bindingFlagsCI;
         layoutInfo.flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-        layoutInfo.bindingCount = 7;
-        layoutInfo.pBindings    = bindings;
+        layoutInfo.bindingCount = nativeBindings.count;
+        layoutInfo.pBindings    = nativeBindings.bindings.data();
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &m_GlobalSetLayout);
     }
 
@@ -104,6 +63,7 @@ namespace Luth
             vkDestroyDescriptorSetLayout(VulkanContext::Get().GetDevice(), m_GlobalSetLayout, nullptr);
             m_GlobalSetLayout = VK_NULL_HANDLE;
         }
+        m_TlasBindingEnabled = false;
     }
 
     // Allocates a per-frame UBO region from GPUTaggedPageAllocator and rebinds Set 0 binding 0 + Grid set
@@ -245,11 +205,11 @@ namespace Luth
         // ReSTIR DI consumption flag: set only when the subsystem is enabled AND this view's DI
         // image exists AND a TLAS is available (the conditions under which AddPasses actually writes
         // the DI). Otherwise pbr.frag must run its own point-light loop, so leave x = 0.
-        const bool restirActive = m_Pipeline->GetRestir().IsEnabled()
+        const bool restirActive = m_TlasBindingEnabled && m_Pipeline->GetRestir().IsEnabled()
                                && vr && vr->restirDI
                                && m_Pipeline->GetRt().GetTlas() != VK_NULL_HANDLE;
         // .y mirrors .x for the GI path; pbr.frag adds the demodulated indirect-diffuse image when set.
-        const bool restirGiActive = m_Pipeline->GetRestirGi().IsEnabled()
+        const bool restirGiActive = m_TlasBindingEnabled && m_Pipeline->GetRestirGi().IsEnabled()
                                  && vr && vr->restirGiDI
                                  && m_Pipeline->GetRt().GetTlas() != VK_NULL_HANDLE;
         // .z = ReSTIR-DI specular gate x intensity; 0 when DI inactive or the specular toggle is off.
@@ -268,7 +228,7 @@ namespace Luth
         // RT reflections: gate the pbr.frag composite on enabled AND a valid TLAS (the reflection
         // pass + denoiser no-op before the first build, leaving svgfSpecDenoised stale).
         const ReflectionsSettings& reflS = m_Pipeline->GetSystem().GetReflectionsSettings();
-        const bool reflActive = reflS.enabled && m_Pipeline->GetRt().GetTlas() != VK_NULL_HANDLE;
+        const bool reflActive = m_TlasBindingEnabled && reflS.enabled && m_Pipeline->GetRt().GetTlas() != VK_NULL_HANDLE;
         ubo.reflParams = Vec4(reflActive ? 1.0f : 0.0f, reflS.roughnessFadeStart, reflS.roughnessFadeEnd, 0.0f);
 
         // m_CachedViewProj is read this frame by cull-compute (frustum) and the frame debugger.
@@ -304,7 +264,7 @@ namespace Luth
         // TLAS write rides the same per-frame slot rotation as binding 0. Reads the handle the current
         // frame's TlasBuildPass published into RtSubsystem; on frame 0 the handle is null (TlasBuildPass
         // hasn't run yet), legal under PARTIALLY_BOUND + UAB when no shader statically accesses binding 6.
-        VkAccelerationStructureKHR tlas = m_Pipeline->GetRt().GetTlas();
+        VkAccelerationStructureKHR tlas = m_TlasBindingEnabled ? m_Pipeline->GetRt().GetTlas() : VK_NULL_HANDLE;
         VkWriteDescriptorSetAccelerationStructureKHR asWrite{
             VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
         asWrite.accelerationStructureCount = 1;

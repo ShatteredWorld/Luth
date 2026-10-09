@@ -15,6 +15,7 @@ add_executable(LuthTests
     jobs/test_waitcounter.cpp
     renderer/MeshDeformation.cpp
     renderer/MeshBufferUsage.cpp
+    renderer/GlobalBindings.cpp
     renderer/DebugOutputCatalog.cpp
     renderer/ViewPresentation.cpp
     renderer/ShaderReloadFanout.cpp

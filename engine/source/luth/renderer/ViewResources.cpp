@@ -1,4 +1,5 @@
 #include "luthpch.h"
+#include "luth/renderer/backend/vulkan/VulkanGlobalBindings.h"
 #include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/Renderer.h"
 #include "luth/renderer/subsystems/GlobalSubsystem.h"
@@ -203,7 +204,7 @@ namespace Luth
         VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         poolInfo.flags         = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
         poolInfo.maxSets       = k_ViewPoolMaxSets;
-        poolInfo.poolSizeCount = 5;
+        poolInfo.poolSizeCount = VulkanGlobalBindings::ViewPoolTypeCount(VulkanContext::Get().SupportsRayTracing());
         poolInfo.pPoolSizes    = poolSizes;
         vkCreateDescriptorPool(device, &poolInfo, nullptr, &vr.descPool);
 
