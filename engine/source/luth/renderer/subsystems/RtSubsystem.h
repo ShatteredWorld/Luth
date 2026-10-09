@@ -5,6 +5,7 @@
 #include "luth/renderer/backend/vulkan/VulkanRtMeshResources.h"
 #include "luth/renderer/backend/vulkan/VulkanAllocator.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
+#include "luth/renderer/features/rt/RtSunShadowBindings.h"
 #include "luth/renderer/rendergraph/RenderGraphResources.h"
 
 #include <memory>
@@ -69,16 +70,12 @@ namespace Luth
         void AddTlasBuildPass(RG::RenderGraph& rg);
         void AddTlasBuildPass(RG::RenderGraph& rg, std::shared_ptr<const PreparedRtScene>);
 
-        // Registers the RT sun-shadow compute pass on AsyncCompute. Imports the per-view sunShadowMask
-        // + reads SceneDepth + SlimNormal; the shader reads TLAS via static descriptor binding
-        // (set 0 binding 6) so no RG declaration of TLAS is needed at this pass; the cross-pass barrier
-        // (AS-build -> AS-read) is inline in the execute body, same pattern as the BLAS-refit ->
-        // TLAS-build barrier in TlasBuildPass. Returns the imported shadow mask handle for downstream
-        // Read(...) by GeometryPass. sceneDepth + slimNormal must be Read so RG transitions them to
-        // SHADER_READ_ONLY_OPTIMAL before the dispatch samples them (descriptor write declared that layout).
-        RG::ResourceHandle AddRtSunShadowsPass(RG::RenderGraph& rg,
-                                               RG::ResourceHandle sceneDepth,
-                                               RG::ResourceHandle slimNormal);
+        // Freeze native view/scene bindings before registration. The async pass captures the
+        // packet by value and preserves the inline AS-build -> compute-query-read barrier.
+        RtSunShadowBindings PrepareShadowBindings(const ViewResources&, const FrameTargets&,
+            u64 frameIndex, RenderViewId, u64 generation, const PreparedRtScene*) const;
+        static GraphTextureRef AddRtSunShadowsPass(RG::RenderGraph&, RG::ResourceHandle depth,
+            RG::ResourceHandle normal, const RtSunShadowBindings&);
 
         // Per-view pass-local descriptor set writer. Binds:
         //   set 2 binding 0 = SceneDepth sampler (linear clamp)

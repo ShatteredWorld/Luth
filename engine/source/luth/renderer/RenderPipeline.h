@@ -464,6 +464,7 @@ namespace Luth
         DebugDrawSubsystem      m_DebugDraw;
         bool                    m_RtNativeInitialized = false;
         std::unique_ptr<CompiledRenderPipeline> m_RtSceneComposition;
+        std::unique_ptr<CompiledRenderPipeline> m_RtSunShadowComposition;
         std::unique_ptr<PreparedPipelineFrame> m_RtScenePlan;
         RtSceneParameters m_RtSceneParameters;
         RtSubsystem             m_Rt;

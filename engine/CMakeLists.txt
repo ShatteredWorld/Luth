@@ -45,6 +45,7 @@ add_library(Luth STATIC
 
     source/luth/renderer/features/RenderBlackboard.cpp
     source/luth/renderer/features/GTAOFeature.cpp
+    source/luth/renderer/features/rt/RtSunShadowFeature.cpp
     source/luth/renderer/features/DeformationFeature.cpp
     source/luth/renderer/features/VisibilityFeature.cpp
     source/luth/renderer/features/DepthPrepassFeature.cpp

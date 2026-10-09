@@ -348,97 +348,75 @@ namespace Luth
         }
     }
 
-    RG::ResourceHandle RtSubsystem::AddRtSunShadowsPass(RG::RenderGraph& rg,
-                                                        RG::ResourceHandle sceneDepth,
-                                                        RG::ResourceHandle slimNormal)
+    RtSunShadowBindings RtSubsystem::PrepareShadowBindings(const ViewResources& vr, const FrameTargets& targets,
+        u64 frameIndex, RenderViewId view, u64 generation, const PreparedRtScene* scene) const
     {
-        LH_PROFILE_FUNCTION();
-        // Pre-flight: pipeline must exist (shaders loaded). Mask must exist (view allocated).
-        ViewResources* preflightVr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
-        if (!m_SunShadowsPipeline || !preflightVr || !preflightVr->sunShadowMask)
-            return {};
+        RtSunShadowBindings packet;
+        if (!m_SunShadowsPipeline || !vr.sunShadowMask || !targets.GetSceneDepth() || !targets.GetSlimNormal())
+            return packet;
+        const auto mask = std::static_pointer_cast<VKTexture>(vr.sunShadowMask);
+        packet.pipeline = m_SunShadowsPipeline->GetHandle();
+        packet.layout = m_SunShadowsPipeline->GetLayout();
+        const auto slot = static_cast<u32>(frameIndex % MAX_FRAMES_IN_FLIGHT);
+        packet.sets = {vr.globalDescriptorSet[slot], vr.lightDescSet[slot], vr.rtShadowPassDescSet[slot],
+            MaterialSystem::GetDescriptorSet(slot), VulkanContext::Get().GetBindlessSet().GetSet()};
+        packet.image = mask->GetImage();
+        packet.imageView = mask->GetImageView();
+        packet.mask = {mask.get()};
+        packet.depthSource = targets.GetSceneDepth().get();
+        packet.normalSource = targets.GetSlimNormal().get();
+        packet.view = view;
+        packet.generation = generation;
+        packet.frameIndex = frameIndex;
+        packet.width = vr.width;
+        packet.height = vr.height;
+        if (scene) {
+            packet.tlas = scene->GetTlas();
+            packet.geometryTable = scene->GetGeometryTableBDA();
+        }
+        return packet;
+    }
 
-        struct RtSunShadowsData {
-            RG::ResourceHandle mask;
-            RG::ResourceHandle depth;
-            RG::ResourceHandle normal;
-        };
-        RG::ResourceHandle outputHandle{};
-        rg.AddComputePass<RtSunShadowsData>(
-            "RtSunShadows",
-            RG::QueueFamily::AsyncCompute,
-            [&, this](RtSunShadowsData& data, RG::RenderPassBuilder& builder) {
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                auto maskTex = std::static_pointer_cast<VKTexture>(vr->sunShadowMask);
-
+    GraphTextureRef RtSubsystem::AddRtSunShadowsPass(RG::RenderGraph& rg, RG::ResourceHandle depth,
+        RG::ResourceHandle normal, const RtSunShadowBindings& packet)
+    {
+        if (!packet.pipeline) return {};
+        struct Data { RG::ResourceHandle mask; };
+        RG::ResourceHandle output;
+        rg.AddComputePass<Data>("RtSunShadows", RG::QueueFamily::AsyncCompute,
+            [&](Data& data, RG::RenderPassBuilder& builder) {
                 RG::TextureDesc desc;
-                desc.name   = "SunShadowMask";
-                desc.width  = maskTex->GetWidth();
-                desc.height = maskTex->GetHeight();
+                desc.name = "SunShadowMask";
+                desc.width = packet.width;
+                desc.height = packet.height;
                 desc.format = RG::TextureFormat::R8_Unorm;
-
-                data.mask = rg.ImportResource(desc,
-                    (void*)maskTex->GetImage(), (void*)maskTex->GetImageView(),
+                data.mask = rg.ImportResource(desc, (void*)packet.image, (void*)packet.imageView,
                     RG::ResourceState::Undefined);
                 data.mask = builder.WriteStorageImage(data.mask);
-                // SceneDepth + slimNormal are descriptor-bound to the pass-local set (set 2 b0, b1) with
-                // imageLayout = SHADER_READ_ONLY_OPTIMAL. ReadStorageImage maps to ResourceState::ComputeRead
-                // (COMPUTE_SHADER | RAY_TRACING_SHADER stages, SHADER_READ_ONLY_OPTIMAL layout); compatible
-                // with AsyncCompute, unlike plain Read which uses FRAGMENT_SHADER_BIT and would error on this
-                // queue. Despite the name, the descriptor type is COMBINED_IMAGE_SAMPLER, not storage; the
-                // "StorageImage" suffix is about queue affinity (same convention used by
-                // VolumetricSubsystem::AddInjectScatterPass for the cascade shadow reads).
-                if (sceneDepth.IsValid()) data.depth  = builder.ReadStorageImage(sceneDepth);
-                if (slimNormal.IsValid()) data.normal = builder.ReadStorageImage(slimNormal);
-                outputHandle = data.mask;
+                builder.ReadStorageImage(depth);
+                builder.ReadStorageImage(normal);
+                output = data.mask;
             },
-            [this](RtSunShadowsData&, RG::RenderPassContext& ctx) {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                ViewResources*  vr  = m_Pipeline->GetCurrentViewResources();
-                if (!vr) return;
-
-                const u64 frameAbs = Renderer::GetFrameData()->GetRenderFrameIndex();
-                const u32 slot     = static_cast<u32>(frameAbs % MAX_FRAMES_IN_FLIGHT);
-
-                // AS-build -> AS-read barrier. TlasBuildPass (same AsyncCompute primary) emits
-                // BLAS->TLAS-build barriers internally but not the final AS-write -> read hop. Without
-                // this, the dispatch may sample a TLAS that's still being built. dstStage = COMPUTE_SHADER
-                // (NOT RAY_TRACING: rayQuery runs in compute; a RAY_TRACING dst here is a TDR trap).
-                VkMemoryBarrier2 asBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-                asBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
-                asBarrier.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-                asBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-                asBarrier.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-                VkDependencyInfo asDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-                asDep.memoryBarrierCount = 1;
-                asDep.pMemoryBarriers    = &asBarrier;
-                vkCmdPipelineBarrier2(cmd, &asDep);
-
-                m_SunShadowsPipeline->Bind(cmd);
-
-                // Sets: 0 = global (TLAS + UBO), 1 = light SSBO (PBR's Set 3 remapped to Set 1), 2 = per-view
-                // pass-local (depth + normal + mask), 3 = Material SSBO, 4 = bindless (cutout alpha-test).
-                VkDescriptorSet sets[5] = {
-                    vr->globalDescriptorSet[slot],
-                    vr->lightDescSet[slot],
-                    vr->rtShadowPassDescSet[slot],
-                    MaterialSystem::GetDescriptorSet(slot),
-                    VulkanContext::Get().GetBindlessSet().GetSet(),
-                };
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                        m_SunShadowsPipeline->GetLayout(),
-                                        /*firstSet*/ 0, 5, sets, 0, nullptr);
-
-                const VkDeviceAddress geomTableBDA = GetGeometryTableBDA();
-                vkCmdPushConstants(cmd, m_SunShadowsPipeline->GetLayout(),
-                                   VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(geomTableBDA), &geomTableBDA);
-
-                const u32 groupX = (vr->width  + 7) / 8;
-                const u32 groupY = (vr->height + 7) / 8;
-                vkCmdDispatch(cmd, groupX, groupY, 1);
+            [packet](Data&, RG::RenderPassContext& ctx) {
+                const auto cmd = ctx.commandBuffer;
+                // Ray queries execute in compute. Preserve AS build-write -> query-read visibility.
+                VkMemoryBarrier2 memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+                memory.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+                memory.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+                memory.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                memory.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+                VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+                dependency.memoryBarrierCount = 1;
+                dependency.pMemoryBarriers = &memory;
+                vkCmdPipelineBarrier2(cmd, &dependency);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, packet.pipeline);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, packet.layout,
+                    0, static_cast<u32>(packet.sets.size()), packet.sets.data(), 0, nullptr);
+                vkCmdPushConstants(cmd, packet.layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                    0, sizeof(packet.geometryTable), &packet.geometryTable);
+                vkCmdDispatch(cmd, (packet.width + 7) / 8, (packet.height + 7) / 8, 1);
             });
-
-        return outputHandle;
+        return {output, packet.mask};
     }
 
     void PreparedRtScene::Record(VkCommandBuffer cmd) const

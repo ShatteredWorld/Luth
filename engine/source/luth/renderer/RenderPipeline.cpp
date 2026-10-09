@@ -23,6 +23,7 @@
 #include "luth/renderer/features/ClusterVizFeature.h"
 #include "luth/renderer/features/FogVizFeature.h"
 #include "luth/renderer/features/rt/GiReservoirVizFeature.h"
+#include "luth/renderer/features/rt/RtSunShadowFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -148,7 +149,8 @@ namespace Luth
             m_DenoiseDiSpec->Init(*this);
             RenderPipelineDefinition sceneDefinition;
             sceneDefinition.AddFeature<RtSceneFeature>(m_Rt);
-            for (size_t i = 0; i < static_cast<size_t>(RtSceneConsumer::Count); ++i)
+            sceneDefinition.AddFeature<RtSunShadowDemandFeature>();
+            for (size_t i = 1; i < static_cast<size_t>(RtSceneConsumer::Count); ++i)
                 sceneDefinition.AddFeature<RtSceneDemandFeature>(static_cast<RtSceneConsumer>(i));
             PipelineInputContract sceneInputs;
             sceneInputs.resources = {{RtSceneResources::Parameters}};
@@ -156,6 +158,16 @@ namespace Luth
             auto sceneCompiled = RenderPipelineCompiler{}.Compile(std::move(sceneDefinition), sceneCapabilities, sceneInputs);
             if (!sceneCompiled.ReplaceIfValid(m_RtSceneComposition))
                 throw std::runtime_error("RT scene definition failed semantic validation");
+            RenderPipelineDefinition shadowDefinition;
+            shadowDefinition.AddFeature<RtSunShadowFeature>();
+            PipelineInputContract shadowInputs;
+            shadowInputs.resources = {{RtSceneResources::Parameters}, {RtSunShadowResources::Bindings},
+                {RenderResources::SurfaceDepth}, {RenderResources::Normal},
+                {RtSceneResources::Scene, ResourceOutputPresence::Optional}};
+            shadowInputs.capabilities = {&RtSceneResources::RayScene};
+            auto shadowCompiled = RenderPipelineCompiler{}.Compile(std::move(shadowDefinition), sceneCapabilities, shadowInputs);
+            if (!shadowCompiled.ReplaceIfValid(m_RtSunShadowComposition))
+                throw std::runtime_error("RT sun-shadow definition failed semantic validation");
         }
         m_Skinning.Init();
         RenderPipelineDefinition deformationDefinition;
@@ -429,6 +441,7 @@ namespace Luth
             m_Restir.Shutdown();
             m_RtScenePlan.reset();
             m_RtSceneComposition.reset();
+            m_RtSunShadowComposition.reset();
             m_Rt.Shutdown();
             m_RtNativeInitialized = false;
         }
@@ -707,13 +720,12 @@ namespace Luth
         // Prepared before global descriptor writes; recorded BEFORE the volumetric chain so its rayQuery reads a BUILT TLAS.
         // passes execute in registration order on the shared compute primary; the inline AS barrier gives memory visibility,
         // not execution ordering. Multi-view guard inside RtSubsystem short-circuits the second view (TLAS is scene-global).
-        const bool runRtShadows = m_RtNativeInitialized && (m_Global.GetShadowParams().mode == ShadowingMode::RtShadows)
-                               && m_Global.GetShadowParams().castShadows;
         // Per-view fog toggle: also gates its declared RT scene consumer, so a fog-off view doesn't
         // build a TLAS the (then-unregistered) scatter pass would never read.
         const bool volumetricEnabled = view.camera.enableVolumetricFog;
         // Preserve the per-view demand decision frozen before uniform writes. The scene-global
         // packet is shared, while views with no RT consumers still register no scene-build pass.
+        RaySceneRef rayScene;
         if (m_RtSceneComposition)
         {
             if (!m_RtScenePlan) return false;
@@ -725,7 +737,8 @@ namespace Luth
             ViewRenderInputs inputs;
             inputs.id = view.id;
             inputs.resourceGeneration = m_CurrentViewResources->generation;
-            const auto built = m_RtSceneComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), {}, m_RtScenePlan.get());
+            const std::array exports{RenderOutputBinding::Capture(RtSceneResources::Scene, rayScene)};
+            const auto built = m_RtSceneComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports, m_RtScenePlan.get());
             m_RtScenePlan.reset();
             if (!built.success)
             {
@@ -792,9 +805,33 @@ namespace Luth
         // GTAO chain below. Gated on RT mode + CastShadows; CSM mode (or CastShadows=false) returns invalid handle
         // and GeometryPass skips the Read. Threads surfaceDepth.handle + slimGB.normal so RG transitions them from
         // DSA/COLOR_ATTACHMENT to SHADER_READ_ONLY_OPTIMAL ahead of the raygen sample (descriptor declared that layout).
-        RG::ResourceHandle rtShadowMaskHandle{};
-        if (runRtShadows && !ptEnabled)
-            rtShadowMaskHandle = m_Rt.AddRtSunShadowsPass(rg, surfaceDepth.handle, slimGB.normal);
+        GraphTextureRef rtShadowMask;
+        if (m_RtSunShadowComposition)
+        {
+            const auto frameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            const auto native = m_Rt.PrepareShadowBindings(*m_CurrentViewResources, *view.targets,
+                frameIndex, view.id, m_CurrentViewResources->generation, rayScene.native);
+            const RtSunShadowBindingRef binding{&native};
+            const std::array resources{RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters),
+                RenderInputBinding::Present(RtSunShadowResources::Bindings, binding),
+                RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
+                RenderInputBinding::Present(RenderResources::Normal, normalOutput),
+                rayScene.native ? RenderInputBinding::Present(RtSceneResources::Scene, rayScene) : RenderInputBinding::Absent(RtSceneResources::Scene)};
+            FrameRenderInputs frame;
+            frame.renderFrameIndex = frameIndex; frame.resources = resources;
+            frame.capabilities = rayScene.native ? std::span<const RenderCapabilityIdentity* const>(RtSceneResources::Requests)
+                : std::span<const RenderCapabilityIdentity* const>{};
+            ViewRenderInputs inputs;
+            inputs.id = view.id; inputs.resourceGeneration = m_CurrentViewResources->generation;
+            inputs.width = m_CurrentViewResources->width; inputs.height = m_CurrentViewResources->height;
+            const std::array exports{RenderOutputBinding::Capture(RtSunShadowResources::Mask, rtShadowMask)};
+            const auto built = m_RtSunShadowComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports);
+            if (!built.success) {
+                for (const auto& diagnostic : built.diagnostics)
+                    LH_LOG(Renderer, error, "RT sun-shadow composition: {}", diagnostic.message);
+                return false;
+            }
+        }
 
         // ReSTIR DI: shadowed direct lighting for point lights via per-pixel reservoir RIS + one
         // visibility ray, then a demodulated-irradiance shade. AsyncCompute; reads prepass depth +
@@ -921,7 +958,8 @@ namespace Luth
             const auto pickingTarget = m_Geometry.ImportForwardTarget(rg, *view.targets->GetEntityIDBuffer(),
                 "EntityID", RG::TextureFormat::R32_Uint, RG::ResourceState::Undefined);
             // Transitional RT references are barrier reads; existing native Set 3 owns their descriptors.
-            const GraphTextureRef sunSignal{rtShadowMaskHandle, {}}, diSignal{denoisedDIHandle, {}},
+            const GraphTextureRef sunSignal = rtShadowMask;
+            const GraphTextureRef diSignal{denoisedDIHandle, {}},
                 giSignal{denoisedGiHandle, {}}, reflectionSignal{denoisedReflHandle, {}}, specularSignal{denoisedDiSpecHandle, {}};
             const auto optionalImage = [](auto key, const GraphTextureRef& value) {
                 return value.handle.IsValid() ? RenderInputBinding::Present(key, value) : RenderInputBinding::Absent(key);
