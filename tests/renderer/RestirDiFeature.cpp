@@ -126,3 +126,12 @@ TEST_CASE("RestirDiFeature: scene demand follows DI activation and PT exclusion 
     unsupported.AddFeature<RestirDiFeature>();
     CHECK_FALSE(RenderPipelineCompiler{}.Compile(std::move(unsupported), {}, inputs).pipeline);
 }
+
+TEST_CASE("RestirDiFeature: disabled specular publishes absence while preserving native shade topology") {
+    Fixture f; f.native.settings.specular = false;
+    Memory::LinearAllocator scratch(128 * 1024); RG::RenderGraph graph(scratch);
+    GraphTextureRef diffuse, specular{{99, 0}, {Native<const Texture*>(100)}};
+    REQUIRE(f.Build(graph, scratch, diffuse, specular).success); CHECK(graph.GetPasses().size() == 4);
+    CHECK(diffuse.handle.IsValid()); CHECK_FALSE(specular.handle.IsValid()); CHECK(specular.binding.texture == nullptr);
+    CHECK(graph.GetResources().size() == 6); // The native shade still writes both physical images.
+}

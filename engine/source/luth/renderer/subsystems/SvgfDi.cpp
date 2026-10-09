@@ -33,11 +33,15 @@ namespace Luth
         RenderViewId id, u64 generation, const SvgfSettings& settings) const
     {
         DiDenoiserBindings native;
-        if (m_Channel != DenoiserChannel::Di || !vr.diDenoiser || !vr.diDenoiser->input) return native;
-        const auto& state = *vr.diDenoiser;
-        if (state.id != id || state.input->id != id || state.signal != DiDenoiserSignal::Diffuse)
+        if (m_Channel != DenoiserChannel::Di && m_Channel != DenoiserChannel::DiSpecular) return native;
+        const bool specular = m_Channel == DenoiserChannel::DiSpecular;
+        const auto& owner = specular ? vr.diSpecDenoiser : vr.diDenoiser;
+        if (!owner || !owner->input) return native;
+        const auto& state = *owner;
+        if (state.id != id || state.input->id != id ||
+            state.signal != (specular ? DiDenoiserSignal::Specular : DiDenoiserSignal::Diffuse))
             throw std::invalid_argument("DenoiseDI: incompatible native view owner");
-        native.retained = vr.diDenoiser; native.settings = settings;
+        native.signal = state.signal; native.retained = owner; native.settings = settings;
         native.view = id; native.generation = generation; native.frameIndex = frame;
         native.fullWidth = vr.width; native.fullHeight = vr.height;
         native.width = state.width; native.height = state.height;
@@ -55,7 +59,7 @@ namespace Luth
             binding = {texture.get()}; const auto vk = std::static_pointer_cast<VKTexture>(texture);
             image = vk->GetImage(); view = vk->GetImageView();
         };
-        freeze(state.input->restirDI, native.sources[0], native.sourceImages[0], native.sourceViews[0]);
+        freeze(*state.Noisy(), native.sources[0], native.sourceImages[0], native.sourceViews[0]);
         for (u32 i = 0; i < state.sources.size(); ++i) {
             freeze(state.sources[i], native.sources[i + 1], native.sourceImages[i + 1], native.sourceViews[i + 1]);
             native.sourceViews[i + 1] = state.sourceViews[i]; // Descriptor views selected by the owner.
@@ -71,6 +75,7 @@ namespace Luth
         const std::array<RG::ResourceHandle, 6>& inputs, const DiDenoiserBindings& native)
     {
         if (!inputs[0].IsValid() || !native.Ready()) return {};
+        const bool specular = native.signal == DiDenoiserSignal::Specular;
         auto import = [&](VkImage image, VkImageView view, const char* name) {
             RG::TextureDesc desc; desc.name = name; desc.width = native.width; desc.height = native.height;
             desc.format = RG::TextureFormat::RGBA16_Float;
@@ -78,7 +83,7 @@ namespace Luth
         };
         if (!native.ChainReady()) {
             struct Data { RG::ResourceHandle in, out; }; RG::ResourceHandle output;
-            graph.AddComputePass<Data>("SvgfPassthrough", RG::QueueFamily::AsyncCompute,
+            graph.AddComputePass<Data>(specular ? "SvgfDiSpecPassthrough" : "SvgfPassthrough", RG::QueueFamily::AsyncCompute,
                 [&](Data& data, RG::RenderPassBuilder& builder) {
                     data.in = builder.ReadStorageImage(inputs[0]);
                     data.out = builder.WriteStorageImage(import(native.outputImage, native.outputView, "SvgfDenoised"));
@@ -96,7 +101,7 @@ namespace Luth
         const MomentsPC mpc{s.phiDepth, s.phiNormal, scale, width, height};
         struct ReprojectData { RG::ResourceHandle color, moments; };
         RG::ResourceHandle color, moments;
-        graph.AddComputePass<ReprojectData>("SvgfReproject", RG::QueueFamily::AsyncCompute,
+        graph.AddComputePass<ReprojectData>(specular ? "SvgfDiSpecReproject" : "SvgfReproject", RG::QueueFamily::AsyncCompute,
             [&](ReprojectData& data, RG::RenderPassBuilder& builder) {
                 for (u32 i = 0; i < 5; ++i) builder.ReadStorageImage(inputs[i]);
                 data.color = builder.WriteStorageImage(import(native.workingImages[0], native.workingViews[0], "SvgfColorHistCurr"));
@@ -108,7 +113,7 @@ namespace Luth
                 Dispatch(ctx.commandBuffer, native);
             });
         struct MomentsData { RG::ResourceHandle out; }; RG::ResourceHandle a0;
-        graph.AddComputePass<MomentsData>("SvgfMoments", RG::QueueFamily::AsyncCompute,
+        graph.AddComputePass<MomentsData>(specular ? "SvgfDiSpecMoments" : "SvgfMoments", RG::QueueFamily::AsyncCompute,
             [&](MomentsData& data, RG::RenderPassBuilder& builder) {
                 builder.ReadStorageImageGeneral(color); builder.ReadStorageImageGeneral(moments);
                 builder.ReadStorageImage(inputs[1]); builder.ReadStorageImage(inputs[2]);
@@ -122,9 +127,10 @@ namespace Luth
         const u32 iterations = std::max(1u, s.atrousIterations);
         for (u32 i = 0; i < iterations; ++i) {
             const u32 in = i & 1u, out = in ^ 1u; const bool final = i == iterations - 1;
-            const AtrousPC pc{1 << i, final ? 1 : 0, s.phiColor, s.phiNormal, s.phiDepth, scale, width, height, 0.0f};
+            const AtrousPC pc{1 << i, final ? 1 : 0, s.phiColor, s.phiNormal, s.phiDepth, scale, width, height,
+                specular ? s.phiRough : 0.0f};
             struct Data { RG::ResourceHandle in, out, denoised; };
-            graph.AddComputePass<Data>("SvgfAtrous", RG::QueueFamily::AsyncCompute,
+            graph.AddComputePass<Data>(specular ? "SvgfDiSpecAtrous" : "SvgfAtrous", RG::QueueFamily::AsyncCompute,
                 [&](Data& data, RG::RenderPassBuilder& builder) {
                     data.in = builder.ReadStorageImageGeneral(atrous[in]);
                     builder.ReadStorageImage(inputs[1]); builder.ReadStorageImage(inputs[2]); builder.ReadStorageImage(inputs[5]);

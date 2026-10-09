@@ -82,6 +82,8 @@ namespace Luth
         const auto result = RtRestirSubsystem::AddPasses(graph, inputs[0].handle, inputs[1].handle,
             inputs[2].handle, inputs[3].handle, *native, lights.handle);
         ctx.resources.Publish(RestirDiResources::Diffuse, GraphTextureRef{result.di, native->outputs[0]});
-        ctx.resources.Publish(RestirDiResources::Specular, GraphTextureRef{result.spec, native->outputs[1]});
+        if (native->settings.specular)
+            ctx.resources.Publish(RestirDiResources::Specular, GraphTextureRef{result.spec, native->outputs[1]});
+        else ctx.resources.PublishAbsent(RestirDiResources::Specular);
     }
 }

@@ -8,6 +8,7 @@ namespace Luth
     struct DiDenoiserBindings
     {
         std::array<VkPipeline, 4> pipelines{}; // Copy, reproject, moments, a-trous.
+        DiDenoiserSignal signal = DiDenoiserSignal::Diffuse;
         std::array<VkPipelineLayout, 4> layouts{};
         VkDescriptorSet globalSet = VK_NULL_HANDLE, copySet = VK_NULL_HANDLE;
         VkDescriptorSet reprojectSet = VK_NULL_HANDLE, momentsSet = VK_NULL_HANDLE;

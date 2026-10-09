@@ -12,9 +12,12 @@ namespace {
     template<class T> T Native(u64 n) { return reinterpret_cast<T>(static_cast<uintptr_t>(n)); }
     struct Fixture {
         DiDenoiserBindings native;
+        bool isSpecular = false;
         u32 fullWidth = 1279, fullHeight = 719, width = 1279, height = 719;
         std::unique_ptr<CompiledRenderPipeline> pipeline;
-        Fixture(bool half = false, u32 fullW = 1279, u32 fullH = 719) {
+        Fixture(bool half = false, u32 fullW = 1279, u32 fullH = 719, bool specular = false) {
+            isSpecular = specular;
+            native.signal = specular ? DiDenoiserSignal::Specular : DiDenoiserSignal::Diffuse;
             fullWidth = fullW; fullHeight = fullH;
             width = half ? std::max(fullWidth / 2, 1u) : fullWidth;
             height = half ? std::max(fullHeight / 2, 1u) : fullHeight;
@@ -28,13 +31,14 @@ namespace {
             for (u32 i = 0; i < 4; ++i) { native.working[i] = {Native<const Texture*>(40 + i)};
                 native.workingImages[i] = Native<VkImage>(50 + i); native.workingViews[i] = Native<VkImageView>(60 + i); }
             native.output = {Native<const Texture*>(70)}; native.outputImage = Native<VkImage>(80); native.outputView = Native<VkImageView>(90);
-            RenderPipelineDefinition definition; definition.AddFeature<DiDenoiserFeature>();
-            auto result = RenderPipelineCompiler{}.Compile(std::move(definition), {}, Inputs());
+            RenderPipelineDefinition definition; definition.AddFeature<DiDenoiserFeature>(native.signal);
+            auto result = RenderPipelineCompiler{}.Compile(std::move(definition), {}, Inputs(specular));
             REQUIRE(result.pipeline); pipeline = std::move(result.pipeline);
         }
-        static PipelineInputContract Inputs() {
+        static PipelineInputContract Inputs(bool specular = false) {
             PipelineInputContract inputs;
-            inputs.resources = {{DiDenoiserResources::Bindings}, {RestirDiResources::Diffuse, ResourceOutputPresence::Optional},
+            inputs.resources = {{specular ? DiDenoiserResources::SpecularBindings : DiDenoiserResources::Bindings},
+                {specular ? RestirDiResources::Specular : RestirDiResources::Diffuse, ResourceOutputPresence::Optional},
                 {RenderResources::SurfaceDepth}, {RenderResources::Normal}, {RenderResources::MotionVectors}, {RenderResources::MaterialID}, {RenderResources::Roughness}};
             return inputs;
         }
@@ -48,14 +52,16 @@ namespace {
                 textures[i] = {graph.ImportResource(desc, (void*)Native<VkImage>(20 + i), (void*)Native<VkImageView>(30 + i), RG::ResourceState::ColorAttachment), {Native<const Texture*>(10 + i)}};
             }
             const DiDenoiserBindingRef ref{packet ? &native : nullptr};
-            const std::array resources{RenderInputBinding::Present(DiDenoiserResources::Bindings, ref),
-                noisy ? RenderInputBinding::Present(RestirDiResources::Diffuse, textures[0]) : RenderInputBinding::Absent(RestirDiResources::Diffuse),
+            const bool specular = isSpecular;
+            const auto rawKey = specular ? RestirDiResources::Specular : RestirDiResources::Diffuse;
+            const std::array resources{RenderInputBinding::Present(specular ? DiDenoiserResources::SpecularBindings : DiDenoiserResources::Bindings, ref),
+                noisy ? RenderInputBinding::Present(rawKey, textures[0]) : RenderInputBinding::Absent(rawKey),
                 RenderInputBinding::Present(RenderResources::SurfaceDepth, textures[1]), RenderInputBinding::Present(RenderResources::Normal, textures[2]),
                 RenderInputBinding::Present(RenderResources::MotionVectors, textures[3]), RenderInputBinding::Present(RenderResources::MaterialID, textures[4]),
                 RenderInputBinding::Present(RenderResources::Roughness, textures[5])};
             FrameRenderInputs frame; frame.renderFrameIndex = (1ull << 32) + 43; frame.resources = resources;
             ViewRenderInputs view; view.id = {1}; view.resourceGeneration = 3; view.width = fullWidth; view.height = fullHeight;
-            const std::array exports{RenderOutputBinding::Capture(DiDenoiserResources::Diffuse, output)};
+            const std::array exports{RenderOutputBinding::Capture(specular ? DiDenoiserResources::Specular : DiDenoiserResources::Diffuse, output)};
             return pipeline->Build(graph, frame, view, scratch, exports);
         }
     };
@@ -143,4 +149,71 @@ TEST_CASE("DiDenoiserFeature: compiler orders DI before its optional denoiser an
     inputs = Fixture::Inputs(); inputs.resources.erase(inputs.resources.begin() + 5); // Material ID.
     RenderPipelineDefinition invalid; invalid.AddFeature<DiDenoiserFeature>();
     auto failed = RenderPipelineCompiler{}.Compile(std::move(invalid), {}, inputs); CHECK_FALSE(failed.pipeline); CHECK_FALSE(failed.diagnostics.empty());
+}
+
+TEST_CASE("DiDenoiserFeature: specular full half and narrow chains retain native names and resources") {
+    bool half = false; u32 w = 1279, h = 719;
+    SUBCASE("Full") {} SUBCASE("Half") { half = true; } SUBCASE("Narrow") { half = true; w = 1; h = 9; }
+    Fixture f(half, w, h, true); Memory::LinearAllocator scratch(128 * 1024); RG::RenderGraph graph(scratch); GraphTextureRef output;
+    REQUIRE(f.Build(graph, scratch, output).success); REQUIRE(graph.GetPasses().size() == 7);
+    CHECK(graph.GetPasses()[0].name == "SvgfDiSpecReproject"); CHECK(graph.GetPasses()[1].name == "SvgfDiSpecMoments");
+    CHECK(graph.GetPasses()[0].reads.size() == 5); CHECK(graph.GetPasses()[1].reads.size() == 4);
+    for (u32 i = 2; i < 7; ++i) { CHECK(graph.GetPasses()[i].name == "SvgfDiSpecAtrous"); CHECK(graph.GetPasses()[i].reads.size() == 4); }
+    REQUIRE(output.handle.IsValid()); CHECK(output.binding.texture == f.native.output.texture);
+    CHECK(graph.GetResources()[output.handle.index - 1].desc.width == f.width);
+    CHECK(graph.GetResources()[output.handle.index - 1].desc.height == f.height);
+    CHECK(graph.GetResources().size() == 11);
+    graph.Compile(); for (const auto& pass : graph.GetPasses()) { CHECK_FALSE(pass.culled); CHECK(pass.queueFamily == RG::QueueFamily::AsyncCompute); }
+}
+TEST_CASE("DiDenoiserFeature: specular raw copy and absent signals preserve optional output behavior") {
+    Fixture f(true, 1279, 719, true); bool noisy = true, packet = true, copy = true;
+    SUBCASE("Disabled denoising") { f.native.settings.enabled = false; }
+    SUBCASE("Incomplete chain") { f.native.pipelines[2] = VK_NULL_HANDLE; }
+    SUBCASE("Signal disabled") { noisy = false; copy = false; }
+    SUBCASE("Packet absent") { packet = false; copy = false; }
+    SUBCASE("Native unavailable") { f.native.pipelines.fill(VK_NULL_HANDLE); copy = false; }
+    Memory::LinearAllocator scratch(128 * 1024); RG::RenderGraph graph(scratch); GraphTextureRef output{{99, 0}, {Native<const Texture*>(100)}};
+    REQUIRE(f.Build(graph, scratch, output, noisy, packet).success);
+    if (copy) { REQUIRE(graph.GetPasses().size() == 1); CHECK(graph.GetPasses()[0].name == "SvgfDiSpecPassthrough"); CHECK(output.handle.IsValid()); }
+    else { CHECK(graph.GetPasses().empty()); CHECK_FALSE(output.handle.IsValid()); CHECK(output.binding.texture == nullptr); }
+    SvgfDenoiser dormant(DenoiserChannel::DiSpecular); ViewResources vr;
+    CHECK_FALSE(dormant.PrepareDiBindings(vr, 43, {1}, 3, {}).Ready());
+}
+TEST_CASE("DiDenoiserFeature: specular rejects mismatched channels provenance and roughness bindings") {
+    Fixture f(false, 1279, 719, true);
+    SUBCASE("Wrong signal") { f.native.signal = DiDenoiserSignal::Diffuse; }
+    SUBCASE("Frame") { f.native.frameIndex = 43; }
+    SUBCASE("View") { f.native.view = {2}; }
+    SUBCASE("Generation") { ++f.native.generation; }
+    SUBCASE("Wrong raw producer") { f.native.sources[0].texture = Native<const Texture*>(99); }
+    SUBCASE("Roughness descriptor") { f.native.sourceViews[5] = Native<VkImageView>(99); }
+    SUBCASE("Roughness parameter") { f.native.settings.phiRough = std::numeric_limits<f32>::quiet_NaN(); }
+    SUBCASE("History aliases raw") { f.native.workingImages[0] = f.native.sourceImages[0]; }
+    SUBCASE("Unsafe iterations") { f.native.settings.atrousIterations = 32; }
+    Memory::LinearAllocator scratch(128 * 1024); RG::RenderGraph graph(scratch); GraphTextureRef output;
+    CHECK_FALSE(f.Build(graph, scratch, output).success); CHECK(graph.GetPasses().empty()); CHECK_FALSE(output.handle.IsValid());
+}
+TEST_CASE("DiDenoiserFeature: specular jobs retain their own domain resources") {
+    Fixture f(false, 1279, 719, true); auto state = std::make_shared<DiDenoiserViewState>(); state->signal = DiDenoiserSignal::Specular;
+    std::weak_ptr<DiDenoiserViewState> retained = state; f.native.retained = state; state.reset();
+    Memory::LinearAllocator scratch(128 * 1024);
+    { RG::RenderGraph graph(scratch); GraphTextureRef output; REQUIRE(f.Build(graph, scratch, output).success);
+      f.native.retained.reset(); f.native.settings.phiRough = 9; f.native.pipelines.fill(VK_NULL_HANDLE); CHECK_FALSE(retained.expired()); }
+    CHECK(retained.expired());
+}
+TEST_CASE("DiDenoiserFeature: compiler orders both signals and rejects duplicate signal outputs") {
+    auto inputs = Fixture::Inputs(); inputs.resources.erase(inputs.resources.begin() + 1);
+    inputs.resources.push_back({DiDenoiserResources::SpecularBindings});
+    for (auto key : {ResourceKeyRef{RtSceneResources::Parameters}, ResourceKeyRef{RestirDiResources::Bindings}, ResourceKeyRef{RenderResources::LightData}}) inputs.resources.push_back({key});
+    inputs.resources.push_back({RtSceneResources::Scene, ResourceOutputPresence::Optional}); inputs.capabilities = {&RtSceneResources::RayScene};
+    const RendererCapabilities caps{{&RtSceneResources::AccelerationStructures, &RtSceneResources::RayQueries}};
+    RenderPipelineDefinition definition;
+    const auto spec = definition.AddFeature<DiDenoiserFeature>(DiDenoiserSignal::Specular);
+    const auto diffuse = definition.AddFeature<DiDenoiserFeature>(); const auto raw = definition.AddFeature<RestirDiFeature>();
+    auto result = RenderPipelineCompiler{}.Compile(std::move(definition), caps, inputs);
+    REQUIRE(result.pipeline); CHECK(result.pipeline->FeatureOrder()[0] == raw);
+    CHECK(result.pipeline->FeatureOrder()[1] == spec); CHECK(result.pipeline->FeatureOrder()[2] == diffuse);
+    RenderPipelineDefinition duplicate; duplicate.AddFeature<DiDenoiserFeature>(DiDenoiserSignal::Specular); duplicate.AddFeature<DiDenoiserFeature>(DiDenoiserSignal::Specular);
+    auto failed = RenderPipelineCompiler{}.Compile(std::move(duplicate), {}, Fixture::Inputs(true)); CHECK_FALSE(failed.pipeline); CHECK_FALSE(failed.diagnostics.empty());
+    CHECK_THROWS_AS(DiDenoiserFeature(static_cast<DiDenoiserSignal>(2)), std::invalid_argument);
 }

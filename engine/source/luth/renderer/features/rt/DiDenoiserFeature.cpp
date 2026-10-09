@@ -7,26 +7,30 @@ namespace Luth
 {
     FeatureInfo DiDenoiserFeature::Describe() const
     {
-        FeatureInfo info; info.name = "DenoiseDI"; info.phase = FeaturePhase::Async;
-        info.resources.reads = {{DiDenoiserResources::Bindings},
-            {RestirDiResources::Diffuse, ResourceReadRequirement::Optional},
+        const bool specular = m_Signal == DiDenoiserSignal::Specular;
+        FeatureInfo info; info.name = specular ? "DenoiseDI.Specular" : "DenoiseDI"; info.phase = FeaturePhase::Async;
+        info.allowMultipleInstances = true; // Signals have distinct bindings and outputs.
+        info.resources.reads = {{specular ? DiDenoiserResources::SpecularBindings : DiDenoiserResources::Bindings},
+            {specular ? RestirDiResources::Specular : RestirDiResources::Diffuse, ResourceReadRequirement::Optional},
             {RenderResources::SurfaceDepth}, {RenderResources::Normal}, {RenderResources::MotionVectors},
             {RenderResources::MaterialID}, {RenderResources::Roughness}};
-        info.resources.writes = {{DiDenoiserResources::Diffuse, ResourceOutputPresence::Optional}};
+        info.resources.writes = {{specular ? DiDenoiserResources::Specular : DiDenoiserResources::Diffuse, ResourceOutputPresence::Optional}};
         return info;
     }
     void DiDenoiserFeature::Build(RG::RenderGraph& graph, RenderFeatureContext& ctx)
     {
-        const auto* noisy = ctx.resources.TryGet(RestirDiResources::Diffuse);
-        const auto* native = ctx.resources.Get(DiDenoiserResources::Bindings).native;
+        const bool specular = m_Signal == DiDenoiserSignal::Specular;
+        const auto outputKey = specular ? DiDenoiserResources::Specular : DiDenoiserResources::Diffuse;
+        const auto* noisy = ctx.resources.TryGet(specular ? RestirDiResources::Specular : RestirDiResources::Diffuse);
+        const auto* native = ctx.resources.Get(specular ? DiDenoiserResources::SpecularBindings : DiDenoiserResources::Bindings).native;
         if (!noisy || !native || !native->Ready()) {
-            ctx.resources.PublishAbsent(DiDenoiserResources::Diffuse);
+            ctx.resources.PublishAbsent(outputKey);
             return;
         }
         const auto single = [](const TextureBindingRef& b) {
             return b.texture && !b.baseMip && b.mipCount == 1 && !b.baseLayer && b.layerCount == 1;
         };
-        if (native->view != ctx.view.id || native->generation != ctx.view.resourceGeneration ||
+        if (native->signal != m_Signal || native->view != ctx.view.id || native->generation != ctx.view.resourceGeneration ||
             native->frameIndex != ctx.frame.renderFrameIndex || native->fullWidth != ctx.view.width ||
             native->fullHeight != ctx.view.height || !native->width || !native->height ||
             !native->fullWidth || !native->fullHeight || !single(native->output) || !native->outputImage || !native->outputView)
@@ -65,6 +69,8 @@ namespace Luth
             for (const auto parameter : {s.alphaColor, s.alphaMoments, s.depthThreshold, s.normalThreshold,
                 s.antiFireflySigma, s.confidenceScale, s.phiColor, s.phiNormal, s.phiDepth})
                 if (!std::isfinite(parameter)) throw std::invalid_argument("DenoiseDI: nonfinite settings");
+            if (specular && !std::isfinite(s.phiRough))
+                throw std::invalid_argument("DenoiseDI.Specular: nonfinite roughness setting");
             for (u32 i = 0; i < native->working.size(); ++i) {
                 if (!single(native->working[i]) || !native->workingImages[i] || !native->workingViews[i] ||
                     native->workingImages[i] == native->outputImage || native->working[i].texture == native->output.texture)
@@ -83,6 +89,6 @@ namespace Luth
                 throw std::invalid_argument("DenoiseDI: working image already imported");
         }
         const auto output = SvgfDenoiser::AddDiPasses(graph, handles, *native);
-        ctx.resources.Publish(DiDenoiserResources::Diffuse, GraphTextureRef{output, native->output});
+        ctx.resources.Publish(outputKey, GraphTextureRef{output, native->output});
     }
 }
