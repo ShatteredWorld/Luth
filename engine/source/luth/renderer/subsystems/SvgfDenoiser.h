@@ -4,6 +4,7 @@
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 
 #include "luth/renderer/features/rt/DiDenoiserViewState.h"
+#include "luth/renderer/features/rt/DiDenoiserBindings.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -43,6 +44,10 @@ namespace Luth
         std::shared_ptr<DiDenoiserViewState> EnsureDiView(RenderViewId, FrameTargets&,
             const std::shared_ptr<RestirDiViewState>&);
         void ReleaseDiView(RenderViewId);
+        DiDenoiserBindings PrepareDiBindings(const ViewResources&, u64 frameIndex, RenderViewId,
+            u64 generation, const SvgfSettings&) const;
+        static RG::ResourceHandle AddDiPasses(RG::RenderGraph&,
+            const std::array<RG::ResourceHandle, 6>&, const DiDenoiserBindings&);
 
     private:
         void WriteNativeView(ViewResources&, FrameTargets&);

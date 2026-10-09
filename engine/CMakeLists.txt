@@ -48,6 +48,7 @@ add_library(Luth STATIC
     source/luth/renderer/features/rt/RtSunShadowFeature.cpp
     source/luth/renderer/features/rt/RtFogFeature.cpp
     source/luth/renderer/features/rt/RtSunShadowViewState.cpp
+    source/luth/renderer/features/rt/DiDenoiserFeature.cpp
     source/luth/renderer/features/rt/DiDenoiserViewState.cpp
     source/luth/renderer/features/rt/RestirDiViewState.cpp
     source/luth/renderer/features/rt/RestirDiFeature.cpp
@@ -186,6 +187,7 @@ add_library(Luth STATIC
     source/luth/renderer/subsystems/RtSubsystem.cpp
     source/luth/renderer/subsystems/SkinningSubsystem.cpp
     source/luth/renderer/subsystems/SlangParityGuard.cpp
+    source/luth/renderer/subsystems/SvgfDi.cpp
     source/luth/renderer/subsystems/SvgfDenoiser.cpp
     source/luth/renderer/subsystems/TransparencySubsystem.cpp
     source/luth/renderer/subsystems/VolumetricSubsystem.cpp

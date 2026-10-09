@@ -25,6 +25,7 @@
 #include "luth/renderer/features/rt/GiReservoirVizFeature.h"
 #include "luth/renderer/features/rt/RtSunShadowFeature.h"
 #include "luth/renderer/features/rt/RestirDiFeature.h"
+#include "luth/renderer/features/rt/DiDenoiserFeature.h"
 #include "luth/renderer/features/rt/RtFogFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
@@ -174,8 +175,9 @@ namespace Luth
                 throw std::runtime_error("RT sun-shadow definition failed semantic validation");
             RenderPipelineDefinition diDefinition;
             diDefinition.AddFeature<RestirDiFeature>();
+            diDefinition.AddFeature<DiDenoiserFeature>();
             PipelineInputContract diInputs;
-            diInputs.resources = {{RtSceneResources::Parameters}, {RestirDiResources::Bindings},
+            diInputs.resources = {{RtSceneResources::Parameters}, {RestirDiResources::Bindings}, {DiDenoiserResources::Bindings}, {RenderResources::MaterialID},
                 {RenderResources::SurfaceDepth}, {RenderResources::Normal}, {RenderResources::MotionVectors},
                 {RenderResources::Roughness}, {RenderResources::LightData}, {RtSceneResources::Scene, ResourceOutputPresence::Optional}};
             diInputs.capabilities = {&RtSceneResources::RayScene};
@@ -874,14 +876,20 @@ namespace Luth
         // disabled or before the TLAS exists; GeometryPass then skips the Read and pbr.frag's point
         // loop runs instead (the restirParams.x flag gates the consumption).
         RtRestirSubsystem::Outputs restirOut{};
+        GraphTextureRef denoisedDiffuse;
         if (m_RestirDiComposition) {
             const auto frameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
             const auto native = m_Restir.PrepareBindings(*m_CurrentViewResources, frameIndex, view.id,
                 m_CurrentViewResources->generation, rayScene.native, s.GetRestirSettings(),
                 Math::Inverse(m_Global.GetCachedViewProj()), lightSSBORegion);
             const RestirDiBindingRef binding{&native};
+            const auto denoiser = static_cast<SvgfDenoiser*>(m_Denoise.get())->PrepareDiBindings(
+                *m_CurrentViewResources, frameIndex, view.id, m_CurrentViewResources->generation, s.GetSvgfSettings());
+            const DiDenoiserBindingRef denoiserBinding{&denoiser};
             const std::array resources{RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters),
                 RenderInputBinding::Present(RestirDiResources::Bindings, binding),
+                RenderInputBinding::Present(DiDenoiserResources::Bindings, denoiserBinding),
+                RenderInputBinding::Present(RenderResources::MaterialID, materialOutput),
                 RenderInputBinding::Present(RenderResources::LightData, uploadedLights),
                 RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
                 RenderInputBinding::Present(RenderResources::Normal, normalOutput),
@@ -896,7 +904,8 @@ namespace Luth
             inputs.width = m_CurrentViewResources->width; inputs.height = m_CurrentViewResources->height;
             GraphTextureRef diffuse, specular;
             const std::array exports{RenderOutputBinding::Capture(RestirDiResources::Diffuse, diffuse),
-                RenderOutputBinding::Capture(RestirDiResources::Specular, specular)};
+                RenderOutputBinding::Capture(RestirDiResources::Specular, specular),
+                RenderOutputBinding::Capture(DiDenoiserResources::Diffuse, denoisedDiffuse)};
             const auto built = m_RestirDiComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports);
             if (!built.success) {
                 for (const auto& diagnostic : built.diagnostics)
@@ -905,14 +914,7 @@ namespace Luth
             }
             restirOut = {diffuse.handle, specular.handle};
         }
-        RG::ResourceHandle restirDIHandle = restirOut.di;
-
-        // Denoise the demodulated DI (SVGF; swappable to NRD/RELAX). Transparent filter: consumes the
-        // ReSTIR DI handle, returns the denoised handle GeometryPass reads + Set 3 b5 binds. Invalid in
-        // (ReSTIR off / pre-TLAS) -> invalid out, and pbr.frag falls back to its own cluster light loop.
-        RG::ResourceHandle denoisedDIHandle = m_Denoise->AddPasses(rg, DenoiseInputs{
-            restirDIHandle, surfaceDepth.handle, slimGB.normal, slimGB.motion,
-            slimGB.roughness, slimGB.materialID, {}, {} });
+        RG::ResourceHandle denoisedDIHandle = denoisedDiffuse.handle;
 
         // Denoise the demodulated ReSTIR-DI specular (4th SVGF instance, DenoiserChannel::DiSpecular). Surface-
         // motion reproject (direct point-light specular is surface-attached, not a reflection's virtual

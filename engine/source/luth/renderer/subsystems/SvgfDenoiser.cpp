@@ -107,9 +107,9 @@ namespace Luth
                          &vr.svgfGiPassthroughDescSet, vr.svgfGiReprojectDescSet,
                          vr.svgfGiMomentsDescSet, vr.svgfGiAtrousDescSet };
             }
-            const bool diHalf = vr.diDenoiser->svgfDiHalf && vr.diDenoiser->svgfColorHist[0] && vr.diDenoiser->svgfDenoised
-                && std::static_pointer_cast<VKTexture>(vr.diDenoiser->svgfColorHist[0])->GetWidth()
-                   < std::static_pointer_cast<VKTexture>(vr.diDenoiser->svgfDenoised)->GetWidth();
+            const auto& state = *vr.diDenoiser;
+            const bool diHalf = state.width != state.svgfDenoised->GetWidth()
+                || state.height != state.svgfDenoised->GetHeight();
             return { vr.diDenoiser->svgfColorHist, vr.diDenoiser->svgfMoments, vr.diDenoiser->svgfGeom, vr.diDenoiser->svgfAtrous,
                      diHalf ? &vr.diDenoiser->svgfDiHalf : &vr.diDenoiser->svgfDenoised, vr.restirDi ? &vr.restirDi->restirDI : nullptr,
                      &vr.diDenoiser->svgfPassthroughDescSet, vr.diDenoiser->svgfReprojectDescSet,
@@ -616,7 +616,7 @@ namespace Luth
         LH_PROFILE_FUNCTION();
         // Invalid input -> ReSTIR produced no DI this frame; return invalid so the GeometryPass skips
         // the read and pbr.frag runs its own light loop.
-        if (!in.di.IsValid()) return {};
+        if (m_Channel == DenoiserChannel::Di || !in.di.IsValid()) return {};
 
         ViewResources* vr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
         if (!vr || (m_Channel == DenoiserChannel::Di && !vr->diDenoiser)) return {};
