@@ -1,5 +1,6 @@
 #include "luthpch.h"
 #include "VulkanMeshDeformation.h"
+#include "VulkanMeshBufferUsage.h"
 #include "VulkanContext.h"
 #include "VulkanBuffer.h"
 #include "luth/renderer/resources/Mesh.h"
@@ -51,10 +52,7 @@ namespace Luth
         auto& context = VulkanContext::Get();
         VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         info.size = result->m_Layout.TotalBytes();
-        // Preserve existing native usage for the hybrid path. Raster capability-aware
-        // allocation is a separate M12 change, not implied by extracting ownership.
-        info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-            | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        info.usage = VulkanMeshBufferUsage::Deformation(context.SupportsRayTracing());
         info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         context.ApplyConcurrentSharing(info);
         result->m_Allocation = VulkanAllocator::AllocateBuffer(info,

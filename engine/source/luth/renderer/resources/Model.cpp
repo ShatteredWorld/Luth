@@ -76,8 +76,8 @@ namespace Luth
 
             // Per-mesh BLAS: rigid built once over the source VB; deformable (skinned OR static
             // wind-deformable) built over the deformed buffer (filled per-frame by the deform compute)
-            // with ALLOW_UPDATE so each frame's MODE_UPDATE refit is cheap. Built unconditionally on
-            // Vulkan backends; factory returns null on non-Vulkan backends (TLAS skips it).
+            // with ALLOW_UPDATE so each frame's MODE_UPDATE refit is cheap. The native factories
+            // omit BLAS on devices without RT; raster deformation is prepared independently.
             if (data.IsSkinned || data.IsDeformable)
             {
                 mesh->EnsureDeformation();

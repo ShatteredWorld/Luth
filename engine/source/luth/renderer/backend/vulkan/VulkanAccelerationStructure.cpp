@@ -165,6 +165,7 @@ namespace Luth
     std::shared_ptr<VKAccelerationStructure> VKAccelerationStructure::CreateStaticBLAS(const Mesh& mesh)
     {
         auto& ctx = VulkanContext::Get();
+        if (!ctx.SupportsRayTracing()) return {};
         VkDevice device = ctx.GetDevice();
         const auto& rt  = ctx.GetRtFn();
 
@@ -272,6 +273,7 @@ namespace Luth
     std::shared_ptr<VKAccelerationStructure> VKAccelerationStructure::CreateDeformableBLAS(const Mesh& mesh)
     {
         auto& ctx = VulkanContext::Get();
+        if (!ctx.SupportsRayTracing()) return {};
         VkDevice device = ctx.GetDevice();
         const auto& rt  = ctx.GetRtFn();
 
