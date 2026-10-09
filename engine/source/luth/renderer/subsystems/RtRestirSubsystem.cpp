@@ -249,6 +249,7 @@ namespace Luth
     void RtRestirSubsystem::Shutdown()
     {
         LH_PROFILE_FUNCTION();
+        m_UpscaleViews.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_Views.ReleaseAll([] { Renderer::WaitForGPU(); });
         VkDevice device = VulkanContext::Get().GetDevice();
         m_InitialPipeline.reset();
@@ -370,6 +371,7 @@ namespace Luth
 
     void RtRestirSubsystem::ReleaseView(RenderViewId id)
     {
+        m_UpscaleViews.Release(id, [] { Renderer::WaitForGPU(); });
         m_Views.Release(id, [] { Renderer::WaitForGPU(); });
     }
 
@@ -820,97 +822,106 @@ namespace Luth
         return { diHandle, specHandle };
     }
 
-    void RtRestirSubsystem::WriteUpscaleView(ViewResources& vr, FrameTargets& targets)
+    std::shared_ptr<DiUpscaleViewState> RtRestirSubsystem::EnsureUpscaleView(RenderViewId id,
+        const FrameTargets& targets, const std::shared_ptr<DiDenoiserViewState>& diffuse,
+        const std::shared_ptr<DiDenoiserViewState>& specular)
     {
-        LH_PROFILE_FUNCTION();
-        if (!targets.GetSceneDepth() || !targets.GetSlimNormal()) return;
-
-        VkDescriptorImageInfo depthInfo{ m_Sampler,
-            std::static_pointer_cast<VKTexture>(targets.GetSceneDepth())->GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkDescriptorImageInfo normalInfo{ m_Sampler,
-            std::static_pointer_cast<VKTexture>(targets.GetSlimNormal())->GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-
-        auto writeSet = [&](VkDescriptorSet set, const std::shared_ptr<Texture>& half, const std::shared_ptr<Texture>& full)
-        {
-            if (set == VK_NULL_HANDLE || !half || !full) return;
-            VkDescriptorImageInfo halfInfo{ m_Sampler, std::static_pointer_cast<VKTexture>(half)->GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
-            VkDescriptorImageInfo outInfo{ VK_NULL_HANDLE, std::static_pointer_cast<VKTexture>(full)->GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
-            VkWriteDescriptorSet w[4]{};
-            for (u32 i = 0; i < 4; ++i) { w[i] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET }; w[i].dstSet = set; w[i].dstBinding = i; w[i].descriptorCount = 1; }
-            w[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[0].pImageInfo = &halfInfo;
-            w[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[1].pImageInfo = &depthInfo;
-            w[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[2].pImageInfo = &normalInfo;
-            w[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          w[3].pImageInfo = &outInfo;
-            vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 4, w, 0, nullptr);
-        };
-        if (vr.diDenoiser) writeSet(vr.diUpscaleDescSet, vr.diDenoiser->svgfDiHalf, vr.diDenoiser->svgfDenoised);
-        if (vr.diSpecDenoiser) writeSet(vr.diSpecUpscaleDescSet, vr.diSpecDenoiser->svgfDiHalf, vr.diSpecDenoiser->svgfDenoised);
+        if (!m_UpscaleSetLayout || !m_Sampler || !diffuse || !specular) return {};
+        if (!targets.GetSceneColor()) throw std::invalid_argument("DI upscale: missing view output");
+        const std::array owners{diffuse, specular};
+        const std::array sources{targets.GetSceneDepth(), targets.GetSlimNormal()};
+        std::array<VkImageView, 2> views{};
+        for (u32 i = 0; i < sources.size(); ++i) {
+            if (!sources[i] || sources[i]->GetWidth() != targets.GetSceneColor()->GetWidth() ||
+                sources[i]->GetHeight() != targets.GetSceneColor()->GetHeight())
+                throw std::invalid_argument("DI upscale: incompatible full-resolution source");
+            views[i] = std::static_pointer_cast<VKTexture>(sources[i])->GetImageView();
+            if (!views[i]) throw std::invalid_argument("DI upscale: missing source view");
+        }
+        const auto* prior = m_UpscaleViews.Find(id);
+        const u64 generation = prior && (*prior)->denoisers == owners && (*prior)->sources == sources &&
+            (*prior)->sourceViews == views ? (*prior)->sourceGeneration : m_NextUpscaleGeneration++;
+        const ViewStateConfig config{targets.GetSceneColor()->GetWidth(), targets.GetSceneColor()->GetHeight(), 0, generation};
+        return m_UpscaleViews.Ensure(id, config, [&](const ViewStateConfig& requested) {
+            return DiUpscaleViewState::Create(id, requested, m_UpscaleSetLayout, m_Sampler, owners, sources);
+        }, [] { Renderer::WaitForGPU(); });
     }
 
-    RG::ResourceHandle RtRestirSubsystem::AddUpscalePass(RG::RenderGraph& rg, RG::ResourceHandle half,
-                                                         RG::ResourceHandle sceneDepth, RG::ResourceHandle slimNormal, bool specular)
+    DiUpscaleBindings RtRestirSubsystem::PrepareUpscaleBindings(const ViewResources& vr, u64 frame,
+        RenderViewId id, u64 generation, DiDenoiserSignal signal, const RestirSettings& settings) const
     {
-        LH_PROFILE_FUNCTION();
-        if (!m_UpscalePipeline || !half.IsValid()) return half;
-        ViewResources* preflightVr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
-        if (!preflightVr) return half;
-        const VkDescriptorSet descSet = specular ? preflightVr->diSpecUpscaleDescSet : preflightVr->diUpscaleDescSet;
-        if (specular ? !preflightVr->diSpecDenoiser : !preflightVr->diDenoiser) return {};
-        const std::shared_ptr<Texture>& outShared = specular ? preflightVr->diSpecDenoiser->svgfDenoised : preflightVr->diDenoiser->svgfDenoised;
-        if (descSet == VK_NULL_HANDLE || !outShared) return half;
+        if (signal != DiDenoiserSignal::Diffuse && signal != DiDenoiserSignal::Specular)
+            throw std::invalid_argument("DI upscale: invalid signal");
+        DiUpscaleBindings native;
+        if (!m_UpscalePipeline || !vr.diUpscale) return native;
+        const auto& state = *vr.diUpscale;
+        const u32 channel = signal == DiDenoiserSignal::Specular ? 1u : 0u;
+        const auto& owner = state.denoisers[channel];
+        if (state.id != id || !owner || owner->id != id || owner->signal != signal)
+            throw std::invalid_argument("DI upscale: incompatible view owner");
+        native.signal = signal; native.view = id; native.generation = generation; native.frameIndex = frame;
+        native.retained = vr.diUpscale; native.pipeline = m_UpscalePipeline->GetHandle();
+        native.layout = m_UpscalePipeline->GetLayout(); native.set = state.sets[channel];
+        native.globalSet = vr.globalDescriptorSet[frame % MAX_FRAMES_IN_FLIGHT];
+        native.width = owner->width; native.height = owner->height;
+        native.fullWidth = vr.width; native.fullHeight = vr.height;
+        native.phiDepth = settings.spatialDepthThreshold;
+        auto freeze = [](const std::shared_ptr<Texture>& texture, TextureBindingRef& binding, VkImage& image, VkImageView& view) {
+            if (!texture) return;
+            const auto vk = std::static_pointer_cast<VKTexture>(texture);
+            binding = {texture.get()}; image = vk->GetImage(); view = vk->GetImageView();
+        };
+        freeze(owner->svgfDiHalf, native.sources[0], native.sourceImages[0], native.sourceViews[0]);
+        for (u32 i = 0; i < 2; ++i) {
+            freeze(state.sources[i], native.sources[i + 1], native.sourceImages[i + 1], native.sourceViews[i + 1]);
+            native.sourceViews[i + 1] = state.sourceViews[i];
+        }
+        freeze(owner->svgfDenoised, native.output, native.outputImage, native.outputView);
+        return native;
+    }
 
-        struct UpData { RG::ResourceHandle half, depth, normal, out; };
-        RG::ResourceHandle outHandle{};
-        rg.AddComputePass<UpData>(
-            specular ? "DiSpecUpscale" : "DiUpscale",
-            RG::QueueFamily::AsyncCompute,
-            [&, this, specular](UpData& data, RG::RenderPassBuilder& builder) {
-                data.half = builder.ReadStorageImageGeneral(half);  // svgfDiHalf/svgfDiSpecHalf stay GENERAL
-                if (sceneDepth.IsValid()) data.depth  = builder.ReadStorageImage(sceneDepth);
-                if (slimNormal.IsValid()) data.normal = builder.ReadStorageImage(slimNormal);
+    RG::ResourceHandle RtRestirSubsystem::AddUpscalePass(RG::RenderGraph& graph, RG::ResourceHandle half,
+        RG::ResourceHandle depth, RG::ResourceHandle normal, bool specular)
+    {
+        if (!half.IsValid() || !m_Pipeline || !m_Pipeline->GetCurrentViewResources()) return half;
+        const auto& vr = *m_Pipeline->GetCurrentViewResources();
+        const auto native = PrepareUpscaleBindings(vr, Renderer::GetFrameData()->GetRenderFrameIndex(),
+            {vr.id}, vr.generation, specular ? DiDenoiserSignal::Specular : DiDenoiserSignal::Diffuse,
+            m_Pipeline->GetSystem().GetRestirSettings());
+        return AddUpscalePass(graph, {half, depth, normal}, native);
+    }
 
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                auto outTex = std::static_pointer_cast<VKTexture>(specular ? vr->diSpecDenoiser->svgfDenoised : vr->diDenoiser->svgfDenoised);
-                RG::TextureDesc desc;
-                desc.name   = specular ? "SvgfDiSpecDenoised" : "SvgfDenoised";
-                desc.width  = outTex->GetWidth();
-                desc.height = outTex->GetHeight();
-                desc.format = RG::TextureFormat::RGBA16_Float;
-                data.out = rg.ImportResource(desc, (void*)outTex->GetImage(), (void*)outTex->GetImageView(),
-                                             RG::ResourceState::Undefined);
-                data.out  = builder.WriteStorageImage(data.out);
-                outHandle = data.out;
-            },
-            [this, specular](UpData&, RG::RenderPassContext& ctx) {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                ViewResources*  vr  = m_Pipeline->GetCurrentViewResources();
-                if (!vr) return;
-                const VkDescriptorSet set = specular ? vr->diSpecUpscaleDescSet : vr->diUpscaleDescSet;
-                auto fullShared = specular ? vr->diSpecDenoiser->svgfDenoised : vr->diDenoiser->svgfDenoised;
-                auto halfShared = specular ? vr->diSpecDenoiser->svgfDiHalf     : vr->diDenoiser->svgfDiHalf;
-                if (set == VK_NULL_HANDLE || !fullShared || !halfShared) return;
-
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                m_UpscalePipeline->Bind(cmd);
-                VkDescriptorSet sets[2] = { vr->globalDescriptorSet[slot], set };
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    m_UpscalePipeline->GetLayout(), 0, 2, sets, 0, nullptr);
-
-                auto full  = std::static_pointer_cast<VKTexture>(fullShared);
-                auto halfT = std::static_pointer_cast<VKTexture>(halfShared);
-                const RestirSettings& s = m_Pipeline->GetSystem().GetRestirSettings();
-                UpscalePC pc{};
-                pc.fullW = (i32)full->GetWidth();  pc.fullH = (i32)full->GetHeight();
-                pc.halfW = (i32)halfT->GetWidth(); pc.halfH = (i32)halfT->GetHeight();
-                pc.phiDepth  = s.spatialDepthThreshold;
-                pc.phiNormal = 32.0f;
-                vkCmdPushConstants(cmd, m_UpscalePipeline->GetLayout(),
-                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(UpscalePC), &pc);
-
-                const u32 gx = (full->GetWidth()  + 7) / 8;
-                const u32 gy = (full->GetHeight() + 7) / 8;
-                vkCmdDispatch(cmd, gx, gy, 1);
+    RG::ResourceHandle RtRestirSubsystem::AddUpscalePass(RG::RenderGraph& graph,
+        const std::array<RG::ResourceHandle, 3>& inputs, const DiUpscaleBindings& native)
+    {
+        if (!inputs[0].IsValid() || !native.Ready()) return inputs[0];
+        // At a 1x1 extent, half resolution is already full resolution. The denoiser
+        // writes the final image directly; do not sample its unused working image.
+        if (inputs[0].index <= graph.GetResources().size() && native.outputImage &&
+            graph.GetResources()[inputs[0].index - 1].image == native.outputImage)
+            return inputs[0];
+        struct Data { RG::ResourceHandle half, depth, normal, out; };
+        RG::ResourceHandle output;
+        const bool specular = native.signal == DiDenoiserSignal::Specular;
+        const UpscalePC pc{static_cast<i32>(native.fullWidth), static_cast<i32>(native.fullHeight),
+            static_cast<i32>(native.width), static_cast<i32>(native.height), native.phiDepth, native.phiNormal};
+        graph.AddComputePass<Data>(specular ? "DiSpecUpscale" : "DiUpscale", RG::QueueFamily::AsyncCompute,
+            [&](Data& data, RG::RenderPassBuilder& builder) {
+                data.half = builder.ReadStorageImageGeneral(inputs[0]);
+                if (inputs[1].IsValid()) data.depth = builder.ReadStorageImage(inputs[1]);
+                if (inputs[2].IsValid()) data.normal = builder.ReadStorageImage(inputs[2]);
+                RG::TextureDesc desc; desc.name = specular ? "SvgfDiSpecDenoised" : "SvgfDenoised";
+                desc.width = native.fullWidth; desc.height = native.fullHeight; desc.format = RG::TextureFormat::RGBA16_Float;
+                data.out = builder.WriteStorageImage(graph.ImportResource(desc, (void*)native.outputImage,
+                    (void*)native.outputView, RG::ResourceState::Undefined));
+                output = data.out;
+            }, [native, pc](Data&, RG::RenderPassContext& ctx) {
+                const VkDescriptorSet sets[]{native.globalSet, native.set};
+                vkCmdBindPipeline(ctx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, native.pipeline);
+                vkCmdBindDescriptorSets(ctx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, native.layout, 0, 2, sets, 0, nullptr);
+                vkCmdPushConstants(ctx.commandBuffer, native.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+                vkCmdDispatch(ctx.commandBuffer, (native.fullWidth + 7) / 8, (native.fullHeight + 7) / 8, 1);
             });
-        return outHandle;
+        return output;
     }
 }

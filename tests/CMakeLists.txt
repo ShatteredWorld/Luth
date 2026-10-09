@@ -59,6 +59,7 @@ add_executable(LuthTests
     renderer/RtSunShadowViewState.cpp
     renderer/DiDenoiserFeature.cpp
     renderer/DiDenoiserViewState.cpp
+    renderer/DiUpscaleViewState.cpp
     renderer/RestirDiViewState.cpp
     renderer/RestirDiFeature.cpp
     renderer/DeformationFeature.cpp

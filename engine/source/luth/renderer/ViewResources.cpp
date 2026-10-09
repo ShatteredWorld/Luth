@@ -118,6 +118,10 @@ namespace Luth
         const bool diSpecDenoiserReplaced = vr.diSpecDenoiser && vr.diSpecDenoiser != diSpecDenoiser;
         vr.diSpecDenoiser = std::move(diSpecDenoiser);
         if (diSpecDenoiserReplaced) vr.generation = m_System.InvalidateView(id);
+        auto upscale = m_RtNativeInitialized ? m_Restir.EnsureUpscaleView(id, targets, vr.diDenoiser, vr.diSpecDenoiser) : nullptr;
+        const bool upscaleReplaced = vr.diUpscale && vr.diUpscale != upscale;
+        vr.diUpscale = std::move(upscale);
+        if (upscaleReplaced) vr.generation = m_System.InvalidateView(id);
 
         if (inserted || vr.descPool == VK_NULL_HANDLE)
         {
@@ -128,7 +132,6 @@ namespace Luth
         }
         else if (vr.width != newW || vr.height != newH ||
                  (m_RtNativeInitialized && (vr.giHalfCached != (m_System.GetRestirGiSettings().halfResolution ? 1u : 0u) ||
-                   vr.diHalfCached != (m_System.GetRestirSettings().halfResolution ? 1u : 0u) ||
                    vr.reflHalfCached != (m_System.GetReflectionsSettings().halfResolution ? 1u : 0u))))
         {
             // Stable descriptor slots may still be referenced by earlier submissions.
@@ -144,7 +147,6 @@ namespace Luth
                 m_RestirGi.WriteView(vr, targets);      // re-bind GI Set 2 depth/normal + reservoir + new GI image
                 m_RestirGi.WriteReservoirVizView(vr, targets);  // re-bind GI reservoir-viz depth + spatial reservoir
                 m_RestirGi.WriteUpscaleView(vr, targets);       // re-bind GI upscale half-input + full output
-                m_Restir.WriteUpscaleView(vr, targets);         // re-bind DI diffuse + specular upscale sets
                 m_PathTrace.WriteView(vr);              // re-bind PT accumulator + display image (recreated on resize)
                 m_Reflections.WriteView(vr, targets);   // re-bind reflection output + slim G-buffer samplers
                 m_Reflections.WriteUpscaleView(vr, targets);    // re-bind refl upscale half-input + full output
@@ -160,7 +162,6 @@ namespace Luth
         vr.height = newH;
         // Source views can change without an extent change. Refresh the consumer's mask binding.
         if (shadowReplaced || diDenoiserReplaced || diSpecDenoiserReplaced) m_Lighting.WriteShadowView(vr);
-        if ((diDenoiserReplaced || diSpecDenoiserReplaced) && m_RtNativeInitialized) m_Restir.WriteUpscaleView(vr, targets);
         return vr;
     }
 
@@ -276,8 +277,6 @@ namespace Luth
             allocCycled(m_RestirGi.GetSetLayout(),           vr.restirGiDescSet,      "View.RestirGi");
             allocSingle(m_RestirGi.GetReservoirVizLayout(),  vr.giReservoirVizDescSet,"View.GiReservoirViz");
             allocSingle(m_RestirGi.GetUpscaleLayout(),       vr.giUpscaleDescSet,     "View.GiUpscale");
-            allocSingle(m_Restir.GetUpscaleLayout(),         vr.diUpscaleDescSet,     "View.DiUpscale");
-            allocSingle(m_Restir.GetUpscaleLayout(),         vr.diSpecUpscaleDescSet, "View.DiSpecUpscale");
             allocSingle(m_PathTrace.GetSetLayout(),          vr.ptDescSet,            "View.PathTrace");
             allocSingle(m_Reflections.GetSetLayout(),        vr.reflDescSet,          "View.Reflections");
             allocSingle(m_Reflections.GetUpscaleLayout(),    vr.reflUpscaleDescSet,   "View.ReflUpscale");
@@ -290,7 +289,6 @@ namespace Luth
             m_RestirGi.WriteView(vr, targets);
             m_RestirGi.WriteReservoirVizView(vr, targets);
             m_RestirGi.WriteUpscaleView(vr, targets);
-            m_Restir.WriteUpscaleView(vr, targets);
             m_PathTrace.WriteView(vr);
             m_Reflections.WriteView(vr, targets);
             m_Reflections.WriteUpscaleView(vr, targets);    // bind refl upscale half-input + full output
@@ -313,13 +311,6 @@ namespace Luth
         const u32  giW    = giHalf ? halfW : fullW;
         const u32  giH    = giHalf ? halfH : fullH;
         vr.giHalfCached   = giHalf ? 1u : 0u;
-
-        // Half-res DI (RestirSettings::halfResolution): both DI channels (diffuse + specular) trace +
-        // denoise at half; svgfDenoised + svgfDiSpecDenoised stay full (the bilateral-upscale outputs).
-        const bool diHalf = m_System.GetRestirSettings().halfResolution;
-
-
-        vr.diHalfCached   = diHalf ? 1u : 0u;
 
         // Half-res reflections (ReflectionsSettings::halfResolution): reflRadiance trace output + svgfSpec*
         // history allocate at half; svgfSpecDenoised stays full (the bilateral-upscale output).
@@ -488,6 +479,7 @@ namespace Luth
         vr.rtShadow.reset();
         vr.restirDi.reset();
         vr.restirGiDI.reset();
+        vr.diUpscale.reset();
         vr.diDenoiser.reset();
         vr.svgfGiDenoised.reset();
         vr.svgfGiHalf.reset();

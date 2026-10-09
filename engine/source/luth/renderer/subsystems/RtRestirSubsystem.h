@@ -5,6 +5,7 @@
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 #include "luth/renderer/features/rt/RestirDiViewState.h"
 #include "luth/renderer/features/rt/RestirDiBindings.h"
+#include "luth/renderer/features/rt/DiUpscaleViewState.h"
 
 #include <memory>
 #include <string>
@@ -51,9 +52,14 @@ namespace Luth
         // (svgfDiHalf / svgfDiSpecHalf) + full-res depth/normal, writes the full svgfDenoised /
         // svgfDiSpecDenoised. specular picks the channel. Only wired when RestirSettings::halfResolution.
         VkDescriptorSetLayout GetUpscaleLayout() const { return m_UpscaleSetLayout; }
-        void WriteUpscaleView(ViewResources& vr, FrameTargets& targets);
+        std::shared_ptr<DiUpscaleViewState> EnsureUpscaleView(RenderViewId, const FrameTargets&,
+            const std::shared_ptr<DiDenoiserViewState>&, const std::shared_ptr<DiDenoiserViewState>&);
+        DiUpscaleBindings PrepareUpscaleBindings(const ViewResources&, u64 frameIndex, RenderViewId,
+            u64 generation, DiDenoiserSignal, const RestirSettings&) const;
         RG::ResourceHandle AddUpscalePass(RG::RenderGraph& rg, RG::ResourceHandle half,
                                           RG::ResourceHandle sceneDepth, RG::ResourceHandle slimNormal, bool specular);
+        static RG::ResourceHandle AddUpscalePass(RG::RenderGraph&, const std::array<RG::ResourceHandle, 3>&,
+            const DiUpscaleBindings&);
 
         VkSampler             GetSampler()   const { return m_Sampler; }
         VkDescriptorSetLayout GetSetLayout() const { return m_SetLayout; }
@@ -93,6 +99,8 @@ namespace Luth
 
         u32  m_NextTag = 0xFFFF0000u;  // reserved range for persistent reservoir allocations
         RestirDiViewStates m_Views;
+        DiUpscaleViewStates m_UpscaleViews;
+        u64 m_NextUpscaleGeneration = 1;
         u64 m_NextSourceGeneration = 1;
     };
 }

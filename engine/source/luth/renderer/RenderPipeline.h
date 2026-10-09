@@ -1,5 +1,6 @@
 #pragma once
 #include "luth/renderer/features/rt/DiDenoiserViewState.h"
+#include "luth/renderer/features/rt/DiUpscaleViewState.h"
 
 #include "luth/core/types/LuthMath.h"
 #include "luth/core/UUID.h"
@@ -190,13 +191,7 @@ namespace Luth
         std::shared_ptr<Texture> svgfGiHalf;
         u32 giHalfCached = ~0u;
         VkDescriptorSet giUpscaleDescSet = VK_NULL_HANDLE;   // half-res GI bilateral-upscale set (Set 1)
-        // Half-res DI (both channels): a-trous finals write svgfDiHalf / svgfDiSpecHalf; bilateral upscales
-        // resolve them into the full-res svgfDenoised / svgfDiSpecDenoised. diHalfCached drives realloc.
-
-
-        u32 diHalfCached = ~0u;
-        VkDescriptorSet diUpscaleDescSet     = VK_NULL_HANDLE;   // half-res DI diffuse upscale set
-        VkDescriptorSet diSpecUpscaleDescSet = VK_NULL_HANDLE;   // half-res DI specular upscale set
+        std::shared_ptr<DiUpscaleViewState> diUpscale; // Borrowed immutable bilateral-upscale bindings.
 
         // RT-reflection specular SVGF: flat parallel to the GI SVGF fields. A third SvgfDenoiser
         // instance (DenoiserChannel::Reflections) denoises reflRadiance via the hit-distance
