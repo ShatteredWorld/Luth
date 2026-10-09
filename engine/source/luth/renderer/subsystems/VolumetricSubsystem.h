@@ -160,6 +160,7 @@ namespace Luth
         VkDescriptorSetLayout              m_InjectScatterDescLayout = VK_NULL_HANDLE;
         VkDescriptorSetLayout              m_EmptySet2Layout         = VK_NULL_HANDLE;
         std::unique_ptr<VKComputePipeline> m_InjectScatterPipeline;
+        std::string m_InjectScatterShaderName;
         std::vector<u32>                   m_InjectScatterSpv;
 
         // Integrate.

@@ -3,6 +3,7 @@
 #include "luth/renderer/presentation/ViewPresentation.h"
 #include <imgui.h>
 #include "luth/renderer/shader/ShaderReloadCoordinator.h"
+#include "luth/renderer/shader/ShaderLibrary.h"
 #include "luth/scene/systems/RenderingSystem.h"
 #include "luth/scene/systems/LightingSystem.h"
 #include "luth/scene/systems/SystemRegistry.h"
@@ -199,6 +200,7 @@ namespace Luth
     void RenderingSystem::OnProjectLoaded()
     {
         if (!FileSystem::HasProject()) return;
+        ShaderLibrary::ReloadVariants(); // Compile against this project's generated material registry.
         m_ShaderReload->AddProjectDir(FileSystem::AssetsPath("shaders"));
     }
 

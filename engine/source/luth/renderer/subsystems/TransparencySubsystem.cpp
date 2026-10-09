@@ -103,10 +103,18 @@ namespace Luth
     void TransparencySubsystem::BuildPipelines(const std::vector<VkDescriptorSetLayout>& geoLayouts)
     {
         LH_PROFILE_FUNCTION();
-        if (auto sh = ShaderLibrary::LoadEngine("shaders/pbr_transparent.slang"))
-            m_TransparentFragSpv = sh->GetSpirV();
-        if (auto sh = ShaderLibrary::LoadEngine("shaders/pbr_oit_store.slang"))
-            m_OitStoreFragSpv = sh->GetSpirV();
+        const auto variant = VulkanContext::Get().SupportsRayTracing()
+            ? ShaderCompileVariant::Hybrid : ShaderCompileVariant::Raster;
+        if (auto sh = ShaderLibrary::LoadEngineVariant("shaders/pbr_transparent.slang", variant))
+        {
+            m_TransparentFragSpv = sh->spirv;
+            m_TransparentShaderName = ShaderVariantCache::Name(sh->source, sh->variant);
+        }
+        if (auto sh = ShaderLibrary::LoadEngineVariant("shaders/pbr_oit_store.slang", variant))
+        {
+            m_OitStoreFragSpv = sh->spirv;
+            m_OitShaderName = ShaderVariantCache::Name(sh->source, sh->variant);
+        }
         if (auto sh = ShaderLibrary::LoadEngine("shaders/fullscreen.slang"))
             m_FullscreenVertSpv = sh->GetSpirV();
         if (auto sh = ShaderLibrary::LoadEngine("shaders/oit_resolve.slang"))
@@ -193,6 +201,8 @@ namespace Luth
         m_OitPm.Shutdown();
         m_OitSkinnedPm.Shutdown();
         m_ResolvePipeline.reset();
+        m_TransparentShaderName.clear(); m_OitShaderName.clear();
+        m_TransparentFragSpv.clear(); m_OitStoreFragSpv.clear();
         VkDevice device = VulkanContext::Get().GetDevice();
         if (m_TransparentSetLayout != VK_NULL_HANDLE)
         {
@@ -215,27 +225,20 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         auto invalidateSorted = [this]() {
-            if (auto sh = ShaderLibrary::Get("pbr_transparent.slang"))
-            {
-                m_SortedPm.DeferredInvalidateShader(sh->Handle);
-                m_SortedSkinnedPm.DeferredInvalidateShader(sh->Handle);
-            }
+            m_SortedPm.DeferredInvalidateShader(m_SortedShaderId);
+            m_SortedSkinnedPm.DeferredInvalidateShader(m_SortedShaderId);
         };
         auto invalidateOit = [this]() {
-            if (auto sh = ShaderLibrary::Get("pbr_oit_store.slang"))
-            {
-                m_OitPm.DeferredInvalidateShader(sh->Handle);
-                m_OitSkinnedPm.DeferredInvalidateShader(sh->Handle);
-            }
+            m_OitPm.DeferredInvalidateShader(m_OitShaderId);
+            m_OitSkinnedPm.DeferredInvalidateShader(m_OitShaderId);
         };
-
-        if (name == "pbr_transparent.slang")
+        if (!m_TransparentShaderName.empty() && name == m_TransparentShaderName)
         {
             m_TransparentFragSpv = spv;
             invalidateSorted();
             return true;
         }
-        if (name == "pbr_oit_store.slang")
+        if (!m_OitShaderName.empty() && name == m_OitShaderName)
         {
             m_OitStoreFragSpv = spv;
             invalidateOit();

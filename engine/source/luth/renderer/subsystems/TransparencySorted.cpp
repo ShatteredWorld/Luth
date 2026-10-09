@@ -6,7 +6,6 @@
 #include "luth/core/RenderSnapshot.h"
 #include "luth/renderer/resources/Model.h"
 #include "luth/renderer/backend/vulkan/VulkanBuffer.h"
-#include "luth/renderer/shader/ShaderLibrary.h"
 #include "luth/renderer/FrameDebugger.h"
 
 namespace Luth
@@ -37,8 +36,7 @@ namespace Luth
         out.oit = oit;
         const auto& fragment = oit ? m_OitStoreFragSpv : m_TransparentFragSpv;
         if (draws.transparent.empty() || fragment.empty()) return out;
-        const auto shader = ShaderLibrary::Get(oit ? "pbr_oit_store.slang" : "pbr_transparent.slang");
-        if (!shader) return out;
+        const auto& shaderId = oit ? m_OitShaderId : m_SortedShaderId;
         // Compile native variants during CPU preparation, before parallel recording uses them.
         auto order = oit ? std::vector<u32>(draws.transparent.size()) : SortedOrder(draws, view);
         if (oit) for (u32 i = 0; i < order.size(); ++i) order[i] = i;
@@ -51,9 +49,9 @@ namespace Luth
             auto ib = std::static_pointer_cast<VKIndexBuffer>(mesh->GetIndexBuffer());
             if (!vb || !ib) continue;
             auto* pipeline = dc.isDeformed
-                ? (oit ? m_OitSkinnedPm : m_SortedSkinnedPm).GetOrCreate(shader->Handle, Material::RenderMode::Transparent,
+                ? (oit ? m_OitSkinnedPm : m_SortedSkinnedPm).GetOrCreate(shaderId, Material::RenderMode::Transparent,
                     dc.cullMode, out.polygon, geo.GetPBRSkinnedVertSpv(), fragment)
-                : (oit ? m_OitPm : m_SortedPm).GetOrCreate(shader->Handle, Material::RenderMode::Transparent,
+                : (oit ? m_OitPm : m_SortedPm).GetOrCreate(shaderId, Material::RenderMode::Transparent,
                     dc.cullMode, out.polygon, geo.GetPBRVertSpv(), fragment);
             if (!pipeline) continue;
             ForwardDrawPacket packet;

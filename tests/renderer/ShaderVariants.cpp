@@ -3,6 +3,10 @@
 #include "luth/renderer/shader/ShaderLibrary.h"
 #include <spirv.hpp>
 #include <stdexcept>
+#include <fstream>
+#include <cstdlib>
+#include "luth/core/types/LuthMath.h"
+#include "luth/assets/FileSystem.h"
 using namespace Luth;
 
 namespace
@@ -136,4 +140,56 @@ TEST_CASE("ShaderVariants: source reload notifies every legacy alias and both is
     CHECK(legacy->reloads == 4); CHECK(variantNotifications.size() == 6);
     CHECK(ShaderLibrary::LoadEngineVariant(path.string(), ShaderCompileVariant::Raster)->generation == 4);
     CHECK(ShaderLibrary::LoadEngineVariant(path.string(), ShaderCompileVariant::Hybrid)->generation == 4);
+}
+
+TEST_CASE("ShaderVariants: production transparency and fog have independent raster programs")
+{
+    for (const auto* source : {"pbr_transparent.slang", "pbr_oit_store.slang", "volumetric_inject_scatter.slang"})
+    {
+        CAPTURE(source);
+        const auto path = fs::absolute(fs::path("engine/assets/shaders") / source);
+        const auto raster = SlangCompiler::CompileReflectStage(path, "main", ShaderCompileVariant::Raster);
+        const auto hybrid = SlangCompiler::CompileReflectStage(path, "main", ShaderCompileVariant::Hybrid);
+        const auto legacy = SlangCompiler::CompileReflectStage(path);
+        REQUIRE_FALSE(raster.spirv.empty()); REQUIRE_FALSE(hybrid.spirv.empty()); REQUIRE_FALSE(legacy.spirv.empty());
+        CHECK(raster.stage == hybrid.stage); CHECK(hybrid.stage == legacy.stage);
+        CHECK_FALSE(HasInstruction(raster.spirv, spv::OpCapability, spv::CapabilityRayQueryKHR));
+        CHECK_FALSE(HasInstruction(raster.spirv, spv::OpCapability, spv::CapabilityRayTracingKHR));
+        CHECK_FALSE(HasInstruction(raster.spirv, spv::OpTypeAccelerationStructureKHR));
+        CHECK(HasInstruction(hybrid.spirv, spv::OpCapability, spv::CapabilityRayQueryKHR));
+        CHECK(HasInstruction(hybrid.spirv, spv::OpTypeAccelerationStructureKHR));
+        CHECK(HasInstruction(legacy.spirv, spv::OpCapability, spv::CapabilityRayQueryKHR));
+        // Optional standalone artifacts for Vulkan SDK spirv-val verification.
+        if (const auto* output = std::getenv("LUTH_SHADER_VARIANT_DUMP"))
+            for (const auto& [suffix, code] : {std::pair{"raster", &raster}, std::pair{"hybrid", &hybrid}, std::pair{"legacy", &legacy}})
+            {
+                std::ofstream stream(fs::path(output) / (std::string(source) + "." + suffix + ".spv"), std::ios::binary);
+                stream.write(reinterpret_cast<const char*>(code->spirv.data()), code->spirv.size() * sizeof(u32));
+                REQUIRE(stream.good());
+            }
+    }
+}
+TEST_CASE("ShaderVariants: import-root changes retain native registrations and notify refreshed programs")
+{
+    LibraryScope library;
+    const auto engine = FileSystem::EnginePath();
+    struct RestoreRoot { fs::path root; ~RestoreRoot() { FileSystem::InitEngine(root); } } restore{engine};
+    const auto source = ProbePath();
+    const auto raster = ShaderLibrary::LoadEngineVariant(source.string(), ShaderCompileVariant::Raster);
+    const auto hybrid = ShaderLibrary::LoadEngineVariant(source.string(), ShaderCompileVariant::Hybrid);
+    REQUIRE(raster); REQUIRE(hybrid);
+    std::vector<std::string> notified;
+    ShaderLibrary::SetVariantReloadCallback([&](const auto& name, const auto&) { notified.push_back(name); });
+    FileSystem::InitEngine(source.parent_path()); // Different import roots; probe's own import remains local.
+    ShaderLibrary::ReloadSource(source.parent_path() / "VariantCommon.slang");
+    REQUIRE(notified.size() == 2);
+    CHECK(ShaderLibrary::LoadEngineVariant(source.string(), ShaderCompileVariant::Raster)->generation == 2);
+    CHECK(ShaderLibrary::LoadEngineVariant(source.string(), ShaderCompileVariant::Hybrid)->generation == 2);
+    CHECK(raster->generation == 1); CHECK(hybrid->generation == 1);
+    FileSystem::InitEngine(engine);
+    CHECK(ShaderLibrary::LoadEngineVariant(source.string(), ShaderCompileVariant::Raster)->generation == 3);
+    CHECK(notified.size() == 4);
+    ShaderLibrary::ReloadVariants();
+    CHECK(ShaderLibrary::LoadEngineVariant(source.string(), ShaderCompileVariant::Hybrid)->generation == 4);
+    CHECK(notified.size() == 6);
 }

@@ -101,6 +101,8 @@ namespace Luth
         PipelineManager  m_SortedSkinnedPm;
         PipelineManager  m_OitPm;
         PipelineManager  m_OitSkinnedPm;
+        UUID m_SortedShaderId, m_OitShaderId; // Native PSO identities, independent of shader assets.
+        std::string m_TransparentShaderName, m_OitShaderName;
         std::vector<u32> m_TransparentFragSpv;
         std::vector<u32> m_OitStoreFragSpv;
         std::vector<u32> m_FullscreenVertSpv;

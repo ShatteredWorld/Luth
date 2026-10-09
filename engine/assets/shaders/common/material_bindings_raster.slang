@@ -49,6 +49,7 @@ public bool AlphaTestCandidateHit(GtGeomEntry* geomTable, uint customIndex, uint
     return alpha >= m.alphaCutoff;
 }
 
+#if !LUTH_RASTER_ONLY
 public void RtConfirmAlphaCandidates(inout RayQuery<RAY_FLAG_NONE> q, GtGeomEntry* geomTable)
 {
     while (q.Proceed())
@@ -57,3 +58,5 @@ public void RtConfirmAlphaCandidates(inout RayQuery<RAY_FLAG_NONE> q, GtGeomEntr
                                      q.CandidateTriangleBarycentrics()))
             q.CommitNonOpaqueTriangleHit();
 }
+
+#endif

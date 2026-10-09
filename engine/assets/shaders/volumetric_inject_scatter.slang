@@ -5,10 +5,15 @@
 import globals;
 import restir_common;       // DirectionalLightData / PointLightData
 import material;            // GtGeomEntry + GT_VIS_SOLID
+#if !LUTH_RASTER_ONLY
 import material_bindings_rt; // RtConfirmAlphaCandidates (Set 3 material, Set 4 bindless)
 
+#endif
+
 [[vk::binding(1, 0)]] SamplerCube irradianceMap;
+#if !LUTH_RASTER_ONLY
 [[vk::binding(6, 0)]] RaytracingAccelerationStructure topLevelAS;
+#endif
 [[vk::binding(0, 1)]] Sampler3D volDensity;       // .r density, .gba tint
 [[vk::binding(1, 1)]] [[vk::image_format("rgba16f")]] RWTexture3D<float4> volInScatter;
 [[vk::binding(2, 1)]] ByteAddressBuffer       g_Lights;
@@ -121,6 +126,7 @@ float SunFogTransmittance(float3 worldPos, int steps)
 
 // RT shadow ray (froxel is free space -> no normal offset). Drops the opaque flag so cutout instances
 // surface as candidates, alpha-tested in RtConfirmAlphaCandidates (god rays carve leaf holes).
+#if !LUTH_RASTER_ONLY
 bool Visible(float3 x, float3 dir, float maxDist)
 {
     float  sMin  = ubo.rtShadowParams.y;
@@ -131,6 +137,8 @@ bool Visible(float3 x, float3 dir, float maxDist)
     RtConfirmAlphaCandidates(sq, pc.geomTable);
     return sq.CommittedStatus() == COMMITTED_NOTHING;
 }
+
+#endif
 
 [shader("compute")]
 [numthreads(8, 8, 4)]
@@ -165,8 +173,12 @@ void main(uint3 tid : SV_DispatchThreadID)
     float3 dirContrib = float3(0.0);
     if (dl.intensity > 0.0)
     {
+#if LUTH_RASTER_ONLY
+        float shadow = SampleCSM(worldPos, SelectCascade(viewZ));
+#else
         float shadow = rtFog ? (Visible(worldPos, -dl.direction, 1.0e30) ? 1.0 : 0.0)
                              : SampleCSM(worldPos, SelectCascade(viewZ));
+#endif
         float phase  = HenyeyGreenstein(dot(dl.direction, -viewDirWorld), gAniso);
         float sunAbs = SunFogTransmittance(worldPos, sunSteps);
         dirContrib = dl.color * dl.intensity * shadow * phase * sunAbs;
@@ -188,7 +200,9 @@ void main(uint3 tid : SV_DispatchThreadID)
             float  atten    = (1.0 / max(dist2, 0.01)) * window;
             float3 incident = -toLight / max(dist, 1e-4);
             float  phase    = HenyeyGreenstein(dot(incident, -viewDirWorld), gAniso);
+#if !LUTH_RASTER_ONLY
             if (rtFog && !Visible(worldPos, -incident, dist - 2.0 * ubo.rtShadowParams.y)) continue;
+#endif
             pointContrib += p.color * p.intensity * atten * phase;
         }
     }

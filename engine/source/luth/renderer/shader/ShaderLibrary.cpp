@@ -15,7 +15,7 @@ namespace Luth
     namespace
     {
         // Session import roots change with the project. Never reuse compiled variants
-        // from the prior environment; retained CPU snapshots remain valid for retiring owners.
+        // from the prior environment; refresh registrations while retaining snapshots for retiring owners.
         bool VariantEnvironmentChanged()
         {
             static fs::path engineRoot, projectRoot;
@@ -97,7 +97,6 @@ namespace Luth
     bool ShaderLibrary::Reload(const std::string& name)
     {
         LH_PROFILE_FUNCTION();
-        if (VariantEnvironmentChanged()) s_Variants.Clear();
         if (s_Variants.Find(name))
         {
             const auto next = s_Variants.Reload(name);
@@ -139,12 +138,18 @@ namespace Luth
     std::shared_ptr<const CompiledShaderVariant> ShaderLibrary::LoadEngineVariant(
         const std::string& path, ShaderCompileVariant variant)
     {
-        if (VariantEnvironmentChanged()) s_Variants.Clear();
+        if (VariantEnvironmentChanged()) ReloadVariants();
         return s_Variants.Load(FileSystem::EngineAssetsPath(path), variant);
     }
 
     void ShaderLibrary::SetVariantReloadCallback(std::function<void(const std::string&, const std::vector<u32>&)> callback)
     { s_VariantReloadCallback = std::move(callback); }
+
+    void ShaderLibrary::ReloadVariants()
+    {
+        (void)VariantEnvironmentChanged();
+        for (const auto& name : s_Variants.Names()) Reload(name);
+    }
 
     void ShaderLibrary::ReloadSource(const fs::path& source)
     { ReloadSources({source}); }
@@ -152,7 +157,7 @@ namespace Luth
     void ShaderLibrary::ReloadSources(const std::vector<fs::path>& sources)
     {
         if (sources.empty()) return;
-        if (VariantEnvironmentChanged()) s_Variants.Clear();
+        (void)VariantEnvironmentChanged();
         std::vector<std::string> names;
         for (const auto& [name, shader] : s_Shaders)
             for (const auto& source : sources)

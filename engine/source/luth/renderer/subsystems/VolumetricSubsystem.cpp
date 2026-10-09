@@ -133,8 +133,13 @@ namespace Luth
 
             VkPushConstantRange pcRange{ VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(FogInjectConstants) };
 
-            if (auto sh = ShaderLibrary::LoadEngine("shaders/volumetric_inject_scatter.slang"))
-                m_InjectScatterSpv = sh->GetSpirV();
+            const auto variant = VulkanContext::Get().SupportsRayTracing()
+                ? ShaderCompileVariant::Hybrid : ShaderCompileVariant::Raster;
+            if (auto sh = ShaderLibrary::LoadEngineVariant("shaders/volumetric_inject_scatter.slang", variant))
+            {
+                m_InjectScatterSpv = sh->spirv;
+                m_InjectScatterShaderName = ShaderVariantCache::Name(sh->source, sh->variant);
+            }
             if (m_InjectScatterSpv.empty())
             {
                 LH_LOG(Renderer, error, "VolumetricSubsystem: failed to load volumetric_inject_scatter.slang!");
@@ -596,6 +601,7 @@ namespace Luth
         VkDevice device = VulkanContext::Get().GetDevice();
         m_InjectDensityPipeline.reset();
         m_InjectScatterPipeline.reset();
+        m_InjectScatterShaderName.clear(); m_InjectScatterSpv.clear();
         m_IntegratePipeline.reset();
         m_ResolvePipeline.reset();
         m_CompositePipeline.reset();
@@ -645,7 +651,7 @@ namespace Luth
                 std::vector<VkPushConstantRange>{ pc });
             return true;
         }
-        if (name == "volumetric_inject_scatter.slang" && m_InjectScatterDescLayout)
+        if (!m_InjectScatterShaderName.empty() && name == m_InjectScatterShaderName && m_InjectScatterDescLayout)
         {
             m_InjectScatterSpv = spv;
             deferComp(m_InjectScatterPipeline);

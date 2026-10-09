@@ -32,6 +32,7 @@ namespace Luth
 
         static bool Reload(const std::string& name);
         static std::shared_ptr<const CompiledShaderVariant> LoadEngineVariant(const std::string& engineRelPath, ShaderCompileVariant);
+        static void ReloadVariants();
         static void ReloadSource(const fs::path&);
         static void ReloadSources(const std::vector<fs::path>&);
         static void SetVariantReloadCallback(std::function<void(const std::string&, const std::vector<u32>&)>);
