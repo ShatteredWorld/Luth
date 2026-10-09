@@ -8,6 +8,7 @@
 #include "luth/renderer/subsystems/EditorOverlaysSubsystem.h"
 #include "luth/renderer/subsystems/VolumetricSubsystem.h"
 #include "luth/renderer/subsystems/RtSubsystem.h"
+#include "luth/renderer/subsystems/SvgfDenoiser.h"
 #include "luth/scene/systems/RenderingSystem.h"
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
 #include "luth/renderer/backend/vulkan/VulkanTexture.h"
@@ -106,6 +107,12 @@ namespace Luth
         vr.restirDi = std::move(restirDi);
         if (restirDiReplaced) vr.generation = m_System.InvalidateView(id);
 
+        auto* diffuseDenoiser = static_cast<SvgfDenoiser*>(m_Denoise.get());
+        auto diDenoiser = m_RtNativeInitialized ? diffuseDenoiser->EnsureDiView(id, targets, vr.restirDi) : nullptr;
+        const bool diDenoiserReplaced = vr.diDenoiser && vr.diDenoiser != diDenoiser;
+        vr.diDenoiser = std::move(diDenoiser);
+        if (diDenoiserReplaced) vr.generation = m_System.InvalidateView(id);
+
         if (inserted || vr.descPool == VK_NULL_HANDLE)
         {
             // Borrow the owner's identity; native allocation does not mint a new view.
@@ -135,7 +142,6 @@ namespace Luth
                 m_PathTrace.WriteView(vr);              // re-bind PT accumulator + display image (recreated on resize)
                 m_Reflections.WriteView(vr, targets);   // re-bind reflection output + slim G-buffer samplers
                 m_Reflections.WriteUpscaleView(vr, targets);    // re-bind refl upscale half-input + full output
-                m_Denoise->WriteView(vr, targets);      // re-bind DI SVGF inputs + output to the new images
                 m_DenoiseGi->WriteView(vr, targets);    // re-bind GI SVGF inputs + output to the new images
                 m_DenoiseRefl->WriteView(vr, targets);  // re-bind specular SVGF inputs + output to the new images
                 m_DenoiseDiSpec->WriteView(vr, targets);// re-bind ReSTIR-DI specular SVGF
@@ -148,9 +154,9 @@ namespace Luth
         vr.width  = newW;
         vr.height = newH;
         // Source views can change without an extent change. Refresh the consumer's mask binding.
-        if (shadowReplaced) m_Lighting.WriteShadowView(vr);
+        if (shadowReplaced || diDenoiserReplaced) m_Lighting.WriteShadowView(vr);
+        if (diDenoiserReplaced && m_RtNativeInitialized) m_Restir.WriteUpscaleView(vr, targets);
         if (restirDiReplaced && m_RtNativeInitialized) {
-            m_Denoise->WriteView(vr, targets);
             m_DenoiseDiSpec->WriteView(vr, targets);
         }
         return vr;
@@ -162,6 +168,7 @@ namespace Luth
         if (m_GtaoPipeline) m_GtaoPipeline->ReleaseView(id);
         m_Volumetric.ReleaseView(id);
         m_Rt.ReleaseShadowView(id);
+        static_cast<SvgfDenoiser*>(m_Denoise.get())->ReleaseDiView(id);
         m_Restir.ReleaseView(id);
         m_Transparency.ReleaseView(id);
         m_PostProcess.ReleaseTaaView(id);
@@ -271,7 +278,6 @@ namespace Luth
             allocSingle(m_PathTrace.GetSetLayout(),          vr.ptDescSet,            "View.PathTrace");
             allocSingle(m_Reflections.GetSetLayout(),        vr.reflDescSet,          "View.Reflections");
             allocSingle(m_Reflections.GetUpscaleLayout(),    vr.reflUpscaleDescSet,   "View.ReflUpscale");
-            m_Denoise->AllocateViewSets(vr);
             m_DenoiseGi->AllocateViewSets(vr);
             m_DenoiseRefl->AllocateViewSets(vr);
             m_DenoiseDiSpec->AllocateViewSets(vr);
@@ -286,7 +292,6 @@ namespace Luth
             m_PathTrace.WriteView(vr);
             m_Reflections.WriteView(vr, targets);
             m_Reflections.WriteUpscaleView(vr, targets);    // bind refl upscale half-input + full output
-            m_Denoise->WriteView(vr, targets);
             m_DenoiseGi->WriteView(vr, targets);
             m_DenoiseRefl->WriteView(vr, targets);
             m_DenoiseDiSpec->WriteView(vr, targets);
@@ -349,30 +354,6 @@ namespace Luth
             reflW, reflH, TextureFormat::RGBA16F,
             /*arrayLayers*/ 1, /*createFlags*/ 0u, /*mipLevels*/ 1,
             VK_IMAGE_USAGE_STORAGE_BIT);
-
-        // SVGF denoiser output: same shape as restirDI. The denoiser reads restirDI and writes the denoised
-        // result here; pbr.frag Set 3 b5 samples this. Written before read each frame, so no bootstrap clear.
-        vr.svgfDenoised = std::make_shared<VKTexture>(
-            fullW, fullH, TextureFormat::RGBA16F,
-            /*arrayLayers*/ 1, /*createFlags*/ 0u, /*mipLevels*/ 1,
-            VK_IMAGE_USAGE_STORAGE_BIT);
-
-        // SVGF temporal history (ping-pong): RGBA16F storage, kept GENERAL. colorHist = color+variance,
-        // moments = (mu1,mu2,histLen), geom = (linearZ, octN.xy). Read-before-write on frame 0, so
-        // bootstrap-cleared with the volumetric history below.
-        for (u32 i = 0; i < 2; ++i)
-        {
-            vr.svgfColorHist[i] = std::make_shared<VKTexture>(diW, diH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-            vr.svgfMoments[i]   = std::make_shared<VKTexture>(diW, diH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-            vr.svgfGeom[i]      = std::make_shared<VKTexture>(diW, diH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-        }
-
-        // A-trous ping-pong: same shape as the SVGF history. svgfAtrous[0] is the moments output (a-trous
-        // level-0 input); the wavelet levels ping-pong [0]/[1]. Bootstrap-cleared to GENERAL below.
-        vr.svgfAtrous[0] = std::make_shared<VKTexture>(diW, diH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-        vr.svgfAtrous[1] = std::make_shared<VKTexture>(diW, diH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-        // Half-res DI diffuse a-trous final (upscale input); svgfDenoised stays full. Written each frame.
-        vr.svgfDiHalf = std::make_shared<VKTexture>(diW, diH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
 
         // GI SVGF: flat parallel set to the DI history above. History + a-trous run at the GI working res
         // (half when halfResolution); svgfGiDenoised stays FULL (the bilateral-upscale output). svgfGiHalf
@@ -443,15 +424,7 @@ namespace Luth
         // pixel content. The SVGF reproject
         // imageLoads its prev history on frame 0; without this clear the first read is NaN-prone garbage
         // (and imageLoad needs GENERAL). One-shot submit per view-resize only.
-        VkImage clearTargets[33] = {
-            std::static_pointer_cast<VKTexture>(vr.svgfColorHist[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfColorHist[1])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfMoments[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfMoments[1])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfGeom[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfGeom[1])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfAtrous[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfAtrous[1])->GetImage(),
+        VkImage clearTargets[25] = {
             // GI SVGF history: bootstrap-cleared so frame 0's prev imageLoad is well-defined.
             std::static_pointer_cast<VKTexture>(vr.svgfGiColorHist[0])->GetImage(),
             std::static_pointer_cast<VKTexture>(vr.svgfGiColorHist[1])->GetImage(),
@@ -482,7 +455,7 @@ namespace Luth
             std::static_pointer_cast<VKTexture>(vr.svgfDiSpecAtrous[0])->GetImage(),
             std::static_pointer_cast<VKTexture>(vr.svgfDiSpecAtrous[1])->GetImage(),
         };
-        constexpr u32 kClearCount = 33;
+        constexpr u32 kClearCount = 25;
         VulkanContext::Get().ImmediateSubmit([&](VkCommandBuffer cmd) {
             VkImageMemoryBarrier toDst[kClearCount]{};
             for (u32 i = 0; i < kClearCount; ++i)
@@ -537,18 +510,10 @@ namespace Luth
         vr.rtShadow.reset();
         vr.restirDi.reset();
         vr.restirGiDI.reset();
-        vr.svgfDenoised.reset();
-        for (u32 i = 0; i < 2; ++i)
-        {
-            vr.svgfColorHist[i].reset();
-            vr.svgfMoments[i].reset();
-            vr.svgfGeom[i].reset();
-        }
-        vr.svgfAtrous[0].reset();
-        vr.svgfAtrous[1].reset();
+        vr.diDenoiser.reset();
         vr.svgfGiDenoised.reset();
         vr.svgfGiHalf.reset();
-        vr.svgfDiHalf.reset();
+
         vr.svgfDiSpecHalf.reset();
         for (u32 i = 0; i < 2; ++i)
         {

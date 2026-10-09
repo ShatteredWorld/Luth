@@ -107,14 +107,47 @@ namespace Luth
                          &vr.svgfGiPassthroughDescSet, vr.svgfGiReprojectDescSet,
                          vr.svgfGiMomentsDescSet, vr.svgfGiAtrousDescSet };
             }
-            const bool diHalf = vr.svgfDiHalf && vr.svgfColorHist[0] && vr.svgfDenoised
-                && std::static_pointer_cast<VKTexture>(vr.svgfColorHist[0])->GetWidth()
-                   < std::static_pointer_cast<VKTexture>(vr.svgfDenoised)->GetWidth();
-            return { vr.svgfColorHist, vr.svgfMoments, vr.svgfGeom, vr.svgfAtrous,
-                     diHalf ? &vr.svgfDiHalf : &vr.svgfDenoised, vr.restirDi ? &vr.restirDi->restirDI : nullptr,
-                     &vr.svgfPassthroughDescSet, vr.svgfReprojectDescSet,
-                     vr.svgfMomentsDescSet, vr.svgfAtrousDescSet };
+            const bool diHalf = vr.diDenoiser->svgfDiHalf && vr.diDenoiser->svgfColorHist[0] && vr.diDenoiser->svgfDenoised
+                && std::static_pointer_cast<VKTexture>(vr.diDenoiser->svgfColorHist[0])->GetWidth()
+                   < std::static_pointer_cast<VKTexture>(vr.diDenoiser->svgfDenoised)->GetWidth();
+            return { vr.diDenoiser->svgfColorHist, vr.diDenoiser->svgfMoments, vr.diDenoiser->svgfGeom, vr.diDenoiser->svgfAtrous,
+                     diHalf ? &vr.diDenoiser->svgfDiHalf : &vr.diDenoiser->svgfDenoised, vr.restirDi ? &vr.restirDi->restirDI : nullptr,
+                     &vr.diDenoiser->svgfPassthroughDescSet, vr.diDenoiser->svgfReprojectDescSet,
+                     vr.diDenoiser->svgfMomentsDescSet, vr.diDenoiser->svgfAtrousDescSet };
         }
+    }
+
+    std::shared_ptr<DiDenoiserViewState> SvgfDenoiser::EnsureDiView(RenderViewId id,
+        FrameTargets& targets, const std::shared_ptr<RestirDiViewState>& input)
+    {
+        if (m_Channel != DenoiserChannel::Di || !m_PassLayout || !m_ReprojectLayout
+            || !m_MomentsLayout || !m_AtrousLayout || !input) return {};
+        std::array<std::shared_ptr<Texture>, 5> sources{targets.GetSceneDepth(), targets.GetSlimNormal(),
+            targets.GetSlimMotion(), targets.GetSlimMaterialID(), targets.GetSlimRoughness()};
+        std::array<VkImageView, 5> views{};
+        for (u32 i = 0; i < sources.size(); ++i) {
+            if (!sources[i]) throw std::invalid_argument("DI denoiser: missing descriptor source");
+            views[i] = std::static_pointer_cast<VKTexture>(sources[i])->GetImageView();
+        }
+        const auto* prior = m_DiViews.Find(id);
+        const u64 generation = prior && (*prior)->input == input && (*prior)->sources == sources
+            && (*prior)->sourceViews == views ? (*prior)->sourceGeneration : m_NextSourceGeneration++;
+        const bool half = input->width != targets.GetSceneColor()->GetWidth()
+            || input->height != targets.GetSceneColor()->GetHeight();
+        const auto config = DiDenoiserViewState::Config(targets.GetSceneColor()->GetWidth(),
+            targets.GetSceneColor()->GetHeight(), half, generation);
+        return m_DiViews.Ensure(id, config, [&](const ViewStateConfig& c) {
+            auto state = DiDenoiserViewState::Create(id, c,
+                {m_PassLayout, m_ReprojectLayout, m_MomentsLayout, m_AtrousLayout});
+            state->input = input; state->sources = sources; state->sourceViews = views;
+            ViewResources bridge; bridge.diDenoiser = state; bridge.restirDi = input;
+            WriteNativeView(bridge, targets);
+            return state;
+        }, [] { Renderer::WaitForGPU(); });
+    }
+    void SvgfDenoiser::ReleaseDiView(RenderViewId id)
+    {
+        m_DiViews.Release(id, [] { Renderer::WaitForGPU(); });
     }
 
     const SvgfSettings& SvgfDenoiser::Settings() const
@@ -273,6 +306,7 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         VkDevice device = VulkanContext::Get().GetDevice();
+        m_DiViews.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_PassthroughPipeline.reset();
         m_ReprojectPipeline.reset();
         m_MomentsPipeline.reset();
@@ -355,7 +389,7 @@ namespace Luth
     void SvgfDenoiser::AllocateViewSets(ViewResources& vr)
     {
         LH_PROFILE_FUNCTION();
-        if (vr.descPool == VK_NULL_HANDLE) return;
+        if (m_Channel == DenoiserChannel::Di || vr.descPool == VK_NULL_HANDLE) return;
         VkDevice device = VulkanContext::Get().GetDevice();
         ChannelRefs c = Resolve(m_Channel, vr);
         const std::string pfx = (m_Channel == DenoiserChannel::Gi) ? "View.SvgfGi" : "View.Svgf";
@@ -425,6 +459,11 @@ namespace Luth
     }
 
     void SvgfDenoiser::WriteView(ViewResources& vr, FrameTargets& targets)
+    {
+        if (m_Channel == DenoiserChannel::Di) return; // Immutable local sets are written by EnsureDiView.
+        WriteNativeView(vr, targets);
+    }
+    void SvgfDenoiser::WriteNativeView(ViewResources& vr, FrameTargets& targets)
     {
         LH_PROFILE_FUNCTION();
         VkDevice device = VulkanContext::Get().GetDevice();
@@ -580,7 +619,7 @@ namespace Luth
         if (!in.di.IsValid()) return {};
 
         ViewResources* vr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
-        if (!vr) return {};
+        if (!vr || (m_Channel == DenoiserChannel::Di && !vr->diDenoiser)) return {};
         ChannelRefs c = Resolve(m_Channel, *vr);
         if (!*c.denoised) return {};
 

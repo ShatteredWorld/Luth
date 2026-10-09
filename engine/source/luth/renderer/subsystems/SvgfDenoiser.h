@@ -3,6 +3,7 @@
 #include "luth/renderer/subsystems/IDenoiser.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 
+#include "luth/renderer/features/rt/DiDenoiserViewState.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -39,8 +40,12 @@ namespace Luth
         void WriteView(ViewResources& vr, FrameTargets& targets) override;
         RG::ResourceHandle AddPasses(RG::RenderGraph& rg, const DenoiseInputs& in) override;
         bool IsEnabled() const override;
+        std::shared_ptr<DiDenoiserViewState> EnsureDiView(RenderViewId, FrameTargets&,
+            const std::shared_ptr<RestirDiViewState>&);
+        void ReleaseDiView(RenderViewId);
 
     private:
+        void WriteNativeView(ViewResources&, FrameTargets&);
         // enabled + full pipeline -> reproject -> moments -> a-trous xN chain; disabled -> raw copy (the
         // A/B). Both write svgfDenoised and return its handle; an invalid input handle returns invalid.
         RG::ResourceHandle AddDenoiseChain(RG::RenderGraph& rg, const DenoiseInputs& in);
@@ -51,6 +56,8 @@ namespace Luth
         const SvgfSettings& Settings() const;
         const char*         PassName(int which) const;  // 0=reproject 1=moments 2=atrous 3=passthrough
 
+        DiDenoiserViewStates m_DiViews;
+        u64 m_NextSourceGeneration = 1;
         DenoiserChannel m_Channel = DenoiserChannel::Di;
         RenderPipeline* m_Pipeline = nullptr;
 

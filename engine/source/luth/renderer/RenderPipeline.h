@@ -1,4 +1,5 @@
 #pragma once
+#include "luth/renderer/features/rt/DiDenoiserViewState.h"
 
 #include "luth/core/types/LuthMath.h"
 #include "luth/core/UUID.h"
@@ -168,29 +169,8 @@ namespace Luth
         VkDescriptorSet giReservoirVizDescSet = VK_NULL_HANDLE;  // ShadeMode::RestirGiReservoir debug viz (b0 depth, b1 spatial reservoir)
 
         // SVGF denoiser output: viewport-sized RGBA16F STORAGE+SAMPLED, same shape as restirDI. The
-        // denoiser reads restirDI (noisy demodulated DI) and writes the denoised result here; pbr.frag
-        // Set 3 b5 samples THIS (not restirDI), so the denoiser owns the slot whenever ReSTIR is on and
-        // the A/B is denoise-vs-raw with no binding swap. History + per-pass sets grow as the SVGF
-        // passes land. see arch/rendering-pipeline.md
-        std::shared_ptr<Texture> svgfDenoised;
-        VkDescriptorSet svgfPassthroughDescSet = VK_NULL_HANDLE;
-
-        // SVGF temporal history: RGBA16F storage images kept in GENERAL, ping-pong by frame parity
-        // (curr = [p], prev = [p^1]). colorHist = integrated color (rgb) + variance (a); moments =
-        // (mu1, mu2, histLen); geom = (linearZ, octN.x, octN.y) for the disocclusion test.
-        // Bootstrap-cleared so frame 0's prev read is well-defined. The two reproject sets are pre-built
-        // per parity (set[p] reads [p^1], writes [p]); AddPasses binds svgfReprojectDescSet[frameAbs & 1].
-        std::shared_ptr<Texture> svgfColorHist[2];
-        std::shared_ptr<Texture> svgfMoments[2];
-        std::shared_ptr<Texture> svgfGeom[2];
-        VkDescriptorSet svgfReprojectDescSet[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-
-        // A-trous ping-pong (RGBA16F storage, GENERAL). Moments writes svgfAtrous[0] (a-trous level-0
-        // input); the wavelet levels ping-pong [0]/[1] by iteration parity, the final level also writes
-        // svgfDenoised. Moments/a-trous sets are pre-built per parity, bound by index; no UAB rewrite.
-        std::shared_ptr<Texture> svgfAtrous[2];
-        VkDescriptorSet svgfMomentsDescSet[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-        VkDescriptorSet svgfAtrousDescSet[2]  = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+        // Diffuse DI histories, output images and descriptors belong to SvgfDenoiser.
+        std::shared_ptr<DiDenoiserViewState> diDenoiser; // Borrowed diffuse-channel state.
 
         // ReSTIR GI SVGF: flat parallel set to the DI fields above (mirroring restirDI/restirGiDI).
         // A second SvgfDenoiser instance (DenoiserChannel::Gi) drives these; svgfGiDenoised feeds Set 3
@@ -212,7 +192,7 @@ namespace Luth
         VkDescriptorSet giUpscaleDescSet = VK_NULL_HANDLE;   // half-res GI bilateral-upscale set (Set 1)
         // Half-res DI (both channels): a-trous finals write svgfDiHalf / svgfDiSpecHalf; bilateral upscales
         // resolve them into the full-res svgfDenoised / svgfDiSpecDenoised. diHalfCached drives realloc.
-        std::shared_ptr<Texture> svgfDiHalf;
+
         std::shared_ptr<Texture> svgfDiSpecHalf;
         u32 diHalfCached = ~0u;
         VkDescriptorSet diUpscaleDescSet     = VK_NULL_HANDLE;   // half-res DI diffuse upscale set
