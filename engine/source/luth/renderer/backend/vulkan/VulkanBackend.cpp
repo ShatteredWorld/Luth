@@ -2,6 +2,7 @@
 #include <atomic>
 #include "VulkanBackend.h"
 #include "VulkanContext.h"
+#include "VulkanBarrierCapabilities.h"
 #include "PipelineCache.h"
 #include "luth/core/diagnostics/Log.h"
 #include "luth/jobs/JobSystem.h"
@@ -223,8 +224,8 @@ namespace Luth
                     cWaits[cWaitCount].sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
                     cWaits[cWaitCount].semaphore = m_ComputeTimeline.GetHandle();
                     cWaits[cWaitCount].value     = prevValue;
-                    cWaits[cWaitCount].stageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                                                 | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+                    cWaits[cWaitCount].stageMask = VulkanBarrierCapabilities::ForEnabledRtPackage(
+                        VulkanContext::Get().SupportsRayTracing()).ComputeHistoryWaitStages();
                     ++cWaitCount;
                 }
             }

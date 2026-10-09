@@ -209,3 +209,15 @@ TEST_CASE("RGSolver: attachment states carry READ access so loadOp LOAD is cover
     CHECK((dAccess & VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT)  != 0);
     CHECK((dAccess & VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT) != 0);
 }
+
+TEST_CASE("RGSolver: native sampled reads and compute history waits omit unsupported stages")
+{
+    const VulkanBarrierCapabilities raster{}, query{true, false}, hybrid{true, true};
+    const auto ordinaryReads = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    CHECK(raster.SampledImageReadStages() == ordinaryReads);
+    CHECK(query.SampledImageReadStages() == ordinaryReads);
+    CHECK(hybrid.SampledImageReadStages() == (ordinaryReads | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR));
+    CHECK(raster.ComputeHistoryWaitStages() == VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+    CHECK(query.ComputeHistoryWaitStages() == (VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR));
+    CHECK(hybrid.ComputeHistoryWaitStages() == query.ComputeHistoryWaitStages());
+}

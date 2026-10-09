@@ -586,9 +586,8 @@ namespace Luth
             VkImageMemoryBarrier2 b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
             b.srcStageMask        = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT;
             b.srcAccessMask       = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
-            b.dstStageMask        = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
-                                  | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                                  | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+            b.dstStageMask        = VulkanBarrierCapabilities::ForEnabledRtPackage(
+                VulkanContext::Get().SupportsRayTracing()).SampledImageReadStages();
             b.dstAccessMask       = VK_ACCESS_2_SHADER_READ_BIT;
             b.oldLayout           = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
             b.newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
