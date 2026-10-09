@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 #include "luth/renderer/features/RenderPipelineCompiler.h"
+#include "luth/renderer/features/rt/RtSceneFeature.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/memory/LinearAllocator.h"
 #include <array>
@@ -8,12 +9,142 @@
 using namespace Luth;
 using namespace Luth::RenderResources;
 
+TEST_CASE("FeatureCompiler: RT scene provider demand prepares before registering GPU work")
+{
+    int prepares = 0, registrations = 0;
+    std::shared_ptr<PreparedRtScene> packet;
+    RtSceneParameters params;
+    RenderPipelineDefinition definition;
+    definition.AddFeature<RtSceneFeature>(
+        [&](const FrameRenderInputs& frame, const RtSceneParameters&) -> std::shared_ptr<const PreparedRtScene> {
+            ++prepares;
+            if (!packet || packet->frameIndex != frame.renderFrameIndex) {
+                packet = std::make_shared<PreparedRtScene>();
+                packet->frameIndex = frame.renderFrameIndex;
+            }
+            return packet;
+        },
+        [&](RG::RenderGraph& graph, std::shared_ptr<const PreparedRtScene> prepared) {
+            REQUIRE(prepared == packet);
+            ++registrations;
+            struct Data {};
+            graph.AddComputePass<Data>("TlasBuild", RG::QueueFamily::AsyncCompute,
+                [](Data&, RG::RenderPassBuilder& builder) { builder.SetHasSideEffect(); },
+                [prepared](Data&, RG::RenderPassContext&) {});
+        });
+    for (size_t i = 0; i < static_cast<size_t>(RtSceneConsumer::Count); ++i)
+        definition.AddFeature<RtSceneDemandFeature>(static_cast<RtSceneConsumer>(i));
+    PipelineInputContract inputs;
+    inputs.resources = {{RtSceneResources::Parameters}};
+    auto compiled = RenderPipelineCompiler{}.Compile(std::move(definition),
+        RendererCapabilities{{&RtSceneResources::AccelerationStructures, &RtSceneResources::RayQueries}}, inputs);
+    REQUIRE(compiled.pipeline);
+    Memory::LinearAllocator scratch(256 * 1024);
+    const std::array bindings{RenderInputBinding::Present(RtSceneResources::Parameters, params)};
+    FrameRenderInputs frame;
+    frame.renderFrameIndex = 42;
+    frame.resources = bindings;
+    ViewRenderInputs view;
+    view.id = RenderViewId{1};
+    RaySceneRef output;
+    const std::array outputs{RenderOutputBinding::Capture(RtSceneResources::Scene, output)};
+    {
+        RG::RenderGraph graph(scratch);
+        auto plan = compiled.pipeline->Prepare(frame, view, scratch);
+        REQUIRE(plan.success);
+        CHECK(prepares == 0);
+        CHECK(compiled.pipeline->Build(graph, frame, view, scratch, outputs, plan.plan.get()).success);
+        CHECK(registrations == 0);
+        CHECK(graph.GetPasses().empty());
+        CHECK(output.native == nullptr);
+    }
+    for (size_t i = 0; i < params.active.size(); ++i) {
+        view.id = RenderViewId{i + 1};
+        params.active.fill(false);
+        params.active[i] = true;
+        RG::RenderGraph graph(scratch);
+        auto plan = compiled.pipeline->Prepare(frame, view, scratch);
+        REQUIRE(plan.success);
+        CHECK(prepares == static_cast<int>(i + 1));
+        CHECK(registrations == static_cast<int>(i));
+        CHECK(graph.GetPasses().empty());
+        CHECK(compiled.pipeline->Build(graph, frame, view, scratch, outputs, plan.plan.get()).success);
+        REQUIRE(graph.GetPasses().size() == 1);
+        CHECK(graph.GetPasses()[0].name == "TlasBuild");
+        CHECK(output.native == packet.get());
+        CHECK_FALSE(output.native->HasSceneData());
+        CHECK_FALSE(compiled.pipeline->Build(graph, frame, view, scratch, outputs, plan.plan.get()).success);
+    }
+    params.active.fill(true);
+    {
+        RG::RenderGraph combined(scratch);
+        CHECK(compiled.pipeline->Build(combined, frame, view, scratch, outputs).success);
+        CHECK(combined.GetPasses().size() == 1);
+        CHECK(prepares == 7);
+        CHECK(registrations == 7);
+        CHECK(output.native == packet.get());
+    }
+    params.active.fill(false);
+    RG::RenderGraph off(scratch);
+    CHECK(compiled.pipeline->Build(off, frame, view, scratch, outputs).success);
+    CHECK(off.GetPasses().empty());
+    CHECK(output.native == nullptr);
+}
+
+TEST_CASE("FeatureCompiler: RT scene contracts reject absent providers and unsupported devices")
+{
+    RenderPipelineDefinition missing;
+    missing.AddFeature<RtSceneDemandFeature>(RtSceneConsumer::Fog);
+    PipelineInputContract inputs;
+    inputs.resources = {{RtSceneResources::Parameters}};
+    CHECK_FALSE(RenderPipelineCompiler{}.Compile(std::move(missing),
+        RendererCapabilities{{&RtSceneResources::RayQueries}}, inputs).pipeline);
+    RenderPipelineDefinition unsupported;
+    unsupported.AddFeature<RtSceneFeature>(
+        [](const FrameRenderInputs&, const RtSceneParameters&) { return std::shared_ptr<const PreparedRtScene>{}; },
+        [](RG::RenderGraph&, std::shared_ptr<const PreparedRtScene>) {});
+    CHECK_FALSE(RenderPipelineCompiler{}.Compile(std::move(unsupported), {}, inputs).pipeline);
+}
+
 static_assert(!std::is_copy_constructible_v<RenderPipelineDefinition>);
 static_assert(std::is_move_constructible_v<RenderPipelineDefinition>);
+static_assert(!std::is_copy_constructible_v<PreparedPipelineFrame>);
+
+TEST_CASE("FeatureCompiler: prepared plans reject changed identities and superseded preparation")
+{
+    auto compiled = RenderPipelineCompiler{}.Compile({}, {});
+    auto foreign = RenderPipelineCompiler{}.Compile({}, {});
+    REQUIRE(compiled.pipeline);
+    REQUIRE(foreign.pipeline);
+    Memory::LinearAllocator scratch(4096);
+    FrameRenderInputs frame;
+    frame.renderFrameIndex = 42;
+    ViewRenderInputs view;
+    view.id = RenderViewId{1};
+    view.resourceGeneration = 3;
+    auto plan = compiled.pipeline->Prepare(frame, view, scratch);
+    REQUIRE(plan.success);
+    RG::RenderGraph graph(scratch);
+    CHECK_FALSE(foreign.pipeline->Build(graph, frame, view, scratch, {}, plan.plan.get()).success);
+    auto changedView = view;
+    changedView.id = RenderViewId{2};
+    CHECK_FALSE(compiled.pipeline->Build(graph, frame, changedView, scratch, {}, plan.plan.get()).success);
+    changedView = view;
+    ++changedView.resourceGeneration;
+    CHECK_FALSE(compiled.pipeline->Build(graph, frame, changedView, scratch, {}, plan.plan.get()).success);
+    auto changedFrame = frame;
+    ++changedFrame.renderFrameIndex;
+    CHECK_FALSE(compiled.pipeline->Build(graph, changedFrame, view, scratch, {}, plan.plan.get()).success);
+    auto replacement = compiled.pipeline->Prepare(frame, view, scratch);
+    REQUIRE(replacement.success);
+    CHECK_FALSE(compiled.pipeline->Build(graph, frame, view, scratch, {}, plan.plan.get()).success);
+    CHECK(compiled.pipeline->Build(graph, frame, view, scratch, {}, replacement.plan.get()).success);
+    CHECK_FALSE(compiled.pipeline->Build(graph, frame, view, scratch, {}, replacement.plan.get()).success);
+}
 
 namespace
 {
-    constexpr RenderCapabilityIdentity Scene{"Scene"};
+    constexpr RenderCapabilityIdentity SceneCapability{"Scene"};
     constexpr RenderCapabilityIdentity Geometry{"Geometry"};
     constexpr DeviceCapabilityIdentity RayQuery{"RayQuery"};
     constexpr DeviceCapabilityIdentity RayPipeline{"RayPipeline"};
@@ -262,8 +393,8 @@ TEST_CASE("FeatureCompiler: resource capability and explicit cycles report actua
     }
     SUBCASE("capabilities")
     {
-        auto first = Info("A"); first.capabilities = {{&Scene}, {{&Geometry}}, {}};
-        auto second = Info("B"); second.capabilities = {{&Geometry}, {{&Scene}}, {}};
+        auto first = Info("A"); first.capabilities = {{&SceneCapability}, {{&Geometry}}, {}};
+        auto second = Info("B"); second.capabilities = {{&Geometry}, {{&SceneCapability}}, {}};
         definition.AddFeature<TestFeature>(first, a);
         definition.AddFeature<TestFeature>(second, b);
     }
@@ -299,7 +430,7 @@ TEST_CASE("FeatureCompiler: capabilities stay explicit and distinct [renderfeatu
     }
     SUBCASE("no hidden provider insertion")
     {
-        info.capabilities.consumes = {{&Scene, true}};
+        info.capabilities.consumes = {{&SceneCapability, true}};
         definition.AddFeature<TestFeature>(info, a);
         auto result = RenderPipelineCompiler{}.Compile(std::move(definition), {});
         CHECK(Find(result, PipelineDiagnosticCode::MissingCapability));
@@ -307,10 +438,10 @@ TEST_CASE("FeatureCompiler: capabilities stay explicit and distinct [renderfeatu
     }
     SUBCASE("duplicate providers")
     {
-        info.capabilities.provides = {&Scene};
+        info.capabilities.provides = {&SceneCapability};
         definition.AddFeature<TestFeature>(info, a);
         definition.AddFeature<TestFeature>(Info("OtherProvider"), b);
-        auto result = RenderPipelineCompiler{}.Compile(std::move(definition), {}, {{}, {&Scene}});
+        auto result = RenderPipelineCompiler{}.Compile(std::move(definition), {}, {{}, {&SceneCapability}});
         CHECK(Find(result, PipelineDiagnosticCode::DuplicateCapability));
     }
     SUBCASE("incompatible techniques")
@@ -570,11 +701,11 @@ TEST_CASE("FeatureCompiler: transitive demand activates shared providers once pe
 {
     Probe base, provider, first, second;
     auto scene = Info("SceneProvider"); scene.activation = FeatureActivation::DemandDriven;
-    scene.capabilities = {{&Scene}, {{&Geometry}}, {}};
+    scene.capabilities = {{&SceneCapability}, {{&Geometry}}, {}};
     auto geometry = Info("GeometryProvider"); geometry.activation = FeatureActivation::DemandDriven;
     geometry.capabilities.provides = {&Geometry};
-    auto consumer = Info("Consumer"); consumer.capabilities.consumes = {{&Scene, true}};
-    const std::array<const RenderCapabilityIdentity*, 1> requests{&Scene};
+    auto consumer = Info("Consumer"); consumer.capabilities.consumes = {{&SceneCapability, true}};
+    const std::array<const RenderCapabilityIdentity*, 1> requests{&SceneCapability};
     RenderPipelineDefinition definition;
     definition.AddFeature<TestFeature>(consumer, first);
     definition.AddFeature<TestFeature>(scene, provider);
@@ -604,13 +735,13 @@ TEST_CASE("FeatureCompiler: dynamic capability requests and external availabilit
 {
     Probe probe;
     auto info = Info("Consumer");
-    const std::array<const RenderCapabilityIdentity*, 1> requests{&Scene};
+    const std::array<const RenderCapabilityIdentity*, 1> requests{&SceneCapability};
     PipelineInputContract inputs;
     bool declared = false, available = false;
     SUBCASE("undeclared dynamic request") { probe.decision.requests = requests; }
     SUBCASE("external capability unavailable") { declared = true; }
     SUBCASE("external capability available") { declared = true; available = true; }
-    if (declared) { info.capabilities.consumes = {{&Scene}}; inputs.capabilities = {&Scene}; }
+    if (declared) { info.capabilities.consumes = {{&SceneCapability}}; inputs.capabilities = {&SceneCapability}; }
     RenderPipelineDefinition definition;
     definition.AddFeature<TestFeature>(info, probe);
     auto result = RenderPipelineCompiler{}.Compile(std::move(definition), {}, inputs);

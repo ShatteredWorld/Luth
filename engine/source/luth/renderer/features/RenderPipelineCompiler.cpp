@@ -349,12 +349,12 @@ namespace Luth
             m_InputIndices.emplace(m_Inputs.resources[i].key.identity, i);
     }
 
-    PipelineBuildResult CompiledRenderPipeline::Build(RG::RenderGraph& graph,
-        const FrameRenderInputs& frame, const ViewRenderInputs& view, Memory::LinearAllocator& scratch,
-        std::span<const RenderOutputBinding> outputs)
+
+    PipelinePrepareResult CompiledRenderPipeline::Prepare(const FrameRenderInputs& frame,
+        const ViewRenderInputs& view, Memory::LinearAllocator& scratch)
     {
-        PipelineBuildResult result;
-        for (const auto& output : outputs) output.m_Copy(output.m_Destination, nullptr);
+        PipelinePrepareResult result;
+        const auto serial = ++m_PreparationSerial;
         FeatureInstanceId current = InvalidFeatureInstance;
         auto fail = [&](PipelineDiagnosticCode code, std::string message, ResourceKeyRef key = {}, const RenderCapabilityIdentity* capability = nullptr) {
             result.diagnostics.push_back({code, current, InvalidFeatureInstance, key, capability, {}, std::move(message)});
@@ -362,7 +362,6 @@ namespace Luth
         try
         {
             RenderBlackboard board(m_Layout, scratch);
-            for (const auto& output : outputs) (void)m_Layout.Find(output.m_Key);
             for (const auto bindings : {frame.resources, view.resources})
                 for (const auto& binding : bindings)
                 {
@@ -386,10 +385,11 @@ namespace Luth
                     return result;
                 }
             }
-            for (auto key : m_AbsentKeys) board.PublishAbsentBorrowed(key);
             const auto count = m_Entries.size();
             auto* decisions = count ? static_cast<FeatureFrameDecision*>(scratch.Allocate(sizeof(FeatureFrameDecision) * count, alignof(FeatureFrameDecision))) : nullptr;
-            auto* active = count ? static_cast<u8*>(scratch.Allocate(count, alignof(u8))) : nullptr;
+            auto plan = std::make_unique<PreparedPipelineFrame>();
+            plan->active = {count ? static_cast<u8*>(scratch.Allocate(count, alignof(u8))) : nullptr, count};
+            auto* active = plan->active.data();
             FeaturePrepareContext prepare{frame, view, scratch};
             for (size_t i = 0; i < count; ++i)
             {
@@ -436,6 +436,75 @@ namespace Luth
             }
             for (size_t i = 0; i < count; ++i)
                 if (active[i]) { current = m_Entries[i].id; m_Entries[i].feature->Prepare(prepare); }
+
+            plan->owner = this;
+            plan->frame = frame.renderFrameIndex;
+            plan->view = view.id;
+            plan->generation = view.resourceGeneration;
+            plan->serial = serial;
+            result.plan = std::move(plan);
+            result.success = true;
+        }
+        catch (const BlackboardError& error) { fail(PipelineDiagnosticCode::InvalidInput, error.what(), error.Key()); }
+        catch (const std::exception& error) { fail(PipelineDiagnosticCode::BuildContractViolation, error.what()); }
+        return result;
+    }
+
+    PipelineBuildResult CompiledRenderPipeline::Build(RG::RenderGraph& graph,
+        const FrameRenderInputs& frame, const ViewRenderInputs& view, Memory::LinearAllocator& scratch,
+        std::span<const RenderOutputBinding> outputs, PreparedPipelineFrame* prepared)
+    {
+        PipelineBuildResult result;
+        for (const auto& output : outputs) output.m_Copy(output.m_Destination, nullptr);
+        FeatureInstanceId current = InvalidFeatureInstance;
+        auto fail = [&](PipelineDiagnosticCode code, std::string message, ResourceKeyRef key = {}, const RenderCapabilityIdentity* capability = nullptr) {
+            result.diagnostics.push_back({code, current, InvalidFeatureInstance, key, capability, {}, std::move(message)});
+        };
+        try
+        {
+            RenderBlackboard board(m_Layout, scratch);
+            for (const auto& output : outputs) (void)m_Layout.Find(output.m_Key);
+            for (const auto bindings : {frame.resources, view.resources})
+                for (const auto& binding : bindings)
+                {
+                    const auto input = m_InputIndices.find(binding.m_Key.identity);
+                    if (input == m_InputIndices.end() || m_Inputs.resources[input->second].key.type != binding.m_Key.type)
+                    {
+                        fail(PipelineDiagnosticCode::InvalidInput, "Undeclared or wrongly typed external publication", binding.m_Key);
+                        return result;
+                    }
+                    if (binding.m_Value) board.PublishBorrowed(binding.m_Key, binding.m_Value);
+                    else board.PublishAbsentBorrowed(binding.m_Key);
+                }
+            for (const auto& input : m_Inputs.resources)
+            {
+                const size_t slot = m_Layout.Find(input.key);
+                if (board.m_States[slot] == RenderBlackboard::State::Unpublished && input.presence == ResourceOutputPresence::Optional)
+                    board.PublishAbsentBorrowed(input.key);
+                if (board.m_States[slot] != RenderBlackboard::State::Present && input.presence == ResourceOutputPresence::Required)
+                {
+                    fail(PipelineDiagnosticCode::InvalidInput, "Required external input is absent: " + std::string(input.key.identity->name), input.key);
+                    return result;
+                }
+            }
+            for (auto key : m_AbsentKeys) board.PublishAbsentBorrowed(key);
+            std::unique_ptr<PreparedPipelineFrame> localPlan;
+            if (!prepared)
+            {
+                auto preparation = Prepare(frame, view, scratch);
+                if (!preparation.success) { result.diagnostics = std::move(preparation.diagnostics); return result; }
+                localPlan = std::move(preparation.plan);
+                prepared = localPlan.get();
+            }
+            if (prepared->owner != this || prepared->consumed || prepared->serial != m_PreparationSerial || prepared->frame != frame.renderFrameIndex ||
+                prepared->view != view.id || prepared->generation != view.resourceGeneration)
+            {
+                fail(PipelineDiagnosticCode::InvalidInput, "Prepared pipeline frame is stale, foreign or already consumed");
+                return result;
+            }
+            prepared->consumed = true;
+            const auto count = m_Entries.size();
+            const auto* active = prepared->active.data();
             bool seenAsync = false, seenGraphicsB = false;
             for (const auto& pass : graph.GetPasses())
                 if (pass.queueFamily == RG::QueueFamily::AsyncCompute) seenAsync = true;

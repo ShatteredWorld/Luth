@@ -67,6 +67,7 @@ namespace Luth
         { return m_PreparedScene && m_PreparedScene->frameIndex == frameIndex; }
         // Captures the prepared packet; recording performs no global/domain lookups or allocation.
         void AddTlasBuildPass(RG::RenderGraph& rg);
+        void AddTlasBuildPass(RG::RenderGraph& rg, std::shared_ptr<const PreparedRtScene>);
 
         // Registers the RT sun-shadow compute pass on AsyncCompute. Imports the per-view sunShadowMask
         // + reads SceneDepth + SlimNormal; the shader reads TLAS via static descriptor binding

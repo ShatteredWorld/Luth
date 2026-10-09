@@ -146,6 +146,16 @@ namespace Luth
             m_DenoiseGi->Init(*this);
             m_DenoiseRefl->Init(*this);
             m_DenoiseDiSpec->Init(*this);
+            RenderPipelineDefinition sceneDefinition;
+            sceneDefinition.AddFeature<RtSceneFeature>(m_Rt);
+            for (size_t i = 0; i < static_cast<size_t>(RtSceneConsumer::Count); ++i)
+                sceneDefinition.AddFeature<RtSceneDemandFeature>(static_cast<RtSceneConsumer>(i));
+            PipelineInputContract sceneInputs;
+            sceneInputs.resources = {{RtSceneResources::Parameters}};
+            RendererCapabilities sceneCapabilities{{&RtSceneResources::AccelerationStructures, &RtSceneResources::RayQueries}};
+            auto sceneCompiled = RenderPipelineCompiler{}.Compile(std::move(sceneDefinition), sceneCapabilities, sceneInputs);
+            if (!sceneCompiled.ReplaceIfValid(m_RtSceneComposition))
+                throw std::runtime_error("RT scene definition failed semantic validation");
         }
         m_Skinning.Init();
         RenderPipelineDefinition deformationDefinition;
@@ -417,6 +427,8 @@ namespace Luth
             m_SlangParity.Shutdown();
             m_RestirGi.Shutdown();
             m_Restir.Shutdown();
+            m_RtScenePlan.reset();
+            m_RtSceneComposition.reset();
             m_Rt.Shutdown();
             m_RtNativeInitialized = false;
         }
@@ -440,16 +452,30 @@ namespace Luth
 
     void RenderPipeline::PrepareRtScene(const RenderView& view, const DirectionalLightShadowParams& shadows)
     {
-        m_ViewRequiresRtScene = false;
-        if (!m_RtNativeInitialized) return;
-        const bool demanded = (shadows.mode == ShadowingMode::RtShadows && shadows.castShadows)
-            || m_Restir.IsEnabled() || m_RestirGi.IsEnabled() || m_PathTrace.IsEnabled() || m_Reflections.IsEnabled()
-            || (view.camera.enableVolumetricFog && m_Volumetric.IsRtShadowsEnabled());
-        if (!demanded) return;
-        m_ViewRequiresRtScene = true;
-        const bool markEmitters = m_System.GetEmissiveLightSettings().enabled && m_System.GetRestirSettings().enabled;
-        m_Rt.PrepareScene(m_System.GetActiveSnapshot().meshes, Renderer::GetFrameData()->GetRenderFrameIndex(),
-            GetMaterialSlotMap(), markEmitters);
+        m_RtScenePlan.reset();
+        if (!m_RtSceneComposition) return;
+        m_RtSceneParameters.active = {
+            shadows.mode == ShadowingMode::RtShadows && shadows.castShadows,
+            view.camera.enableVolumetricFog && m_Volumetric.IsRtShadowsEnabled(),
+            m_Restir.IsEnabled(), m_RestirGi.IsEnabled(), m_Reflections.IsEnabled(), m_PathTrace.IsEnabled()};
+        m_RtSceneParameters.materialSlots = &GetMaterialSlotMap();
+        m_RtSceneParameters.markEmitters = m_System.GetEmissiveLightSettings().enabled && m_System.GetRestirSettings().enabled;
+        const std::array bindings{RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters)};
+        FrameRenderInputs frame;
+        frame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+        frame.snapshot = &m_System.GetActiveSnapshot();
+        frame.resources = bindings;
+        ViewRenderInputs inputs;
+        inputs.id = view.id;
+        inputs.resourceGeneration = m_CurrentViewResources->generation;
+        auto prepared = m_RtSceneComposition->Prepare(frame, inputs, m_System.GetFrameAllocator());
+        if (!prepared.success)
+        {
+            for (const auto& diagnostic : prepared.diagnostics)
+                LH_LOG(Renderer, error, "RT scene preparation: {}", diagnostic.message);
+            throw std::runtime_error("RT scene preparation failed");
+        }
+        m_RtScenePlan = std::move(prepared.plan);
     }
 
     void RenderPipeline::PrepareForTargets(FrameTargets& targets)
@@ -483,7 +509,7 @@ namespace Luth
         RG::BufferHandle hIndirectBuf = rg.ImportBuffer(indDesc, (void*)indirectRegion.buffer, RG::ResourceState::Undefined);
 
         // Deform: per-frame compute skinning into each mesh's deformed buffer, as the FIRST graphics
-        // pass so raster geometry (gA) reads the current-frame deformation. Decoupled from needTlas:
+        // pass so raster geometry (gA) reads the current-frame deformation. Independent of RT scene demand:
         // raster always needs it, even when no RT consumer builds a TLAS this frame.
         const bool ptEnabled = m_PathTrace.IsEnabled() && m_CurrentViewResources
                             && m_Rt.IsPreparedFor(Renderer::GetFrameData()->GetRenderFrameIndex())
@@ -683,14 +709,31 @@ namespace Luth
         // not execution ordering. Multi-view guard inside RtSubsystem short-circuits the second view (TLAS is scene-global).
         const bool runRtShadows = m_RtNativeInitialized && (m_Global.GetShadowParams().mode == ShadowingMode::RtShadows)
                                && m_Global.GetShadowParams().castShadows;
-        // Per-view fog toggle: also gates the volumetric term in needTlas, so a fog-off view doesn't
+        // Per-view fog toggle: also gates its declared RT scene consumer, so a fog-off view doesn't
         // build a TLAS the (then-unregistered) scatter pass would never read.
         const bool volumetricEnabled = view.camera.enableVolumetricFog;
         // Preserve the per-view demand decision frozen before uniform writes. The scene-global
         // packet is shared, while views with no RT consumers still register no scene-build pass.
-        const bool needTlas = m_ViewRequiresRtScene && m_Rt.IsPreparedFor(Renderer::GetFrameData()->GetRenderFrameIndex());
-        if (needTlas)
-            m_Rt.AddTlasBuildPass(rg);
+        if (m_RtSceneComposition)
+        {
+            if (!m_RtScenePlan) return false;
+            const std::array bindings{RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters)};
+            FrameRenderInputs frame;
+            frame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            frame.snapshot = &s.GetActiveSnapshot();
+            frame.resources = bindings;
+            ViewRenderInputs inputs;
+            inputs.id = view.id;
+            inputs.resourceGeneration = m_CurrentViewResources->generation;
+            const auto built = m_RtSceneComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), {}, m_RtScenePlan.get());
+            m_RtScenePlan.reset();
+            if (!built.success)
+            {
+                for (const auto& diagnostic : built.diagnostics)
+                    LH_LOG(Renderer, error, "RT scene composition: {}", diagnostic.message);
+                return false;
+            }
+        }
 
         // Native CPU preparation freezes the graph's fog bindings. RT table pairing remains
         // an explicit native compatibility dependency until the scene provider migrates.
@@ -737,7 +780,7 @@ namespace Luth
         // Path-traced reference mode: a megakernel that bypasses the entire raster + ReSTIR chain. When active,
         // its HDR output (ptColor) feeds the post chain in place of the raster sceneColor; every raster/RT-GI
         // pass below produces handles nothing consumes, so the RG dead-pass culls them. AsyncCompute, after the
-        // TLAS build (which the needTlas gate above keeps alive).
+        // TLAS build (requested by the declared scene consumers above).
         const bool usePathTrace = ptEnabled;
         RG::ResourceHandle ptColorHandle{};
         if (usePathTrace)
@@ -813,7 +856,7 @@ namespace Luth
         // slot carries slim ROUGHNESS (the spec reproject's b3: it computes the reflection's motion
         // internally via hit-distance virtual reprojection; hitDist rides reflRadiance's alpha).
         // denoisedReflHandle feeds GeometryPass (pbr.frag composites it via Set 3 b7). AsyncCompute,
-        // after the TLAS build (needTlas gate includes Reflections).
+        // after the TLAS build (Reflections declares scene demand).
         RG::ResourceHandle reflHandle = ptEnabled
             ? RG::ResourceHandle{}
             : m_Reflections.AddPasses(rg, surfaceDepth.handle, slimGB.normal, slimGB.roughness);

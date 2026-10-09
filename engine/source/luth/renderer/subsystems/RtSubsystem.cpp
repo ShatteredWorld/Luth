@@ -501,10 +501,14 @@ namespace Luth
 
     void RtSubsystem::AddTlasBuildPass(RG::RenderGraph& rg)
     {
+        AddTlasBuildPass(rg, m_PreparedScene);
+    }
+
+    void RtSubsystem::AddTlasBuildPass(RG::RenderGraph& rg, std::shared_ptr<const PreparedRtScene> prepared)
+    {
         LH_PROFILE_FUNCTION();
-        if (!m_PreparedScene) throw std::logic_error("RT scene must be prepared before graph construction");
+        if (!prepared) throw std::logic_error("RT scene must be prepared before graph construction");
         struct TlasBuildData {};
-        const auto prepared = m_PreparedScene;
         rg.AddComputePass<TlasBuildData>(
             "TlasBuild", RG::QueueFamily::AsyncCompute,
             [](TlasBuildData&, RG::RenderPassBuilder& builder) { builder.SetHasSideEffect(); },

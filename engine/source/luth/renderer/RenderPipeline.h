@@ -5,6 +5,7 @@
 #include "luth/renderer/CameraParams.h"
 #include "luth/renderer/features/RenderViewState.h"
 #include "luth/renderer/features/RenderPipelineCompiler.h"
+#include "luth/renderer/features/rt/RtSceneFeature.h"
 #include "luth/renderer/QueueRecorders.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/rendergraph/RenderGraphSnapshot.h"
@@ -462,7 +463,9 @@ namespace Luth
         EditorOverlaysSubsystem m_EditorOverlays;
         DebugDrawSubsystem      m_DebugDraw;
         bool                    m_RtNativeInitialized = false;
-        bool                    m_ViewRequiresRtScene = false; // Compatibility preparation decision.
+        std::unique_ptr<CompiledRenderPipeline> m_RtSceneComposition;
+        std::unique_ptr<PreparedPipelineFrame> m_RtScenePlan;
+        RtSceneParameters m_RtSceneParameters;
         RtSubsystem             m_Rt;
         RtRestirSubsystem       m_Restir;
         RtRestirGiSubsystem     m_RestirGi;

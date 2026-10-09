@@ -28,12 +28,36 @@ namespace Luth
         std::vector<PipelineDiagnostic> diagnostics;
     };
 
+    class CompiledRenderPipeline;
+    // One-use activation/preparation result. Bindings supplied to Prepare and Build must
+    // remain frozen and scratch must survive Build. Only the latest preparation is valid;
+    // this token contains no graph handles or native resource ownership.
+    class PreparedPipelineFrame
+    {
+    public:
+        PreparedPipelineFrame() = default;
+        PreparedPipelineFrame(const PreparedPipelineFrame&) = delete;
+        PreparedPipelineFrame& operator=(const PreparedPipelineFrame&) = delete;
+    private:
+        friend class CompiledRenderPipeline;
+        const CompiledRenderPipeline* owner = nullptr;
+        u64 frame = 0, generation = 0, serial = 0;
+        RenderViewId view;
+        std::span<u8> active;
+        bool consumed = false;
+    };
+    struct PipelinePrepareResult : PipelineBuildResult
+    {
+        std::unique_ptr<PreparedPipelineFrame> plan;
+    };
+
     class CompiledRenderPipeline
     {
     public:
+        PipelinePrepareResult Prepare(const FrameRenderInputs&, const ViewRenderInputs&, Memory::LinearAllocator&);
         PipelineBuildResult Build(RG::RenderGraph&, const FrameRenderInputs&,
             const ViewRenderInputs&, Memory::LinearAllocator&,
-            std::span<const RenderOutputBinding> outputs = {});
+            std::span<const RenderOutputBinding> outputs = {}, PreparedPipelineFrame* prepared = nullptr);
         void ReleaseView(RenderViewId);
         std::span<const FeatureInstanceId> FeatureOrder() const { return m_Order; }
         const ResourceSlotLayout& ResourceSlots() const { return m_Layout; }
@@ -61,6 +85,7 @@ namespace Luth
         PipelineInputContract m_Inputs;
         std::unordered_map<const ResourceKeyIdentity*, size_t> m_InputIndices;
         std::vector<ResourceKeyRef> m_AbsentKeys;
+        u64 m_PreparationSerial = 0;
     };
     struct PipelineCompileResult
     {
