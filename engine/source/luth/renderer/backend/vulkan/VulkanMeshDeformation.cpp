@@ -33,10 +33,19 @@ namespace Luth
         });
     }
 
+    MeshDeformationBindings VKMeshDeformation::PrepareBindings(u64 renderFrameIndex) const
+    {
+        if (!m_Source) return {};
+        return {m_Source->GetDeviceAddress(), GetCurrentAddress(renderFrameIndex),
+            GetPreviousAddress(renderFrameIndex), m_VertexCount, m_Source->GetUploadFence()};
+    }
+
     std::shared_ptr<VKMeshDeformation> VKMeshDeformation::Create(const Mesh& mesh)
     {
-        if (!mesh.GetVertexCount() || !std::dynamic_pointer_cast<VKVertexBuffer>(mesh.GetVertexBuffer())) return {};
+        auto source = std::dynamic_pointer_cast<VKVertexBuffer>(mesh.GetVertexBuffer());
+        if (!mesh.GetVertexCount() || !source) return {};
         auto result = std::make_shared<VKMeshDeformation>();
+        result->m_Source = std::move(source);
         result->m_VertexCount = mesh.GetVertexCount();
         result->m_Layout = MeshDeformationLayout::ForVertices(result->m_VertexCount);
         auto& context = VulkanContext::Get();

@@ -2,8 +2,7 @@
 #include "luth/renderer/subsystems/SkinningSubsystem.h"
 #include "luth/renderer/settings/WindSettings.h"
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
-#include "luth/renderer/backend/vulkan/VulkanAccelerationStructure.h"
-#include "luth/renderer/backend/vulkan/VulkanBuffer.h"
+#include "luth/renderer/backend/vulkan/VulkanMeshDeformation.h"
 #include "luth/renderer/backend/vulkan/UploadContext.h"
 #include "luth/renderer/resources/BoneMatrixBuffer.h"
 #include "luth/renderer/resources/Mesh.h"
@@ -34,7 +33,7 @@ namespace Luth
         // (the global world-space dir transformed by inverse(mat3(world)) on the CPU).
         struct DeformPC
         {
-            VkDeviceAddress inputBda;      //  0: source Vertex VB (52 B)
+            VkDeviceAddress inputBda;      //  0: source Vertex VB (72 B)
             VkDeviceAddress deformedBda;   //  8: write the CURRENT region
             u32             vertexCount;   // 16
             f32             time;          // 20
@@ -123,29 +122,25 @@ namespace Luth
         return false;
     }
 
-    static void PrepareSkin(std::vector<SkinPC>& commands, const Mesh& mesh, u32 boneOffset, u32 frameAbs)
+    static void PrepareSkin(std::vector<SkinPC>& commands, const Mesh& mesh, u32 boneOffset, u64 frameAbs)
     {
         LH_PROFILE_FUNCTION();
-        const auto& blas = mesh.GetBlas();
-        if (!blas || !blas->IsDeformable()) return;
-        if (blas->GetDeformedBdaCurr(frameAbs) == 0) return;
-
-        // The compute reads the source SkinnedVertex VB directly (scalar buffer_reference). The deferred
-        // BLAS build no longer waits on its upload, so gate here: skip until the VB has retired.
-        auto vb = std::dynamic_pointer_cast<VKVertexBuffer>(mesh.GetVertexBuffer());
-        if (!vb) return;
-        if (!UploadContext::Get().IsComplete(vb->GetUploadFence())) return;
+        const auto& deformation = mesh.GetDeformation();
+        if (!deformation) return;
+        const auto bindings = deformation->PrepareBindings(frameAbs);
+        if (!bindings.HasStorage()) return;
+        if (!bindings.IsReady(UploadContext::Get().CompletedUploadValue())) return;
 
         SkinPC pc{};
-        pc.inputBda    = vb->GetDeviceAddress();
-        pc.deformedBda = blas->GetDeformedBdaCurr(frameAbs);  // write the CURRENT region
-        pc.vertexCount = blas->GetVertexCount();
+        pc.inputBda    = bindings.source;
+        pc.deformedBda = bindings.current;  // write the CURRENT region
+        pc.vertexCount = bindings.vertexCount;
         pc.boneOffset  = boneOffset;
 
         commands.push_back(pc);
     }
 
-    static std::vector<SkinPC> PrepareSkinned(const RenderSnapshot& snapshot, u32 frameAbs,
+    static std::vector<SkinPC> PrepareSkinned(const RenderSnapshot& snapshot, u64 frameAbs,
         std::vector<std::shared_ptr<Mesh>>& retainedMeshes)
     {
         LH_PROFILE_FUNCTION();
@@ -157,8 +152,6 @@ namespace Luth
             if (!model) continue;
             auto mesh = model->GetMesh(inst.meshIndex);
             if (!mesh) continue;
-            const auto& blas = mesh->GetBlas();
-            if (!blas || !blas->IsDeformable()) continue;
 
             PrepareSkin(commands, *mesh, inst.boneOffset, frameAbs);
             retainedMeshes.push_back(std::move(mesh));
@@ -167,7 +160,7 @@ namespace Luth
     }
 
     static std::vector<DeformPC> PrepareWind(const RenderSnapshot& snapshot,
-        const WindSettings& wind, f32 time, u32 frameAbs, std::vector<std::shared_ptr<Mesh>>& retainedMeshes)
+        const WindSettings& wind, f32 time, u64 frameAbs, std::vector<std::shared_ptr<Mesh>>& retainedMeshes)
     {
         LH_PROFILE_FUNCTION();
         std::vector<DeformPC> commands;
@@ -185,11 +178,11 @@ namespace Luth
             if (!model) continue;
             auto mesh = model->GetMesh(inst.meshIndex);
             if (!mesh) continue;
-            const auto& blas = mesh->GetBlas();
-            if (!blas || !blas->IsDeformable() || blas->GetDeformedBdaCurr(frameAbs) == 0) continue;
-            auto vb = std::dynamic_pointer_cast<VKVertexBuffer>(mesh->GetVertexBuffer());
-            if (!vb) continue;
-            if (!UploadContext::Get().IsComplete(vb->GetUploadFence())) continue;   // source VB not resident yet
+            const auto& deformation = mesh->GetDeformation();
+            if (!deformation) continue;
+            const auto bindings = deformation->PrepareBindings(frameAbs);
+            if (!bindings.HasStorage()) continue;
+            if (!bindings.IsReady(UploadContext::Get().CompletedUploadValue())) continue;
 
             // World->object: a wind direction is a contravariant flow vector, so transform by the plain
             // inverse of the linear part (NOT the inverse-transpose normal matrix). Singular -> no bend.
@@ -208,9 +201,9 @@ namespace Luth
             const f32 strength = inst.windRespond ? (gStrength * inst.windStrengthMul) : 0.0f;
 
             DeformPC pc{};
-            pc.inputBda      = vb->GetDeviceAddress();             // source Vertex VB (52 B)
-            pc.deformedBda   = blas->GetDeformedBdaCurr(frameAbs); // write the CURRENT region
-            pc.vertexCount   = blas->GetVertexCount();
+            pc.inputBda      = bindings.source;             // source Vertex VB (72 B)
+            pc.deformedBda   = bindings.current; // write the CURRENT region
+            pc.vertexCount   = bindings.vertexCount;
             pc.time          = time;
             pc.windX         = objDir.x;
             pc.windY         = objDir.y;
@@ -235,7 +228,7 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         // Resolve assets, upload readiness and push constants on the CPU before recording.
-        const u32 frameAbs = static_cast<u32>(renderFrameIndex);
+        const u64 frameAbs = renderFrameIndex;
         std::vector<std::shared_ptr<Mesh>> retainedMeshes;
         auto skinCommands = m_ComputePipeline ? PrepareSkinned(snapshot, frameAbs, retainedMeshes) : std::vector<SkinPC>{};
         auto windCommands = m_DeformPipeline ? PrepareWind(snapshot, wind, time, frameAbs, retainedMeshes) : std::vector<DeformPC>{};

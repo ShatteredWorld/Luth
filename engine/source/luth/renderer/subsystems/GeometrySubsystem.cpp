@@ -19,7 +19,8 @@
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
 #include "luth/renderer/backend/vulkan/VulkanTexture.h"
 #include "luth/renderer/backend/vulkan/VulkanBuffer.h"
-#include "luth/renderer/backend/vulkan/VulkanAccelerationStructure.h"
+#include "luth/renderer/backend/vulkan/VulkanMeshDeformation.h"
+#include "luth/renderer/backend/vulkan/UploadContext.h"
 #include "luth/core/FrameData.h"
 #include "luth/core/RenderSnapshot.h"
 #include "luth/jobs/JobSystem.h"
@@ -566,6 +567,7 @@ namespace Luth
         m_EntityLookup.push_back(entt::null);
         m_EntityToSSBOIndex.clear();
 
+        const u64 uploadDone = UploadContext::Get().CompletedUploadValue();
         for (const MeshDrawSnapshot& meshSnap : snapshot.meshes)
         {
             if (count >= RenderPipeline::k_MaxGPUObjects) { ++dropped; continue; }
@@ -576,12 +578,13 @@ namespace Luth
             auto mesh = model->GetMesh(meshSnap.meshIndex);
             if (!mesh) continue;
 
-            // Skinned raster fetches its deformed buffer by BDA; skip the draw until the skinned
-            // BLAS (+ deformed buffer) is ready, else the deformable VS derefs a null address and
-            // faults the device. Transient (one frame) for a still-loading model.
-            auto blas = mesh->GetBlas();
-            if ((meshSnap.isSkinned || meshSnap.isDeformable) && (!blas || !blas->IsDeformable() || blas->GetDeformedBdaCurr(frameAbs) == 0))
-                continue;
+            // Raster deformation depends on its mesh-owned output and resident source,
+            // independently of whether the optional RT package has prepared a BLAS.
+            const auto& deformation = mesh->GetDeformation();
+            const auto deformationBindings = deformation ? deformation->PrepareBindings(frameAbs)
+                : MeshDeformationBindings{};
+            if ((meshSnap.isSkinned || meshSnap.isDeformable)
+                && !deformationBindings.IsReady(uploadDone)) continue;
 
             GPUObjectData& obj = objectData[count];
             obj.model = meshSnap.worldMatrix;
@@ -617,15 +620,15 @@ namespace Luth
             // Don't-care for non-skinned draws (their shaders never read bones[]).
             obj.prevBoneOffset = meshSnap.boneOffset + BoneMatrixBuffer::PREV_BLOCK_OFFSET;
 
-            // Deformed-vertex buffer BDAs for the deformable raster path (skinned only). CURR holds
+            // Deformed-vertex buffer BDAs for the deformable raster path (skinned or wind-deformable). CURR holds
             // this frame's skin; PREV is last frame's, for motion vectors. Rigid meshes get 0; their
             // VS reads the bound vertex buffer instead. (Skinned-but-unready meshes were skipped above.)
-            if (blas && blas->IsDeformable())
+            if (deformation)
             {
-                obj.deformedBdaCurr = blas->GetDeformedBdaCurr(frameAbs);
-                // Seed prev=curr on the entity's first frame (prev region still zero-filled) so motion
+                obj.deformedBdaCurr = deformationBindings.current;
+                // Seed prev=curr on the entity's first frame (prev region is not initialized yet) so motion
                 // is zero; matches the prevModel cache-miss fallback above.
-                obj.deformedBdaPrev = firstFrame ? obj.deformedBdaCurr : blas->GetDeformedBdaPrev(frameAbs);
+                obj.deformedBdaPrev = deformationBindings.PreviousForRaster(firstFrame);
             }
             else
             {

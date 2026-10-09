@@ -82,3 +82,49 @@ TEST_CASE("MeshDeformation: dropping RT ownership preserves the mesh resource an
     Mesh other({}, {}, 1, true);
     CHECK_THROWS_AS(other.SetDeformation(resource), std::invalid_argument);
 }
+
+TEST_CASE("MeshDeformation: upload readiness rejects incomplete and missing native bindings")
+{
+    const MeshDeformationBindings bindings{0x1000, 0x2000, 0x3000, 37, 9};
+    CHECK_FALSE(bindings.IsReady(0));
+    CHECK_FALSE(bindings.IsReady(8));
+    CHECK(bindings.IsReady(9));
+    CHECK(bindings.IsReady(std::numeric_limits<u64>::max()));
+    auto updated = bindings;
+    updated.sourceUploadFence = 10; // A new upload invalidates the next CPU snapshot.
+    CHECK_FALSE(updated.IsReady(9));
+    CHECK(bindings.IsReady(9)); // Already-frozen input is immutable.
+    CHECK(updated.IsReady(10));
+    updated.sourceUploadFence = 0;
+    CHECK(updated.IsReady(0));
+    for (u32 missing = 0; missing < 4; ++missing)
+    {
+        auto incomplete = bindings;
+        if (missing == 0) incomplete.source = 0;
+        if (missing == 1) incomplete.current = 0;
+        if (missing == 2) incomplete.previous = 0;
+        if (missing == 3) incomplete.vertexCount = 0;
+        CHECK_FALSE(incomplete.IsReady(std::numeric_limits<u64>::max()));
+    }
+    CHECK_FALSE(MeshDeformationBindings{}.IsReady(std::numeric_limits<u64>::max()));
+}
+
+TEST_CASE("MeshDeformation: raster bootstrap aliases current and cold preparation needs no RT or device")
+{
+    const MeshDeformationBindings bindings{0x1000, 0x2000, 0x3000, 37, 0};
+    CHECK(bindings.PreviousForRaster(true) == bindings.current);
+    CHECK(bindings.PreviousForRaster(false) == bindings.previous);
+    Mesh mesh({}, {}, 0, true);
+    mesh.SetDeformation(std::make_shared<VKMeshDeformation>());
+    CHECK_FALSE(mesh.GetBlas());
+    for (const u64 frame : {u64(0), u64(1), u64(0x100000001)})
+    {
+        const auto cold = mesh.GetDeformation()->PrepareBindings(frame);
+        CHECK(cold.source == 0);
+        CHECK(cold.current == 0);
+        CHECK(cold.previous == 0);
+        CHECK(cold.vertexCount == 0);
+        CHECK_FALSE(cold.IsReady(std::numeric_limits<u64>::max()));
+        CHECK(cold.PreviousForRaster(true) == 0);
+    }
+}

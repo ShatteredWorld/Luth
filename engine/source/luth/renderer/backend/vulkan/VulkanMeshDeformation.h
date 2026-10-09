@@ -6,6 +6,24 @@
 namespace Luth
 {
     class Mesh;
+    class VKVertexBuffer;
+    // CPU-frozen source/output bindings. Readiness is independent of AS build state.
+    struct MeshDeformationBindings
+    {
+        VkDeviceAddress source = 0;
+        VkDeviceAddress current = 0;
+        VkDeviceAddress previous = 0;
+        u32 vertexCount = 0;
+        u64 sourceUploadFence = 0;
+        bool HasStorage() const
+        {
+            return source && current && previous && vertexCount;
+        }
+        bool IsReady(u64 completedUploadValue) const
+        { return HasStorage() && sourceUploadFence <= completedUploadValue; }
+        VkDeviceAddress PreviousForRaster(bool firstFrame) const
+        { return firstFrame ? current : previous; }
+    };
     // Interleaved Vertex regions. Absolute render frame parity matches the existing shaders/refits.
     struct MeshDeformationLayout
     {
@@ -34,11 +52,14 @@ namespace Luth
         VkBuffer GetBuffer() const { return m_Buffer; }
         u32 GetVertexCount() const { return m_VertexCount; }
         const MeshDeformationLayout& GetLayout() const { return m_Layout; }
+        MeshDeformationBindings PrepareBindings(u64 renderFrameIndex) const;
         VkDeviceAddress GetCurrentAddress(u64 frame) const
         { return m_Address ? m_Address + m_Layout.CurrentOffset(frame) : 0; }
         VkDeviceAddress GetPreviousAddress(u64 frame) const
         { return m_Address ? m_Address + m_Layout.PreviousOffset(frame) : 0; }
     private:
+        // Keep source storage and its latest upload fence with the deformation owner.
+        std::shared_ptr<VKVertexBuffer> m_Source;
         VkBuffer m_Buffer = VK_NULL_HANDLE;
         VmaAllocation m_Allocation = nullptr;
         VkDeviceAddress m_Address = 0;
