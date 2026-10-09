@@ -79,7 +79,10 @@ namespace Luth
             // with ALLOW_UPDATE so each frame's MODE_UPDATE refit is cheap. Built unconditionally on
             // Vulkan backends; factory returns null on non-Vulkan backends (TLAS skips it).
             if (data.IsSkinned || data.IsDeformable)
+            {
+                mesh->EnsureDeformation();
                 mesh->SetBlas(VKAccelerationStructure::CreateDeformableBLAS(*mesh));
+            }
             else
                 mesh->SetBlas(VKAccelerationStructure::CreateStaticBLAS(*mesh));
 

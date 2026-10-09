@@ -106,6 +106,7 @@ add_library(Luth STATIC
     source/luth/renderer/backend/vulkan/TimelineSemaphore.cpp
     source/luth/renderer/backend/vulkan/TlasBuilder.cpp
     source/luth/renderer/backend/vulkan/UploadContext.cpp
+    source/luth/renderer/backend/vulkan/VulkanMeshDeformation.cpp
     source/luth/renderer/backend/vulkan/VulkanAccelerationStructure.cpp
     source/luth/renderer/backend/vulkan/VulkanAllocator.cpp
     source/luth/renderer/backend/vulkan/VulkanBackend.cpp

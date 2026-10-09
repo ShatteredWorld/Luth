@@ -33,43 +33,17 @@ namespace Luth
         SpinLock                        g_PendingStaticLock;
     }
 
-    // The deformed vertex buffer is the interleaved Vertex layout, written field-by-field as 18
-    // hardcoded floats in skinning.slang and read at the same offsets by material.slang's geometry
-    // table; lock the layout so a Vertex field reorder/resize can't silently desync the shaders.
-    static_assert(sizeof(Vertex)              == 72, "deformed-vertex ABI: Vertex must stay 18 tight floats");
-    static_assert(offsetof(Vertex, Position)  == 0,  "deformed-vertex ABI: pos @ float 0");
-    static_assert(offsetof(Vertex, Normal)    == 12, "deformed-vertex ABI: normal @ float 3");
-    static_assert(offsetof(Vertex, TexCoord0) == 24, "deformed-vertex ABI: uv0 @ float 6");
-    static_assert(offsetof(Vertex, TexCoord1) == 32, "deformed-vertex ABI: uv1 @ float 8");
-    static_assert(offsetof(Vertex, Tangent)   == 40, "deformed-vertex ABI: tangent @ float 10");
-    static_assert(offsetof(Vertex, Color)     == 56, "deformed-vertex ABI: color @ float 14");
-
-    // skinning.slang reads the source SkinnedVertex VB directly via scalar buffer_reference; lock the
-    // tight 104 B layout so a field reorder/resize can't silently desync the compute's input fetch.
-    static_assert(sizeof(SkinnedVertex)                == 104, "skin-input ABI: SkinnedVertex must stay tight 104 B");
-    static_assert(offsetof(SkinnedVertex, Position)    == 0,   "skin-input ABI: pos @ 0");
-    static_assert(offsetof(SkinnedVertex, Normal)      == 12,  "skin-input ABI: normal @ 12");
-    static_assert(offsetof(SkinnedVertex, TexCoord0)   == 24,  "skin-input ABI: uv0 @ 24");
-    static_assert(offsetof(SkinnedVertex, TexCoord1)   == 32,  "skin-input ABI: uv1 @ 32");
-    static_assert(offsetof(SkinnedVertex, Tangent)     == 40,  "skin-input ABI: tangent @ 40");
-    static_assert(offsetof(SkinnedVertex, Color)       == 56,  "skin-input ABI: color @ 56");
-    static_assert(offsetof(SkinnedVertex, BoneIDs)     == 72,  "skin-input ABI: boneIDs @ 72");
-    static_assert(offsetof(SkinnedVertex, BoneWeights) == 88,  "skin-input ABI: weights @ 88");
-
     VKAccelerationStructure::~VKAccelerationStructure()
     {
-        if (m_Handle == VK_NULL_HANDLE && m_DeformedBuffer == VK_NULL_HANDLE) return;
+        if (m_Handle == VK_NULL_HANDLE && m_StorageBuffer == VK_NULL_HANDLE) return;
         auto handle      = m_Handle;
         auto storage     = m_StorageBuffer;
         auto storageAlloc= m_StorageAlloc;
-        auto deformed    = m_DeformedBuffer;
-        auto deformedAlloc = m_DeformedAlloc;
-        VulkanContext::Get().PushDeletion([handle, storage, storageAlloc, deformed, deformedAlloc]() {
+        VulkanContext::Get().PushDeletion([handle, storage, storageAlloc]() {
             auto& ctx = VulkanContext::Get();
             if (handle != VK_NULL_HANDLE)
                 ctx.GetRtFn().vkDestroyAccelerationStructureKHR(ctx.GetDevice(), handle, nullptr);
             if (storage != VK_NULL_HANDLE) VulkanAllocator::FreeBuffer(storage,  storageAlloc);
-            if (deformed!= VK_NULL_HANDLE) VulkanAllocator::FreeBuffer(deformed, deformedAlloc);
         });
     }
 
@@ -312,42 +286,22 @@ namespace Luth
         const u32 indexCount = ib->GetCount();
         if (vertCount == 0 || indexCount == 0) return nullptr;
 
-        auto result = std::make_shared<VKAccelerationStructure>();
+        const auto& deformation = mesh.GetDeformation();
+        if (!deformation || deformation->GetVertexCount() != vertCount || !deformation->GetCurrentAddress(0))
+        {
+            LH_LOG(Renderer, error, "CreateDeformableBLAS: mesh deformation must be prepared first");
+            return nullptr;
+        }
+        auto result = std::make_shared<VKAccelerationStructure>(deformation);
         result->m_IsDeformable = true;
         result->m_VertexCount  = vertCount;
         result->m_PrimitiveCount = indexCount / 3;
 
-        // Deformed vertices: interleaved Vertex layout (52 B: pos/normal/uv0/uv1/tangent) so the RT
-        // geometry table reads post-skin normals/tangents byte-identical to a static VB; the AS build
-        // reads positions at offset 0. Double-buffered (curr/prev regions) so raster motion vectors can
-        // read the previous frame's positions; region alternates by frame parity, region 0 == CURR on
-        // frame 0. The first refit does the MODE_BUILD over CURR after the deform has written it (gated on
-        // the source-VB upload), so no pre-build zero-fill is needed. see arch/multi-queue.md
-        const VkDeviceSize deformedRegionBytes = static_cast<VkDeviceSize>(vertCount) * sizeof(Vertex);
-        const VkDeviceSize deformedSize        = 2 * deformedRegionBytes;
-        result->m_DeformedRegionBytes = deformedRegionBytes;
-        {
-            VkBufferCreateInfo ci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-            ci.size        = deformedSize;
-            ci.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                           | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-                           | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
-            ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            ctx.ApplyConcurrentSharing(ci);
-            result->m_DeformedAlloc = VulkanAllocator::AllocateBuffer(
-                ci, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, result->m_DeformedBuffer);
-            VkBufferDeviceAddressInfo addrInfo{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
-            addrInfo.buffer = result->m_DeformedBuffer;
-            result->m_DeformedBda = vkGetBufferDeviceAddress(device, &addrInfo);
-        }
-
-        // Geometry desc reads positions (offset 0) from the deformed vertex buffer (NOT the source
-        // SkinnedVertex VB). The initial build sees zero positions; the first per-frame Refit
-        // overwrites with real ones.
+        // Build recipe reads the same mesh-owned Vertex region used by raster deformation.
         VkAccelerationStructureGeometryTrianglesDataKHR tri{
             VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR };
         tri.vertexFormat                = VK_FORMAT_R32G32B32_SFLOAT;
-        tri.vertexData.deviceAddress    = result->m_DeformedBda;
+        tri.vertexData.deviceAddress    = result->GetDeformedBdaCurr(0);
         tri.vertexStride                = sizeof(Vertex);
         tri.maxVertex                   = vertCount - 1;
         tri.indexType                   = VK_INDEX_TYPE_UINT32;
@@ -431,7 +385,7 @@ namespace Luth
         VkAccelerationStructureGeometryTrianglesDataKHR tri{
             VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR };
         tri.vertexFormat                = VK_FORMAT_R32G32B32_SFLOAT;
-        tri.vertexData.deviceAddress    = m_DeformedBda;
+        tri.vertexData.deviceAddress    = GetDeformedBdaCurr(0);
         tri.vertexStride                = sizeof(Vertex);
         tri.maxVertex                   = m_VertexCount - 1;
         tri.indexType                   = VK_INDEX_TYPE_UINT32;

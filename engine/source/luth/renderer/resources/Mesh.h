@@ -8,10 +8,12 @@
 namespace Luth
 {
     class VKAccelerationStructure;
+    class VKMeshDeformation;
 
     // Vertex and index buffer pair, owned by a Model. Each importer mesh primitive becomes one
     // Mesh. Sharing the same Mesh across MeshRenderer components avoids duplicating GPU buffers
-    // for identical geometry. The optional BLAS (built at import on RT-capable backends) is
+    // for identical geometry. Persistent deformation output has independent mesh ownership.
+    // The optional BLAS (built at import on RT-capable backends) is
     // referenced by per-frame TLAS instance entries.
     class Mesh
     {
@@ -28,6 +30,9 @@ namespace Luth
         const std::shared_ptr<IndexBuffer>&  GetIndexBuffer()  const { return m_IndexBuffer; }
         const std::shared_ptr<VKAccelerationStructure>& GetBlas() const { return m_Blas; }
         void SetBlas(const std::shared_ptr<VKAccelerationStructure>& blas) { m_Blas = blas; }
+        const std::shared_ptr<VKMeshDeformation>& GetDeformation() const { return m_Deformation; }
+        void SetDeformation(const std::shared_ptr<VKMeshDeformation>& resource);
+        const std::shared_ptr<VKMeshDeformation>& EnsureDeformation();
         uint32_t GetVertexCount() const { return m_VertexCount; }
         bool     IsSkinned()      const { return m_IsSkinned; }
 
@@ -40,6 +45,7 @@ namespace Luth
     private:
         std::shared_ptr<VertexBuffer> m_VertexBuffer;
         std::shared_ptr<IndexBuffer>  m_IndexBuffer;
+        std::shared_ptr<VKMeshDeformation> m_Deformation;
         std::shared_ptr<VKAccelerationStructure> m_Blas;
         uint32_t m_VertexCount = 0;
         bool     m_IsSkinned   = false;

@@ -2,8 +2,10 @@
 
 #include "luth/core/types/LuthTypes.h"
 #include "VulkanAllocator.h"
+#include "VulkanMeshDeformation.h"
 
 #include <memory>
+#include <utility>
 #include <vulkan/vulkan.h>
 
 namespace Luth
@@ -12,16 +14,15 @@ namespace Luth
 
     // RAII wrapper for a single VkAccelerationStructureKHR + its persistent backing VkBuffer.
     // Used for both BLAS (per-mesh, owned by Mesh) and TLAS (per-frame, owned by RtSubsystem).
-    // For a DEFORMABLE BLAS (skinned or static wind-deformable) it additionally owns the persistent
-    // "deformed vertex" buffer (per-frame compute output in the interleaved Vertex layout; AS-build
-    // input on refit AND the RT geometry-table source, so ray hits read post-deform normals/tangents,
-    // not bind pose). The deform compute (skinning.slang / deform.slang) reads the source VB directly.
+    // Deformable BLAS borrows the mesh-owned compute output; it never allocates or frees it.
     // Dtor pushes every owned VkBuffer + AS handle into VulkanContext::PushDeletion so they retire N+2 frames
     // out, safe against in-flight cmd buffers referencing the AS in a build / traceRays call.
     class VKAccelerationStructure
     {
     public:
         VKAccelerationStructure() = default;
+        explicit VKAccelerationStructure(std::shared_ptr<VKMeshDeformation> deformation)
+            : m_Deformation(std::move(deformation)) {}
         ~VKAccelerationStructure();
 
         VKAccelerationStructure(const VKAccelerationStructure&) = delete;
@@ -31,14 +32,12 @@ namespace Luth
         VkDeviceAddress            GetDeviceAddress() const { return m_DeviceAddress; }
         bool                       IsDeformable()     const { return m_IsDeformable; }
 
-        // Deformable-only: null/0 for a static (non-deformable) BLAS. The deformed buffer is double-buffered
-        // (curr/prev regions of m_DeformedRegionBytes each) so raster motion vectors can read the previous
-        // frame's positions; the region alternates by frame parity, with region 0 == CURR on frame 0 to match
-        // the initial build at offset 0. The deform writes + AS-build/geom-table read CURR.
+        // Compatibility bridge until raster/skinning consumers move to Mesh::GetDeformation.
+        const std::shared_ptr<VKMeshDeformation>& GetDeformation() const { return m_Deformation; }
         VkDeviceAddress GetDeformedBdaCurr(u32 frameAbs) const
-            { return m_DeformedBda + static_cast<VkDeviceAddress>(frameAbs & 1u) * m_DeformedRegionBytes; }
+            { return m_Deformation ? m_Deformation->GetCurrentAddress(frameAbs) : 0; }
         VkDeviceAddress GetDeformedBdaPrev(u32 frameAbs) const
-            { return m_DeformedBda + static_cast<VkDeviceAddress>(~frameAbs & 1u) * m_DeformedRegionBytes; }
+            { return m_Deformation ? m_Deformation->GetPreviousAddress(frameAbs) : 0; }
         u32             GetVertexCount()     const { return m_VertexCount; }
         u64             GetUpdateScratchSize() const { return m_UpdateScratchSize; }
 
@@ -57,10 +56,8 @@ namespace Luth
         // Until the build is recorded the TLAS gather + the raster draw list skip the mesh (progressive load).
         static std::shared_ptr<VKAccelerationStructure> CreateStaticBLAS(const Mesh& mesh);
 
-        // Per-mesh DEFORMABLE BLAS factory (skinned OR static wind-deformable). Creates the AS object + its
-        // persistent double-buffered deformed-positions buffer (never blocks, no synchronous build). The first
-        // per-frame RefitSkinnedBLASes does the MODE_BUILD (ALLOW_UPDATE | PREFER_FAST_TRACE) over the deform's
-        // CURR region once the source VB upload retires, then MODE_UPDATEs each frame.
+        // Borrows an already prepared mesh deformation resource. Initial build/refits
+        // preserve ALLOW_UPDATE and current-region parity; no deformation allocation here.
         static std::shared_ptr<VKAccelerationStructure> CreateDeformableBLAS(const Mesh& mesh);
 
         // In-place refit (MODE_UPDATE_KHR). Requires the BLAS was originally built with
@@ -91,10 +88,7 @@ namespace Luth
         VkDeviceAddress            m_DeviceAddress   = 0;
 
         // Deformable-only.
-        VkBuffer        m_DeformedBuffer   = VK_NULL_HANDLE;
-        VmaAllocation   m_DeformedAlloc    = nullptr;
-        VkDeviceAddress m_DeformedBda      = 0;
-        VkDeviceSize    m_DeformedRegionBytes = 0;  // per-region size; buffer is 2x this (curr + prev)
+        std::shared_ptr<VKMeshDeformation> m_Deformation;
         u32             m_VertexCount      = 0;
         u32             m_PrimitiveCount   = 0;
         u64             m_UpdateScratchSize = 0;
