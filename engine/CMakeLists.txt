@@ -49,6 +49,7 @@ add_library(Luth STATIC
     source/luth/renderer/features/rt/RtFogFeature.cpp
     source/luth/renderer/features/rt/RtSunShadowViewState.cpp
     source/luth/renderer/features/rt/RestirDiViewState.cpp
+    source/luth/renderer/features/rt/RestirDiFeature.cpp
     source/luth/renderer/features/DeformationFeature.cpp
     source/luth/renderer/features/VisibilityFeature.cpp
     source/luth/renderer/features/DepthPrepassFeature.cpp

@@ -4,6 +4,7 @@
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 #include "luth/renderer/features/rt/RestirDiViewState.h"
+#include "luth/renderer/features/rt/RestirDiBindings.h"
 
 #include <memory>
 #include <string>
@@ -14,6 +15,7 @@ namespace Luth
     class FrameTargets;
     class RenderPipeline;
     struct ViewResources;
+    struct PreparedRtScene;
 
     // ReSTIR DI (Bitterli 2020): spatiotemporal reservoir resampling for the point lights.
     // Owns 4 compute pipelines (initial RIS+visibility, temporal reuse, spatial reuse + final
@@ -40,8 +42,10 @@ namespace Luth
         // the SVGF denoisers. No-op handles when disabled / no TLAS. slimMotion feeds temporal
         // reprojection; slimRoughness feeds the combined diffuse+spec RIS target + the specular shade.
         struct Outputs { RG::ResourceHandle di; RG::ResourceHandle spec; };
-        Outputs AddPasses(RG::RenderGraph& rg, RG::ResourceHandle sceneDepth, RG::ResourceHandle slimNormal,
-                          RG::ResourceHandle slimMotion, RG::ResourceHandle slimRoughness);
+        RestirDiBindings PrepareBindings(const ViewResources&, u64 frameIndex, RenderViewId, u64 generation,
+            const PreparedRtScene*, const RestirSettings&, const Mat4& inverseViewProjection, const Memory::GPUSubRegion& lights) const;
+        static Outputs AddPasses(RG::RenderGraph& rg, RG::ResourceHandle sceneDepth, RG::ResourceHandle slimNormal,
+                          RG::ResourceHandle slimMotion, RG::ResourceHandle slimRoughness, const RestirDiBindings&, RG::BufferHandle lights = {});
 
         // Half-res DI bilateral upscale (shared bilateral_upscale.slang). Reads the half-res denoised DI
         // (svgfDiHalf / svgfDiSpecHalf) + full-res depth/normal, writes the full svgfDenoised /

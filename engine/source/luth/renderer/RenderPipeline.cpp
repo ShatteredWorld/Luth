@@ -24,6 +24,7 @@
 #include "luth/renderer/features/FogVizFeature.h"
 #include "luth/renderer/features/rt/GiReservoirVizFeature.h"
 #include "luth/renderer/features/rt/RtSunShadowFeature.h"
+#include "luth/renderer/features/rt/RestirDiFeature.h"
 #include "luth/renderer/features/rt/RtFogFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
@@ -152,7 +153,8 @@ namespace Luth
             sceneDefinition.AddFeature<RtSceneFeature>(m_Rt);
             sceneDefinition.AddFeature<RtSunShadowDemandFeature>();
             sceneDefinition.AddFeature<RtFogDemandFeature>();
-            for (size_t i = 2; i < static_cast<size_t>(RtSceneConsumer::Count); ++i)
+            sceneDefinition.AddFeature<RestirDiDemandFeature>();
+            for (size_t i = 3; i < static_cast<size_t>(RtSceneConsumer::Count); ++i)
                 sceneDefinition.AddFeature<RtSceneDemandFeature>(static_cast<RtSceneConsumer>(i));
             PipelineInputContract sceneInputs;
             sceneInputs.resources = {{RtSceneResources::Parameters}};
@@ -170,6 +172,16 @@ namespace Luth
             auto shadowCompiled = RenderPipelineCompiler{}.Compile(std::move(shadowDefinition), sceneCapabilities, shadowInputs);
             if (!shadowCompiled.ReplaceIfValid(m_RtSunShadowComposition))
                 throw std::runtime_error("RT sun-shadow definition failed semantic validation");
+            RenderPipelineDefinition diDefinition;
+            diDefinition.AddFeature<RestirDiFeature>();
+            PipelineInputContract diInputs;
+            diInputs.resources = {{RtSceneResources::Parameters}, {RestirDiResources::Bindings},
+                {RenderResources::SurfaceDepth}, {RenderResources::Normal}, {RenderResources::MotionVectors},
+                {RenderResources::Roughness}, {RenderResources::LightData}, {RtSceneResources::Scene, ResourceOutputPresence::Optional}};
+            diInputs.capabilities = {&RtSceneResources::RayScene};
+            auto diCompiled = RenderPipelineCompiler{}.Compile(std::move(diDefinition), sceneCapabilities, diInputs);
+            if (!diCompiled.ReplaceIfValid(m_RestirDiComposition))
+                throw std::runtime_error("ReSTIR DI definition failed semantic validation");
         }
         m_Skinning.Init();
         RenderPipelineDefinition deformationDefinition;
@@ -457,6 +469,7 @@ namespace Luth
             m_RtScenePlan.reset();
             m_RtSceneComposition.reset();
             m_RtSunShadowComposition.reset();
+            m_RestirDiComposition.reset();
             m_Rt.Shutdown();
             m_RtNativeInitialized = false;
         }
@@ -860,9 +873,38 @@ namespace Luth
         // slim normal, traces the same TLAS the sun-shadow pass uses. Returns an invalid handle when
         // disabled or before the TLAS exists; GeometryPass then skips the Read and pbr.frag's point
         // loop runs instead (the restirParams.x flag gates the consumption).
-        RtRestirSubsystem::Outputs restirOut = ptEnabled
-            ? RtRestirSubsystem::Outputs{}
-            : m_Restir.AddPasses(rg, surfaceDepth.handle, slimGB.normal, slimGB.motion, slimGB.roughness);
+        RtRestirSubsystem::Outputs restirOut{};
+        if (m_RestirDiComposition) {
+            const auto frameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            const auto native = m_Restir.PrepareBindings(*m_CurrentViewResources, frameIndex, view.id,
+                m_CurrentViewResources->generation, rayScene.native, s.GetRestirSettings(),
+                Math::Inverse(m_Global.GetCachedViewProj()), lightSSBORegion);
+            const RestirDiBindingRef binding{&native};
+            const std::array resources{RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters),
+                RenderInputBinding::Present(RestirDiResources::Bindings, binding),
+                RenderInputBinding::Present(RenderResources::LightData, uploadedLights),
+                RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
+                RenderInputBinding::Present(RenderResources::Normal, normalOutput),
+                RenderInputBinding::Present(RenderResources::MotionVectors, motionVectors),
+                RenderInputBinding::Present(RenderResources::Roughness, roughnessOutput),
+                rayScene.native ? RenderInputBinding::Present(RtSceneResources::Scene, rayScene) : RenderInputBinding::Absent(RtSceneResources::Scene)};
+            FrameRenderInputs frame;
+            frame.renderFrameIndex = frameIndex; frame.resources = resources;
+            if (rayScene.native) frame.capabilities = RtSceneResources::Requests;
+            ViewRenderInputs inputs;
+            inputs.id = view.id; inputs.resourceGeneration = m_CurrentViewResources->generation;
+            inputs.width = m_CurrentViewResources->width; inputs.height = m_CurrentViewResources->height;
+            GraphTextureRef diffuse, specular;
+            const std::array exports{RenderOutputBinding::Capture(RestirDiResources::Diffuse, diffuse),
+                RenderOutputBinding::Capture(RestirDiResources::Specular, specular)};
+            const auto built = m_RestirDiComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports);
+            if (!built.success) {
+                for (const auto& diagnostic : built.diagnostics)
+                    LH_LOG(Renderer, error, "ReSTIR DI composition: {}", diagnostic.message);
+                return false;
+            }
+            restirOut = {diffuse.handle, specular.handle};
+        }
         RG::ResourceHandle restirDIHandle = restirOut.di;
 
         // Denoise the demodulated DI (SVGF; swappable to NRD/RELAX). Transparent filter: consumes the
