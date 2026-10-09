@@ -24,6 +24,7 @@
 #include "luth/renderer/features/FogVizFeature.h"
 #include "luth/renderer/features/rt/GiReservoirVizFeature.h"
 #include "luth/renderer/features/rt/RtSunShadowFeature.h"
+#include "luth/renderer/features/rt/RtFogFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -150,7 +151,8 @@ namespace Luth
             RenderPipelineDefinition sceneDefinition;
             sceneDefinition.AddFeature<RtSceneFeature>(m_Rt);
             sceneDefinition.AddFeature<RtSunShadowDemandFeature>();
-            for (size_t i = 1; i < static_cast<size_t>(RtSceneConsumer::Count); ++i)
+            sceneDefinition.AddFeature<RtFogDemandFeature>();
+            for (size_t i = 2; i < static_cast<size_t>(RtSceneConsumer::Count); ++i)
                 sceneDefinition.AddFeature<RtSceneDemandFeature>(static_cast<RtSceneConsumer>(i));
             PipelineInputContract sceneInputs;
             sceneInputs.resources = {{RtSceneResources::Parameters}};
@@ -220,6 +222,18 @@ namespace Luth
         auto fogCompiled = RenderPipelineCompiler{}.Compile(std::move(fogDefinition), {}, fogInputs);
         if (!fogCompiled.ReplaceIfValid(m_FogComputeComposition))
             throw std::runtime_error("Fog compute feature definition failed semantic validation");
+        if (m_RtNativeInitialized) {
+            RenderPipelineDefinition rtFogDefinition;
+            rtFogDefinition.AddFeature<RtFogFeature>(m_Volumetric, &m_System.GetFrameDebugger());
+            auto rtFogInputs = fogInputs;
+            rtFogInputs.resources.push_back({RtSceneResources::Parameters});
+            rtFogInputs.resources.push_back({RtSceneResources::Scene, ResourceOutputPresence::Optional});
+            rtFogInputs.capabilities = {&RtSceneResources::RayScene};
+            auto compiled = RenderPipelineCompiler{}.Compile(std::move(rtFogDefinition),
+                RendererCapabilities{{&RtSceneResources::AccelerationStructures, &RtSceneResources::RayQueries}}, rtFogInputs);
+            if (!compiled.ReplaceIfValid(m_RtFogComposition))
+                throw std::runtime_error("RT fog definition failed semantic validation");
+        }
         RenderPipelineDefinition transparencyDefinition;
         transparencyDefinition.AddFeature<TransparencyFeature>(m_Transparency, &m_System.GetFrameDebugger());
         PipelineInputContract transparencyInputs;
@@ -414,6 +428,7 @@ namespace Luth
         m_CsmComposition.reset();
         m_ClusterComposition.reset();
         m_FogComputeComposition.reset();
+        m_RtFogComposition.reset();
         m_FogCompositeComposition.reset();
         m_RefractionComposition.reset();
         m_TransparencyComposition.reset();
@@ -748,16 +763,17 @@ namespace Luth
             }
         }
 
-        // Native CPU preparation freezes the graph's fog bindings. RT table pairing remains
-        // an explicit native compatibility dependency until the scene provider migrates.
-        const u32 fogFrameAbs = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
+        // Both native variants freeze paired bindings before recording any fog commands.
+        const u64 fogFrameAbs = Renderer::GetFrameData()->GetRenderFrameIndex();
+        const bool rtFog = m_RtFogComposition && RtFogRequested(m_RtSceneParameters);
         Memory::GPUSubRegion fogVolumeRegion{};
         if (volumetricEnabled && !ptEnabled)
             if (auto* lighting = SystemRegistry::GetSystem<LightingSystem>())
                 fogVolumeRegion = m_Volumetric.UploadFogVolumeSSBO(lighting->GetFogVolumes());
         const auto fogNative = m_Volumetric.PrepareComputeBindings(*m_CurrentViewResources->fog, fogFrameAbs,
+            view.id, m_CurrentViewResources->generation,
             view.camera, m_CurrentViewResources->globalDescriptorSet[fogFrameAbs % MAX_FRAMES_IN_FLIGHT],
-            volumetricEnabled && !ptEnabled, m_Volumetric.IsRtShadowsEnabled(), m_RtNativeInitialized ? &m_Rt : nullptr,
+            volumetricEnabled && !ptEnabled, rtFog, rtFog ? rayScene.native : nullptr,
             fogVolumeRegion, lightSSBORegion, clusterGridRegion, lightIndexRegion);
         GraphBufferRef fogVolumes;
         if (fogNative.enabled && fogVolumeRegion.buffer)
@@ -774,15 +790,21 @@ namespace Luth
             lightData.handle.IsValid() ? RenderInputBinding::Present(RenderResources::LightData, lightData) : RenderInputBinding::Absent(RenderResources::LightData),
             clusterGrid.handle.IsValid() ? RenderInputBinding::Present(RenderResources::ClusterGrid, clusterGrid) : RenderInputBinding::Absent(RenderResources::ClusterGrid),
             lightIndices.handle.IsValid() ? RenderInputBinding::Present(RenderResources::LightIndices, lightIndices) : RenderInputBinding::Absent(RenderResources::LightIndices),
-            haveFogShadows ? RenderInputBinding::Present(RenderResources::ShadowCascades, fogShadows) : RenderInputBinding::Absent(RenderResources::ShadowCascades)};
-        FrameRenderInputs fogFrame; fogFrame.renderFrameIndex = fogFrameAbs; fogFrame.resources = fogResources;
+            haveFogShadows ? RenderInputBinding::Present(RenderResources::ShadowCascades, fogShadows) : RenderInputBinding::Absent(RenderResources::ShadowCascades),
+            RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters),
+            rayScene.native ? RenderInputBinding::Present(RtSceneResources::Scene, rayScene) : RenderInputBinding::Absent(RtSceneResources::Scene)};
+        FrameRenderInputs fogFrame; fogFrame.renderFrameIndex = fogFrameAbs;
+        fogFrame.resources = std::span(fogResources).first(rtFog ? fogResources.size() : fogResources.size() - 2);
+        if (rtFog && rayScene.native) fogFrame.capabilities = RtSceneResources::Requests;
         ViewRenderInputs fogView; fogView.id = view.id; fogView.camera = &view.camera;
+        fogView.resourceGeneration = m_CurrentViewResources->generation;
         fogView.width = m_CurrentViewResources->width; fogView.height = m_CurrentViewResources->height;
         GraphTextureRef fogDensity, fogIntegrated, fogResolved;
         const std::array fogOutputs{RenderOutputBinding::Capture(RenderResources::FogDensity, fogDensity),
             RenderOutputBinding::Capture(FogResources::IntegratedScatter, fogIntegrated),
             RenderOutputBinding::Capture(RenderResources::ResolvedFog, fogResolved)};
-        const auto fogBuild = m_FogComputeComposition->Build(rg, fogFrame, fogView, s.GetFrameAllocator(), fogOutputs);
+        const auto fogBuild = (rtFog ? m_RtFogComposition : m_FogComputeComposition)->Build(
+            rg, fogFrame, fogView, s.GetFrameAllocator(), fogOutputs);
         if (!fogBuild.success)
         {
             for (const auto& diagnostic : fogBuild.diagnostics)

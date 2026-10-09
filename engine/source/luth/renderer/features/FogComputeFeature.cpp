@@ -35,6 +35,13 @@ namespace Luth
     void FogComputeFeature::Build(RG::RenderGraph& graph, RenderFeatureContext& ctx)
     {
         const auto& packet = *ctx.resources.Get(FogResources::Bindings).native;
+        if (packet.rtShadows || packet.tlas || packet.inject.geomTableBDA)
+            throw std::invalid_argument("FogCompute: RT bindings require the RT fog composition");
+        BuildPrepared(graph, ctx, packet);
+    }
+    void FogComputeFeature::BuildPrepared(RG::RenderGraph& graph, RenderFeatureContext& ctx,
+        const FogComputeBindings& packet)
+    {
         const auto* volumes = ctx.resources.TryGet(FogResources::Volumes);
         const auto* lights = ctx.resources.TryGet(RenderResources::LightData);
         const auto* grid = ctx.resources.TryGet(RenderResources::ClusterGrid);
@@ -55,8 +62,7 @@ namespace Luth
             std::any_of(packet.pipelines.begin(), packet.pipelines.end(), [](auto value) { return !value; }) ||
             std::any_of(packet.layouts.begin(), packet.layouts.end(), [](auto value) { return !value; }) ||
             std::any_of(packet.sets.begin(), packet.sets.end(), [](auto value) { return !value; }) ||
-            !packet.inject.volDimX || !packet.inject.volDimY || !packet.inject.volDimZ ||
-            (packet.rtShadows && !packet.rayScene))
+            !packet.inject.volDimX || !packet.inject.volDimY || !packet.inject.volDimZ)
             throw std::invalid_argument("FogCompute: incomplete prepared inputs or buffer slices");
         std::array<VkImage, 4> images{};
         u32 imageIndex = 0;

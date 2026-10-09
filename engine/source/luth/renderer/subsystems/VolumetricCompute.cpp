@@ -9,13 +9,14 @@
 
 namespace Luth
 {
-    FogComputeBindings VolumetricSubsystem::PrepareComputeBindings(FogViewState& state, u32 frameAbs,
-        const CameraParams& camera, VkDescriptorSet global, bool enabled, bool rtShadows,
-        const RtSubsystem* rayScene, const Memory::GPUSubRegion& volumes,
+    FogComputeBindings VolumetricSubsystem::PrepareComputeBindings(FogViewState& state, u64 frameAbs,
+        RenderViewId view, u64 generation, const CameraParams& camera, VkDescriptorSet global, bool enabled, bool rtShadows,
+        const PreparedRtScene* rayScene, const Memory::GPUSubRegion& volumes,
         const Memory::GPUSubRegion& lights, const Memory::GPUSubRegion& grid,
         const Memory::GPUSubRegion& indices)
     {
         FogComputeBindings out;
+        out.frameIndex = frameAbs; out.view = view; out.generation = generation;
         out.enabled = enabled;
         if (!enabled) return out;
         const u32 slot = frameAbs % MAX_FRAMES_IN_FLIGHT;
@@ -43,15 +44,21 @@ namespace Luth
         out.inject.volDimZ = out.integrate.volDimZ = out.resolve.volDimZ = state.volDimZ;
         out.integrate.nearFarPad = Vec4(camera.nearZ, camera.farZ, 0, 0);
         out.resolve.invView = out.inject.invView;
-        out.currentHistoryA = parity; out.rayScene = rayScene; out.rtShadows = rtShadows;
+        out.currentHistoryA = parity; out.rtShadows = rtShadows;
+        if (rtShadows && rayScene) {
+            out.tlas = rayScene->GetTlas();
+            out.inject.geomTableBDA = rayScene->GetGeometryTableBDA();
+        }
         out.ready = global && out.material && out.bindless && volumes.buffer && lights.buffer && grid.buffer && indices.buffer &&
             std::all_of(out.pipelines.begin(), out.pipelines.end(), [](auto p) { return p != VK_NULL_HANDLE; }) &&
             std::all_of(out.sets.begin(), out.sets.end(), [](auto p) { return p != VK_NULL_HANDLE; });
         if (out.ready)
         {
-            WriteInjectDensityPerFrame(state, frameAbs, volumes);
-            WriteInjectScatterPerFrame(state, frameAbs, lights, grid, indices);
-            WriteResolvePerFrame(state, frameAbs);
+            // Preserve both slot and parity when native writers accept a bounded frame index.
+            const u32 descriptorFrame = static_cast<u32>(frameAbs % (2 * MAX_FRAMES_IN_FLIGHT));
+            WriteInjectDensityPerFrame(state, descriptorFrame, volumes);
+            WriteInjectScatterPerFrame(state, descriptorFrame, lights, grid, indices);
+            WriteResolvePerFrame(state, descriptorFrame);
         }
         return out;
     }
@@ -134,7 +141,7 @@ namespace Luth
                     if (pass < 2)
                     {
                         auto constants = packet.inject;
-                        if (pass == 1 && packet.rayScene) constants.geomTableBDA = packet.rayScene->GetGeometryTableBDA();
+                        if (pass == 0) constants.geomTableBDA = 0;
                         vkCmdPushConstants(cmd, packet.layouts[pass], VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants), &constants);
                     }
                     else if (pass == 2)

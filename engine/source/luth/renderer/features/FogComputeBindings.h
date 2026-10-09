@@ -2,11 +2,11 @@
 #include "luth/core/types/LuthMath.h"
 #include "luth/memory/GPUTaggedPageAllocator.h"
 #include "luth/renderer/features/RenderResource.h"
+#include "luth/renderer/features/RenderViewState.h"
 #include <vulkan/vulkan.h>
 
 namespace Luth
 {
-    class RtSubsystem;
     struct FogImageBinding
     {
         VkImage image = VK_NULL_HANDLE;
@@ -41,9 +41,10 @@ namespace Luth
         FogInjectConstants inject;
         FogIntegrateConstants integrate;
         FogResolveConstants resolve;
-        // Temporary native RT bridge: TLAS recording still prepares the paired table.
-        // Replace with prepared bindings when the scene provider migrates in M13.
-        const RtSubsystem* rayScene = nullptr;
+        // Frozen native extension, validated by the optional RT fog adapter.
+        VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
+        RenderViewId view;
+        u64 frameIndex = 0, generation = 0;
         bool currentHistoryA = false, rtShadows = false, enabled = false, ready = false;
     };
 }

@@ -24,6 +24,8 @@ namespace Luth
         FeatureInfo Describe() const override;
         FeatureFrameDecision Evaluate(const FeaturePrepareContext&) const override;
         void Build(RG::RenderGraph&, RenderFeatureContext&) override;
+        // Shared native chain after the selected adapter validates its technique contract.
+        void BuildPrepared(RG::RenderGraph&, RenderFeatureContext&, const FogComputeBindings&);
     private:
         VolumetricSubsystem& m_Native;
         FrameDebugger* m_Debugger;

@@ -26,6 +26,7 @@ namespace Luth
     class RenderPipeline;
     struct ViewResources;
     struct GatheredFogVolumes;
+    struct PreparedRtScene;
 
     // Wronski frustum voxel volumetric fog. Five-pass chain:
     //   InjectDensity: per-voxel density + tint accumulation (FogVolume + analytic distance +
@@ -56,8 +57,8 @@ namespace Luth
         void Shutdown();
         std::shared_ptr<FogViewState> EnsureView(RenderViewId, FrameTargets&, VolumetricSettings::Quality);
         void ReleaseView(RenderViewId);
-        FogComputeBindings PrepareComputeBindings(FogViewState&, u32 frameAbs, const CameraParams&,
-            VkDescriptorSet global, bool enabled, bool rtShadows, const RtSubsystem*,
+        FogComputeBindings PrepareComputeBindings(FogViewState&, u64 frameAbs, RenderViewId, u64 generation, const CameraParams&,
+            VkDescriptorSet global, bool enabled, bool rtShadows, const PreparedRtScene*,
             const Memory::GPUSubRegion& volumes, const Memory::GPUSubRegion& lights,
             const Memory::GPUSubRegion& grid, const Memory::GPUSubRegion& indices);
         static std::array<GraphTextureRef, 3> AddComputePasses(RG::RenderGraph&, const FogComputeBindings&,
@@ -66,8 +67,7 @@ namespace Luth
 
         bool OnShaderReloaded(const std::string& name, const std::vector<u32>& spv);
 
-        // RT fog shadows toggle gate (VolumetricSettings::rtShadows). Read by RenderPipeline's needTlas
-        // gate + the scatter pass's AS-build->read barrier. Out-of-line: needs the RenderingSystem def.
+        // Effective RT fog setting used when freezing per-view capability requests.
         bool IsRtShadowsEnabled() const;
 
         // Allocates a FogVolume SSBO region from GPUTaggedPageAllocator and copies the gathered

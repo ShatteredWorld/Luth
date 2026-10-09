@@ -1,6 +1,8 @@
 #include <doctest/doctest.h>
 #include "luth/core/diagnostics/Log.h"
 #include "luth/renderer/features/FogComputeFeature.h"
+#include "luth/renderer/features/rt/RtFogFeature.h"
+#include "luth/renderer/features/rt/RtSunShadowFeature.h"
 #include "luth/renderer/features/RenderPipelineCompiler.h"
 #include "luth/renderer/subsystems/VolumetricSubsystem.h"
 #include "luth/renderer/subsystems/LightingSubsystem.h"
@@ -19,7 +21,10 @@ namespace
         CameraParams camera;
         std::unique_ptr<CompiledRenderPipeline> pipeline;
         GraphTextureRef density, integrated, resolved;
-        Fixture()
+        RtSceneParameters params;
+        PreparedRtScene scene;
+        bool rt = false, scenePresent = true, capabilityPresent = true;
+        Fixture(bool useRt = false) : rt(useRt)
         {
             bindings.enabled = bindings.ready = true;
             bindings.global = Native<VkDescriptorSet>(1); bindings.material = Native<VkDescriptorSet>(2);
@@ -41,8 +46,16 @@ namespace
             bindings.lights = {Native<VkBuffer>(1), 2048, sizeof(LightSSBOHeader)};
             bindings.grid = {Native<VkBuffer>(1), 4096, u64(k_ClusterCount) * sizeof(GPUCluster)};
             bindings.indices = {Native<VkBuffer>(1), 1024 * 1024, u64(k_ClusterCount) * k_MaxLightsPerCluster * sizeof(u32)};
+            params.active[static_cast<size_t>(RtSceneConsumer::Fog)] = true;
+            scene.frameIndex = bindings.frameIndex = 42;
+            bindings.view = {1}; bindings.generation = 3;
+            if (rt) {
+                bindings.rtShadows = true;
+                scene.emptyFallback = bindings.tlas = Native<VkAccelerationStructureKHR>(99);
+            }
             RenderPipelineDefinition definition;
-            definition.AddFeature<FogComputeFeature>(native);
+            if (rt) definition.AddFeature<RtFogFeature>(native);
+            else definition.AddFeature<FogComputeFeature>(native);
             PipelineInputContract inputs;
             inputs.resources = {{FogResources::Bindings},
                 {FogResources::Volumes, ResourceOutputPresence::Optional},
@@ -50,7 +63,14 @@ namespace
                 {RenderResources::ClusterGrid, ResourceOutputPresence::Optional},
                 {RenderResources::LightIndices, ResourceOutputPresence::Optional},
                 {RenderResources::ShadowCascades, ResourceOutputPresence::Optional}};
-            auto compiled = RenderPipelineCompiler{}.Compile(std::move(definition), {}, inputs);
+            RendererCapabilities capabilities;
+            if (rt) {
+                inputs.resources.push_back({RtSceneResources::Parameters});
+                inputs.resources.push_back({RtSceneResources::Scene, ResourceOutputPresence::Optional});
+                inputs.capabilities = {&RtSceneResources::RayScene};
+                capabilities.supported = {&RtSceneResources::AccelerationStructures, &RtSceneResources::RayQueries};
+            }
+            auto compiled = RenderPipelineCompiler{}.Compile(std::move(definition), capabilities, inputs);
             REQUIRE(compiled.pipeline);
             pipeline = std::move(compiled.pipeline);
         }
@@ -73,14 +93,22 @@ namespace
                         (void*)(uintptr_t(600 + i)), RG::ResourceState::DepthStencilAttachment);
                 }
             const FogComputeBindingRef ref{&bindings};
-            const std::array resources{RenderInputBinding::Present(FogResources::Bindings, ref),
+            std::vector resources{RenderInputBinding::Present(FogResources::Bindings, ref),
                 volumePresent ? RenderInputBinding::Present(FogResources::Volumes, volumes) : RenderInputBinding::Absent(FogResources::Volumes),
                 RenderInputBinding::Present(RenderResources::LightData, lights),
                 RenderInputBinding::Present(RenderResources::ClusterGrid, grid),
                 RenderInputBinding::Present(RenderResources::LightIndices, indices),
                 shadowsPresent ? RenderInputBinding::Present(RenderResources::ShadowCascades, shadows) : RenderInputBinding::Absent(RenderResources::ShadowCascades)};
-            FrameRenderInputs frame; frame.resources = resources;
+            const RaySceneRef sceneRef{&scene};
+            if (rt) {
+                resources.push_back(RenderInputBinding::Present(RtSceneResources::Parameters, params));
+                resources.push_back(scenePresent ? RenderInputBinding::Present(RtSceneResources::Scene, sceneRef)
+                    : RenderInputBinding::Absent(RtSceneResources::Scene));
+            }
+            FrameRenderInputs frame; frame.resources = resources; frame.renderFrameIndex = 42;
+            if (rt && capabilityPresent) frame.capabilities = RtSceneResources::Requests;
             ViewRenderInputs view; view.id = {viewId}; view.width = 640; view.height = 480; view.camera = &camera;
+            view.resourceGeneration = 3;
             const std::array outputs{RenderOutputBinding::Capture(RenderResources::FogDensity, density),
                 RenderOutputBinding::Capture(FogResources::IntegratedScatter, integrated),
                 RenderOutputBinding::Capture(RenderResources::ResolvedFog, resolved)};
@@ -144,6 +172,8 @@ TEST_CASE("FogComputeFeature: rejects missing or inconsistent preparation before
     SUBCASE("inconsistent dimensions") { ++fixture.bindings.resolve.volDimZ; }
     SUBCASE("aliased history") { fixture.bindings.previous = fixture.bindings.current; }
     SUBCASE("missing RT provider") { fixture.bindings.rtShadows = true; }
+    SUBCASE("RT handle in raster packet") { fixture.bindings.tlas = Native<VkAccelerationStructureKHR>(99); }
+    SUBCASE("RT table in raster packet") { fixture.bindings.inject.geomTableBDA = 99; }
     SUBCASE("short cluster grid") { fixture.bindings.grid.size = 1; }
     Memory::LinearAllocator scratch(64 * 1024); RG::RenderGraph graph(scratch);
     CHECK_FALSE(fixture.Build(graph, scratch, volumes, false, wrongSlice).success);
@@ -166,9 +196,103 @@ TEST_CASE("FogComputeFeature: consumes optional cascade handles without importin
 TEST_CASE("FogComputeFeature: native disabled preparation needs no device [renderfeatures]")
 {
     VolumetricSubsystem native; FogViewState state; CameraParams camera;
-    const auto bindings = native.PrepareComputeBindings(state, 17, camera, VK_NULL_HANDLE, false, false,
+    const u64 frame = (u64{1} << 32) + 17;
+    const auto bindings = native.PrepareComputeBindings(state, frame, {1}, 1, camera, VK_NULL_HANDLE, false, false,
         nullptr, {}, {}, {}, {});
     CHECK_FALSE(bindings.enabled); CHECK_FALSE(bindings.ready);
+    CHECK(bindings.frameIndex == frame); CHECK(bindings.view == RenderViewId{1}); CHECK(bindings.generation == 1);
+}
+
+TEST_CASE("RtFogFeature: empty fallback and populated scene preserve the four-pass chain [renderfeatures]")
+{
+    Fixture fixture(true);
+    SUBCASE("populated") {
+        fixture.scene.tlas.result.instanceCount = 1;
+        fixture.scene.tlas.result.tlas = fixture.bindings.tlas;
+        fixture.scene.tlas.result.geomTableBDA = fixture.bindings.inject.geomTableBDA = 12345;
+    }
+    Memory::LinearAllocator scratch(64 * 1024); RG::RenderGraph graph(scratch);
+    REQUIRE(fixture.Build(graph, scratch, true, true).success);
+    REQUIRE(graph.GetPasses().size() == 4);
+    CHECK(graph.GetPasses()[1].name == "VolumetricInjectScatter");
+    CHECK(graph.GetPasses()[1].queueFamily == RG::QueueFamily::AsyncCompute);
+    CHECK(graph.GetPasses()[1].reads.size() == 5);
+    CHECK(graph.GetResources().size() == 7); // Existing cascades and three fog imports only.
+    CHECK(fixture.resolved.binding.texture == fixture.bindings.current.binding.texture);
+    graph.Compile();
+    for (const auto& pass : graph.GetPasses()) CHECK_FALSE(pass.culled);
+}
+TEST_CASE("RtFogFeature: stale or unpaired bindings fail before any fog registration [renderfeatures]")
+{
+    Fixture fixture(true);
+    { Memory::LinearAllocator scratch(64 * 1024); RG::RenderGraph graph(scratch);
+      REQUIRE(fixture.Build(graph, scratch).success); }
+    SUBCASE("missing provider output") { fixture.scenePresent = false; }
+    SUBCASE("missing capability") { fixture.capabilityPresent = false; }
+    SUBCASE("stale scene frame") { ++fixture.scene.frameIndex; }
+    SUBCASE("stale packet frame") { ++fixture.bindings.frameIndex; }
+    SUBCASE("other view") { fixture.bindings.view = {2}; }
+    SUBCASE("replaced view state") { ++fixture.bindings.generation; }
+    SUBCASE("different TLAS") { fixture.bindings.tlas = Native<VkAccelerationStructureKHR>(100); }
+    SUBCASE("different table") { fixture.bindings.inject.geomTableBDA = 12345; }
+    SUBCASE("incomplete populated scene") { fixture.scene.tlas.result.instanceCount = 1; }
+    SUBCASE("missing RT variant") { fixture.bindings.rtShadows = false; }
+    Memory::LinearAllocator scratch(64 * 1024); RG::RenderGraph graph(scratch);
+    CHECK_FALSE(fixture.Build(graph, scratch).success);
+    CHECK(graph.GetPasses().empty());
+    CHECK_FALSE(fixture.density.handle.IsValid()); CHECK_FALSE(fixture.resolved.handle.IsValid());
+}
+TEST_CASE("RtFogFeature: runtime disable PT and cold pipeline publish absence [renderfeatures]")
+{
+    Fixture fixture(true);
+    SUBCASE("fog off") { fixture.params.active[static_cast<size_t>(RtSceneConsumer::Fog)] = false; }
+    SUBCASE("PT selected") { fixture.params.active[static_cast<size_t>(RtSceneConsumer::PathTrace)] = true; }
+    SUBCASE("native disabled") { fixture.bindings.enabled = false; }
+    SUBCASE("cold") { fixture.bindings.ready = false; }
+    Memory::LinearAllocator scratch(64 * 1024); RG::RenderGraph graph(scratch);
+    REQUIRE(fixture.Build(graph, scratch).success);
+    CHECK(graph.GetPasses().empty()); CHECK_FALSE(fixture.resolved.handle.IsValid());
+}
+TEST_CASE("RtFogFeature: demand is independent of surface shadows and excluded by PT [renderfeatures]")
+{
+    int prepares = 0, registrations = 0;
+    RtSceneParameters params;
+    auto packet = std::make_shared<PreparedRtScene>(); packet->frameIndex = 42;
+    RenderPipelineDefinition definition;
+    definition.AddFeature<RtSceneFeature>(
+        [&](const FrameRenderInputs&, const RtSceneParameters&) -> std::shared_ptr<const PreparedRtScene> {
+            ++prepares; return packet;
+        }, [&](RG::RenderGraph&, std::shared_ptr<const PreparedRtScene>) { ++registrations; });
+    definition.AddFeature<RtFogDemandFeature>();
+    definition.AddFeature<RtSunShadowDemandFeature>();
+    PipelineInputContract inputs; inputs.resources = {{RtSceneResources::Parameters}};
+    const RendererCapabilities capabilities{{&RtSceneResources::AccelerationStructures, &RtSceneResources::RayQueries}};
+    auto compiled = RenderPipelineCompiler{}.Compile(std::move(definition), capabilities, inputs);
+    REQUIRE(compiled.pipeline);
+    Memory::LinearAllocator scratch(64 * 1024);
+    const std::array resources{RenderInputBinding::Present(RtSceneResources::Parameters, params)};
+    FrameRenderInputs frame; frame.renderFrameIndex = 42; frame.resources = resources;
+    for (int step = 0; step < 4; ++step) {
+        params.active[static_cast<size_t>(RtSceneConsumer::Fog)] = step != 0;
+        params.active[static_cast<size_t>(RtSceneConsumer::PathTrace)] = step == 2;
+        params.active[static_cast<size_t>(RtSceneConsumer::SunShadow)] = step == 3;
+        RG::RenderGraph graph(scratch);
+        REQUIRE(compiled.pipeline->Build(graph, frame, {}, scratch).success);
+        CHECK(prepares == (step == 3 ? 2 : step ? 1 : 0)); CHECK(registrations == prepares);
+    }
+    VolumetricSubsystem native;
+    for (bool unsupported : {false, true}) {
+        RenderPipelineDefinition invalid;
+        if (unsupported) invalid.AddFeature<RtSceneFeature>(
+            [&](const FrameRenderInputs&, const RtSceneParameters&) -> std::shared_ptr<const PreparedRtScene> { return packet; },
+            [](RG::RenderGraph&, std::shared_ptr<const PreparedRtScene>) {});
+        invalid.AddFeature<RtFogDemandFeature>();
+        CHECK_FALSE(RenderPipelineCompiler{}.Compile(std::move(invalid),
+            unsupported ? RendererCapabilities{} : capabilities, inputs).pipeline);
+    }
+    // The raster feature has no scene contract or device requirements.
+    const auto raster = FogComputeFeature(native).Describe();
+    CHECK(raster.capabilities.consumes.empty()); CHECK(raster.capabilities.deviceRequirements.empty());
 }
 
 TEST_CASE("FogComputeFeature: two views and history parity export distinct physical references [renderfeatures]")
