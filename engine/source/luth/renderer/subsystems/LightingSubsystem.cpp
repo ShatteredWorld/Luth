@@ -354,14 +354,14 @@ namespace Luth
         shadowImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         // Binding 4 (RT sun shadow mask): per-view. The mask image view comes from
-        // vr.sunShadowMask (allocated in RecreateViewTextures). pbr.frag reads it only when
+        // The RT domain's view-local mask. pbr.frag reads it only when
         // rtShadowParams.x > 0.5 (RT mode); CSM-mode pixels take the cascade-PCF branch and
         // don't dynamically access binding 4. Layout is SHADER_READ_ONLY_OPTIMAL; the RG
         // transitions the image to this from the RT pass's GENERAL via the consumer's Read.
         VkDescriptorImageInfo maskImgInfo{};
-        if (m_HybridSignalsEnabled && vr.sunShadowMask)
+        if (m_HybridSignalsEnabled && vr.rtShadow && vr.rtShadow->mask)
         {
-            auto vkMask = std::static_pointer_cast<VKTexture>(vr.sunShadowMask);
+            auto vkMask = std::static_pointer_cast<VKTexture>(vr.rtShadow->mask);
             maskImgInfo.sampler     = m_SunShadowMaskSampler;
             maskImgInfo.imageView   = vkMask->GetImageView();
             maskImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

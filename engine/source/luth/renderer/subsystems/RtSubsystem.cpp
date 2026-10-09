@@ -193,6 +193,7 @@ namespace Luth
     void RtSubsystem::Shutdown()
     {
         LH_PROFILE_FUNCTION();
+        m_ShadowViews.ReleaseAll([] { Renderer::WaitForGPU(); });
         // Persistent empty TLAS: push to deletion queue so it retires after the last in-flight
         // frame stops referencing it via Set 0 binding 6 (PushDeletion drains N+2 frames out).
         if (m_PersistentEmptyTlas != VK_NULL_HANDLE)
@@ -290,21 +291,46 @@ namespace Luth
         return true;
     }
 
-    void RtSubsystem::WriteShadowPassView(ViewResources& vr, FrameTargets& targets)
+    std::shared_ptr<RtSunShadowViewState> RtSubsystem::EnsureShadowView(RenderViewId id, const FrameTargets& targets)
+    {
+        if (!m_ShadowPassSetLayout) return {};
+        const auto depth = targets.GetSceneDepth();
+        const auto normal = targets.GetSlimNormal();
+        if (!depth || !normal || depth->GetWidth() != normal->GetWidth() || depth->GetHeight() != normal->GetHeight())
+            throw std::invalid_argument("RtSunShadow: incompatible depth/normal sources");
+        const auto depthView = std::static_pointer_cast<VKTexture>(depth)->GetImageView();
+        const auto normalView = std::static_pointer_cast<VKTexture>(normal)->GetImageView();
+        const auto config = RtSunShadowViewState::Config(depth->GetWidth(), depth->GetHeight(),
+            reinterpret_cast<u64>(depthView), reinterpret_cast<u64>(normalView));
+        return m_ShadowViews.Ensure(id, config, [&](const ViewStateConfig& requested) {
+            auto state = RtSunShadowViewState::Create(id, requested, m_ShadowPassSetLayout);
+            state->depthSource = depth;
+            state->normalSource = normal;
+            WriteShadowPassView(*state);
+            return state;
+        }, [] { Renderer::WaitForGPU(); });
+    }
+
+    void RtSubsystem::ReleaseShadowView(RenderViewId id)
+    {
+        m_ShadowViews.Release(id, [] { Renderer::WaitForGPU(); });
+    }
+
+    void RtSubsystem::WriteShadowPassView(const RtSunShadowViewState& state)
     {
         LH_PROFILE_FUNCTION();
         if (m_ShadowPassSetLayout == VK_NULL_HANDLE) return;
-        if (!targets.GetSceneDepth() || !targets.GetSlimNormal() || !vr.sunShadowMask) return;
+        if (!state.depthSource || !state.normalSource || !state.mask) return;
 
-        VkDevice device = VulkanContext::Get().GetDevice();
+        VkDevice device = state.device;
 
-        const VkImageView depthView  = std::static_pointer_cast<VKTexture>(targets.GetSceneDepth())->GetImageView();
-        const VkImageView normalView = std::static_pointer_cast<VKTexture>(targets.GetSlimNormal())->GetImageView();
-        const VkImageView maskView   = std::static_pointer_cast<VKTexture>(vr.sunShadowMask)->GetImageView();
+        const VkImageView depthView  = std::static_pointer_cast<VKTexture>(state.depthSource)->GetImageView();
+        const VkImageView normalView = std::static_pointer_cast<VKTexture>(state.normalSource)->GetImageView();
+        const VkImageView maskView   = std::static_pointer_cast<VKTexture>(state.mask)->GetImageView();
 
         for (u32 slot = 0; slot < MAX_FRAMES_IN_FLIGHT; ++slot)
         {
-            VkDescriptorSet set = vr.rtShadowPassDescSet[slot];
+            VkDescriptorSet set = state.sets[slot];
             if (set == VK_NULL_HANDLE) continue;
 
             VkDescriptorImageInfo depthInfo{};
@@ -352,24 +378,27 @@ namespace Luth
         u64 frameIndex, RenderViewId view, u64 generation, const PreparedRtScene* scene) const
     {
         RtSunShadowBindings packet;
-        if (!m_SunShadowsPipeline || !vr.sunShadowMask || !targets.GetSceneDepth() || !targets.GetSlimNormal())
+        if (!m_SunShadowsPipeline || !vr.rtShadow || !vr.rtShadow->mask)
             return packet;
-        const auto mask = std::static_pointer_cast<VKTexture>(vr.sunShadowMask);
+        const auto& state = *vr.rtShadow;
+        if (state.id != view || state.depthSource != targets.GetSceneDepth() || state.normalSource != targets.GetSlimNormal())
+            throw std::invalid_argument("RtSunShadow: stale native view state");
+        const auto mask = std::static_pointer_cast<VKTexture>(state.mask);
         packet.pipeline = m_SunShadowsPipeline->GetHandle();
         packet.layout = m_SunShadowsPipeline->GetLayout();
         const auto slot = static_cast<u32>(frameIndex % MAX_FRAMES_IN_FLIGHT);
-        packet.sets = {vr.globalDescriptorSet[slot], vr.lightDescSet[slot], vr.rtShadowPassDescSet[slot],
+        packet.sets = {vr.globalDescriptorSet[slot], vr.lightDescSet[slot], state.sets[slot],
             MaterialSystem::GetDescriptorSet(slot), VulkanContext::Get().GetBindlessSet().GetSet()};
         packet.image = mask->GetImage();
         packet.imageView = mask->GetImageView();
         packet.mask = {mask.get()};
-        packet.depthSource = targets.GetSceneDepth().get();
-        packet.normalSource = targets.GetSlimNormal().get();
+        packet.depthSource = state.depthSource.get();
+        packet.normalSource = state.normalSource.get();
         packet.view = view;
         packet.generation = generation;
         packet.frameIndex = frameIndex;
-        packet.width = vr.width;
-        packet.height = vr.height;
+        packet.width = state.width;
+        packet.height = state.height;
         if (scene) {
             packet.tlas = scene->GetTlas();
             packet.geometryTable = scene->GetGeometryTableBDA();

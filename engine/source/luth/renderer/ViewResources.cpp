@@ -95,6 +95,11 @@ namespace Luth
         vr.overlays = std::move(overlays);
         if (overlaysReplaced) vr.generation = m_System.InvalidateView(id);
 
+        auto shadow = m_RtNativeInitialized ? m_Rt.EnsureShadowView(id, targets) : nullptr;
+        const bool shadowReplaced = vr.rtShadow && vr.rtShadow != shadow;
+        vr.rtShadow = std::move(shadow);
+        if (shadowReplaced) vr.generation = m_System.InvalidateView(id);
+
         if (inserted || vr.descPool == VK_NULL_HANDLE)
         {
             // Borrow the owner's identity; native allocation does not mint a new view.
@@ -117,7 +122,6 @@ namespace Luth
 
             if (m_RtNativeInitialized)
             {
-                m_Rt.WriteShadowPassView(vr, targets);  // re-bind binding 2 (mask storage) to the new viewport-sized image
                 m_Restir.WriteView(vr, targets);        // re-bind Set 2 depth/normal + reservoir + new DI image
                 m_RestirGi.WriteView(vr, targets);      // re-bind GI Set 2 depth/normal + reservoir + new GI image
                 m_RestirGi.WriteReservoirVizView(vr, targets);  // re-bind GI reservoir-viz depth + spatial reservoir
@@ -138,6 +142,8 @@ namespace Luth
 
         vr.width  = newW;
         vr.height = newH;
+        // Source views can change without an extent change. Refresh the consumer's mask binding.
+        if (shadowReplaced) m_Lighting.WriteShadowView(vr);
         return vr;
     }
 
@@ -146,6 +152,7 @@ namespace Luth
         const auto id = m_System.GetViews().Find(&targets);
         if (m_GtaoPipeline) m_GtaoPipeline->ReleaseView(id);
         m_Volumetric.ReleaseView(id);
+        m_Rt.ReleaseShadowView(id);
         m_Transparency.ReleaseView(id);
         m_PostProcess.ReleaseTaaView(id);
         m_EditorOverlays.ReleaseView(id);
@@ -246,7 +253,6 @@ namespace Luth
         allocCycled(m_Lighting.GetLightAssignLayout(),   vr.lightAssignDescSet,   "View.LightAssign");
         if (m_RtNativeInitialized)
         {
-            allocCycled(m_Rt.GetShadowPassLayout(),          vr.rtShadowPassDescSet,  "View.RtShadowPass");
             allocCycled(m_Restir.GetSetLayout(),             vr.restirDescSet,        "View.Restir");
             allocCycled(m_RestirGi.GetSetLayout(),           vr.restirGiDescSet,      "View.RestirGi");
             allocSingle(m_RestirGi.GetReservoirVizLayout(),  vr.giReservoirVizDescSet,"View.GiReservoirViz");
@@ -264,7 +270,6 @@ namespace Luth
         m_Lighting.WriteShadowView(vr);
         if (m_RtNativeInitialized)
         {
-            m_Rt.WriteShadowPassView(vr, targets);
             m_Restir.WriteView(vr, targets);
             m_RestirGi.WriteView(vr, targets);
             m_RestirGi.WriteReservoirVizView(vr, targets);
@@ -308,13 +313,6 @@ namespace Luth
         const u32  reflW    = reflHalf ? halfW : fullW;
         const u32  reflH    = reflHalf ? halfH : fullH;
         vr.reflHalfCached   = reflHalf ? 1u : 0u;
-
-        // RT sun-shadow mask: viewport-sized R8 storage. Written by rt_sun_shadows.comp on
-        // AsyncCompute, sampled by pbr.frag (Set 3 binding 4) when ShadowingMode == RtShadows.
-        vr.sunShadowMask = std::make_shared<VKTexture>(
-            fullW, fullH, TextureFormat::R8,
-            /*arrayLayers*/ 1, /*createFlags*/ 0u, /*mipLevels*/ 1,
-            VK_IMAGE_USAGE_STORAGE_BIT);
 
         // ReSTIR DI demodulated-irradiance image: DI working res (half when halfResolution). STORAGE for
         // the shade pass's imageStore + SAMPLED (ctor) for the denoiser input.
@@ -568,7 +566,7 @@ namespace Luth
         vr.fog.reset();
         vr.transparency.reset();
         vr.taa.reset();
-        vr.sunShadowMask.reset();
+        vr.rtShadow.reset();
         vr.restirDI.reset();
         vr.restirDISpec.reset();
         vr.restirGiDI.reset();

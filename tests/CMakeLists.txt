@@ -55,6 +55,7 @@ add_executable(LuthTests
     renderer/FogViewState.cpp
     renderer/GTAOFeature.cpp
     renderer/RtSunShadowFeature.cpp
+    renderer/RtSunShadowViewState.cpp
     renderer/DeformationFeature.cpp
     renderer/VisibilityFeature.cpp
     renderer/DepthPrepassFeature.cpp

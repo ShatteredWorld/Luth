@@ -6,6 +6,7 @@
 #include "luth/renderer/backend/vulkan/VulkanAllocator.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 #include "luth/renderer/features/rt/RtSunShadowBindings.h"
+#include "luth/renderer/features/rt/RtSunShadowViewState.h"
 #include "luth/renderer/rendergraph/RenderGraphResources.h"
 
 #include <memory>
@@ -82,7 +83,9 @@ namespace Luth
         //   set 2 binding 1 = SlimNormal sampler (RG16F oct, linear clamp)
         //   set 2 binding 2 = sunShadowMask storage image (R8, GENERAL layout)
         // Called from ViewResources::AllocateViewResources + on resize via EnsureViewResources.
-        void WriteShadowPassView(ViewResources& vr, FrameTargets& targets);
+        std::shared_ptr<RtSunShadowViewState> EnsureShadowView(RenderViewId, const FrameTargets&);
+        void ReleaseShadowView(RenderViewId);
+        void WriteShadowPassView(const RtSunShadowViewState&);
 
         VkDescriptorSetLayout GetShadowPassLayout() const { return m_ShadowPassSetLayout; }
 
@@ -128,5 +131,6 @@ namespace Luth
         u64             m_BlasReadyGeneration = 0;  // ++ when a deferred BLAS first-builds; forces one TLAS rebuild (H1)
         std::shared_ptr<const PreparedRtScene> m_PreparedScene;
         VulkanRtMeshResources m_MeshResources;
+        RtSunShadowViewStates m_ShadowViews;
     };
 }

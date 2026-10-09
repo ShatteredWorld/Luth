@@ -151,12 +151,7 @@ namespace Luth
         Vec2 currentJitter{ 0.0f, 0.0f };
         Vec2 prevJitter{ 0.0f, 0.0f };
 
-        // RT sun-shadow mask: viewport-sized R8 storage image, written by raygen on
-        // AsyncCompute and sampled by pbr.frag (Set 3 binding 4) when ShadowingMode::RtShadows is
-        // active. Like TAA histories, lifetime is: persistent, recreated on resize. The cycled
-        // descriptor set carries the pass-local bindings (SceneDepth + slimNormal + mask storage).
-        std::shared_ptr<Texture> sunShadowMask;
-        std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT> rtShadowPassDescSet{};
+        std::shared_ptr<RtSunShadowViewState> rtShadow; // Borrowed RT-domain view-state bridge.
 
         // ReSTIR DI (Bitterli 2020). restirReservoir is a SINGLE Garlic device-local large-tagged
         // scratch buffer (w*h*32 B): initial writes it, temporal merges history into it in-place
