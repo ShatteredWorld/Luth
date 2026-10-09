@@ -21,6 +21,7 @@ add_executable(LuthTests
     renderer/ViewPresentation.cpp
     renderer/ShaderReloadFanout.cpp
     renderer/ProfilingQuerySlots.cpp
+    renderer/FrameRetirement.cpp
     renderer/ProfilingProvenance.cpp
     renderer/GraphInstrumentation.cpp
     renderer/CaptureFinalization.cpp

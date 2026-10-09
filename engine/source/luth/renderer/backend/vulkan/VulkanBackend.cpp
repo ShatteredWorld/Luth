@@ -1,6 +1,7 @@
 #include "luthpch.h"
 #include <atomic>
 #include "VulkanBackend.h"
+#include "VulkanFrameRetirement.h"
 #include "VulkanContext.h"
 #include "VulkanBarrierCapabilities.h"
 #include "PipelineCache.h"
@@ -78,19 +79,24 @@ namespace Luth
         // Per-view 3-submit means m_FrameTimeline is signaled twice per view (gA + gB) and m_ComputeTimeline once
         // per view-with-compute; both no longer equal frameIndex+1. The per-frame ring caches the LAST value
         // of each timeline at end of the previous frame N-2; AcquireImage waits on exactly those.
-        if (frameIndex >= MAX_FRAMES_IN_FLIGHT)
+        if (const auto retiringSlot = DescriptorRetirementSlot(frameIndex, MAX_FRAMES_IN_FLIGHT))
         {
             // +1: per-frame UAB descriptor slots are read at renderFrameIndex%N, one frame ahead of the
             // cmd-buffer slot (gameFrameIndex%N) the cmd-buffer reset gates. Wait the slot's prior DESCRIPTOR
             // reader (frame N-3), not just its cmd-buffer prior user (N-4), so a game-stage slot rewrite can't
             // race an older in-flight reader under GPU-behind load (skinned-pose ghost). Monotone, so it still
             // covers cmd-buffer reset. see arch/multi-queue.md
-            const u32 retiringSlot = (u32)((frameIndex - MAX_FRAMES_IN_FLIGHT + 1) % MAX_FRAMES_IN_FLIGHT);
-            const u64 gfxWait     = m_LastGraphicsValuePerFrame[retiringSlot];
-            const u64 computeWait = m_LastComputeValuePerFrame [retiringSlot];
+            // Bootstrap also renders frame 1 at submission label 2; retire label 1
+            // before updating those non-UAB descriptor sets a second time.
+            const u64 gfxWait     = m_LastGraphicsValuePerFrame[*retiringSlot];
+            const u64 computeWait = m_LastComputeValuePerFrame [*retiringSlot];
 
             m_FrameTimeline.Wait(gfxWait);
             if (computeWait > 0) m_ComputeTimeline.Wait(computeWait);
+        }
+
+        if (frameIndex >= MAX_FRAMES_IN_FLIGHT)
+        {
 
             // Direct ND reclaim (HasFrameCompleted): the submit labeled L consumed all data tagged L-1, so
             // free tag (label-1) for each consuming frame `label` that is GPU-complete. Bound at frameIndex-1
