@@ -13,6 +13,7 @@
 #include "luth/renderer/shader/ShaderLibrary.h"
 #include "luth/renderer/draw/DrawCommand.h"
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
+#include "luth/renderer/backend/vulkan/VulkanLightBindings.h"
 #include "luth/renderer/backend/vulkan/VulkanTexture.h"
 #include "luth/renderer/backend/vulkan/VulkanBuffer.h"
 #include "luth/core/FrameData.h"
@@ -197,6 +198,7 @@ namespace Luth
         m_ShadowSkinnedPipeline.reset();
         m_ShadowPipeline.reset();
 
+        m_HybridSignalsEnabled = false;
         m_IrradianceMap.reset();
         m_PrefilteredMap.reset();
         m_BRDFLut.reset();
@@ -357,7 +359,7 @@ namespace Luth
         // don't dynamically access binding 4. Layout is SHADER_READ_ONLY_OPTIMAL; the RG
         // transitions the image to this from the RT pass's GENERAL via the consumer's Read.
         VkDescriptorImageInfo maskImgInfo{};
-        if (vr.sunShadowMask)
+        if (m_HybridSignalsEnabled && vr.sunShadowMask)
         {
             auto vkMask = std::static_pointer_cast<VKTexture>(vr.sunShadowMask);
             maskImgInfo.sampler     = m_SunShadowMaskSampler;
@@ -372,7 +374,7 @@ namespace Luth
         // clamp-to-edge). pbr.frag reads it only when restirParams.x > 0.5; the denoise pass leaves the
         // image in GENERAL, the GeometryPass Read transitions it to SHADER_READ_ONLY_OPTIMAL.
         VkDescriptorImageInfo diImgInfo{};
-        if (vr.svgfDenoised)
+        if (m_HybridSignalsEnabled && vr.svgfDenoised)
         {
             auto vkDI = std::static_pointer_cast<VKTexture>(vr.svgfDenoised);
             diImgInfo.sampler     = m_SunShadowMaskSampler;
@@ -386,7 +388,7 @@ namespace Luth
         // mask sampler. pbr.frag adds it only when restirParams.y > 0.5; the GeometryPass Read
         // transitions it from the denoiser's GENERAL to SHADER_READ_ONLY_OPTIMAL.
         VkDescriptorImageInfo giImgInfo{};
-        if (vr.svgfGiDenoised)
+        if (m_HybridSignalsEnabled && vr.svgfGiDenoised)
         {
             auto vkGI = std::static_pointer_cast<VKTexture>(vr.svgfGiDenoised);
             giImgInfo.sampler     = m_SunShadowMaskSampler;
@@ -398,7 +400,7 @@ namespace Luth
         // (the specular denoiser owns the slot, mirroring b5/b6). pbr.frag composites it into the split-sum
         // specular IBL when reflParams.x > 0.5; the GeometryPass Read transitions it to SHADER_READ_ONLY.
         VkDescriptorImageInfo reflImgInfo{};
-        if (vr.svgfSpecDenoised)
+        if (m_HybridSignalsEnabled && vr.svgfSpecDenoised)
         {
             auto vkRefl = std::static_pointer_cast<VKTexture>(vr.svgfSpecDenoised);
             reflImgInfo.sampler     = m_SunShadowMaskSampler;
@@ -409,7 +411,7 @@ namespace Luth
         // Binding 8: post-denoise ReSTIR-DI specular. Bound to vr.svgfDiSpecDenoised; pbr.frag
         // adds it under restirParams.z. GeometryPass's Read transitions it to SHADER_READ_ONLY.
         VkDescriptorImageInfo diSpecImgInfo{};
-        if (vr.svgfDiSpecDenoised)
+        if (m_HybridSignalsEnabled && vr.svgfDiSpecDenoised)
         {
             auto vkDiSpec = std::static_pointer_cast<VKTexture>(vr.svgfDiSpecDenoised);
             diSpecImgInfo.sampler     = m_SunShadowMaskSampler;
@@ -624,83 +626,22 @@ namespace Luth
         maskSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         maskSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         maskSamplerInfo.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-        vkCreateSampler(device, &maskSamplerInfo, nullptr, &m_SunShadowMaskSampler);
+        if (VulkanContext::Get().SupportsRayTracing())
+            vkCreateSampler(device, &maskSamplerInfo, nullptr, &m_SunShadowMaskSampler);
 
-        // Set 3 layout: b0 = LightSSBO (header + flexible PointLightData[]), b1 = ClusterGridSSBO,
-        // b2 = LightIndexSSBO, b3 = cascade shadow sampler (sampler2DArrayShadow, PCF), b4 = RT
-        // sun shadow mask (sampler2D R8, populated when ShadowingMode::RtShadows is active), b5 =
-        // ReSTIR DI demodulated irradiance (sampler2D RGBA16F, sampled when restirParams.x > 0.5),
-        // b6 = ReSTIR GI demodulated indirect diffuse (sampler2D RGBA16F, added when restirParams.y > 0.5).
-        VkDescriptorSetLayoutBinding bindings[9] = {};
-        bindings[0].binding = 0;
-        bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[0].descriptorCount = 1;
-        // COMPUTE added so the ReSTIR DI passes (restir_initial/shade.comp) + rt_sun_shadows.comp can
-        // read dirLight.direction / points[] / pointLightCount when this layout binds as their Set 1.
-        // Cluster grid + light index (b1, b2) intentionally stay fragment-only; neither ReSTIR nor the
-        // shadow pass iterates clusters.
-        bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
-        bindings[1].binding = 1;
-        bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[1].descriptorCount = 1;
-        bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[2].binding = 2;
-        bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[2].descriptorCount = 1;
-        bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[3].binding = 3;
-        bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[3].descriptorCount = 1;
-        bindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[4].binding = 4;
-        bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[4].descriptorCount = 1;
-        bindings[4].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT
-                               | VK_SHADER_STAGE_RAYGEN_BIT_KHR;  // raygen may also read for ReSTIR DI
-        bindings[5].binding = 5;
-        bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[5].descriptorCount = 1;
-        bindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;  // ReSTIR DI image; pbr.frag only
-        bindings[6].binding = 6;
-        bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[6].descriptorCount = 1;
-        bindings[6].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;  // ReSTIR GI image; pbr.frag only
-        bindings[7].binding = 7;
-        bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[7].descriptorCount = 1;
-        bindings[7].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;  // RT reflections image; pbr.frag only
-        bindings[8].binding = 8;
-        bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[8].descriptorCount = 1;
-        bindings[8].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;  // ReSTIR DI specular; pbr.frag only
-
-        // b0/b1/b2 are SSBOs rebound per-frame and are bound by BOTH graphics passes (PBR fragment)
-        // AND the AsyncCompute RT raygen (set=1 in the RT pipeline-layout). The cycled-slot protocol
-        // alone is no longer sufficient: the second pending reference from the compute submission
-        // means vkUpdateDescriptorSets sees the set as in-use even when writing the "next" slot.
-        // UAB on the rewritten bindings satisfies VUID-vkUpdateDescriptorSets-None-03047 cleanly.
-        // b3-b8 (samplers) stay flag-less; they're per-view stable, not rewritten per frame.
-        VkDescriptorBindingFlags bindingFlags[9] = {
-            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,  // b0 LightSSBO
-            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,  // b1 ClusterGrid
-            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,  // b2 LightIndex
-            0,                                            // b3 cascade sampler
-            0,                                            // b4 sun shadow mask sampler
-            0,                                            // b5 ReSTIR DI sampler
-            0,                                            // b6 ReSTIR GI sampler
-            0,                                            // b7 RT reflections sampler
-            0,                                            // b8 ReSTIR DI specular sampler
-        };
+        const bool rt = VulkanContext::Get().SupportsRayTracing();
+        const VulkanLightBindings layout({rt, rt});
+        m_HybridSignalsEnabled = layout.HasHybridSignals();
         VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsCI{
             VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO };
-        bindingFlagsCI.bindingCount  = 9;
-        bindingFlagsCI.pBindingFlags = bindingFlags;
+        bindingFlagsCI.bindingCount  = layout.count;
+        bindingFlagsCI.pBindingFlags = layout.flags.data();
 
         VkDescriptorSetLayoutCreateInfo lightLayoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
         lightLayoutInfo.pNext        = &bindingFlagsCI;
         lightLayoutInfo.flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-        lightLayoutInfo.bindingCount = 9;
-        lightLayoutInfo.pBindings    = bindings;
+        lightLayoutInfo.bindingCount = layout.count;
+        lightLayoutInfo.pBindings    = layout.bindings.data();
         vkCreateDescriptorSetLayout(device, &lightLayoutInfo, nullptr, &m_LightSetLayout);
 
         // Descriptor sets themselves move to ViewResources (per-view x MAX_FRAMES_IN_FLIGHT slots).

@@ -193,3 +193,40 @@ TEST_CASE("ShaderVariants: import-root changes retain native registrations and n
     CHECK(ShaderLibrary::LoadEngineVariant(source.string(), ShaderCompileVariant::Hybrid)->generation == 4);
     CHECK(notified.size() == 6);
 }
+TEST_CASE("ShaderVariants: stock and graph opaque programs use the selected lighting ABI")
+{
+    for (const auto& path : {fs::absolute("engine/assets/shaders/pbr.slang"), fs::absolute("tests/renderer/shaders/GraphOpaqueProbe.slang")})
+    {
+        CAPTURE(path.string());
+        for (const auto variant : {ShaderCompileVariant::Raster, ShaderCompileVariant::Hybrid, ShaderCompileVariant::Legacy})
+        {
+            const auto code = SlangCompiler::CompileReflectStage(path, "main", variant);
+            REQUIRE_FALSE(code.spirv.empty()); CHECK(code.stage == ShaderStage::Fragment);
+            CHECK_FALSE(HasInstruction(code.spirv, spv::OpCapability, spv::CapabilityRayQueryKHR));
+            CHECK_FALSE(HasInstruction(code.spirv, spv::OpCapability, spv::CapabilityRayTracingKHR));
+            CHECK_FALSE(HasInstruction(code.spirv, spv::OpTypeAccelerationStructureKHR));
+            std::unordered_map<u32, u32> sets, bindings;
+            for (size_t i = 5; i < code.spirv.size(); i += code.spirv[i] >> 16)
+                if ((code.spirv[i] & 0xffff) == static_cast<u32>(spv::OpDecorate) && (code.spirv[i] >> 16) >= 4)
+                {
+                    if (code.spirv[i + 2] == spv::DecorationDescriptorSet) sets[code.spirv[i + 1]] = code.spirv[i + 3];
+                    if (code.spirv[i + 2] == spv::DecorationBinding) bindings[code.spirv[i + 1]] = code.spirv[i + 3];
+                }
+            std::vector<u32> lightBindings;
+            for (const auto& [id, binding] : bindings)
+                if (sets.at(id) == 3) lightBindings.push_back(binding);
+            std::sort(lightBindings.begin(), lightBindings.end());
+            lightBindings.erase(std::unique(lightBindings.begin(), lightBindings.end()), lightBindings.end()); // Slang may alias one binding with multiple variables.
+            const std::vector<u32> expected = variant == ShaderCompileVariant::Raster
+                ? std::vector<u32>{0, 1, 2, 3} : std::vector<u32>{0, 1, 2, 3, 4, 5, 6, 7, 8};
+            CHECK(lightBindings == expected);
+            if (const auto* output = std::getenv("LUTH_SHADER_VARIANT_DUMP"))
+            {
+                const char* suffix = variant == ShaderCompileVariant::Raster ? "raster" : variant == ShaderCompileVariant::Hybrid ? "hybrid" : "legacy";
+                std::ofstream stream(fs::path(output) / (path.filename().string() + "." + suffix + ".spv"), std::ios::binary);
+                stream.write(reinterpret_cast<const char*>(code.spirv.data()), code.spirv.size() * sizeof(u32));
+                REQUIRE(stream.good());
+            }
+        }
+    }
+}

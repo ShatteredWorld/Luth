@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 #include "luth/renderer/backend/vulkan/VulkanGlobalBindings.h"
+#include "luth/renderer/backend/vulkan/VulkanLightBindings.h"
 using namespace Luth;
 
 TEST_CASE("GlobalBindings: raster omits TLAS while shared bindings retain the hybrid ABI")
@@ -45,4 +46,31 @@ TEST_CASE("GlobalBindings: query-only TLAS visibility excludes RT pipeline stage
     CHECK(full.bindings[6].stageFlags == (query.bindings[6].stageFlags | VK_SHADER_STAGE_RAYGEN_BIT_KHR
         | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR));
     CHECK(full.flags[6] == query.flags[6]);
+}
+
+TEST_CASE("GlobalBindings: raster lighting prefix excludes hybrid surface signals")
+{
+    const Luth::VulkanLightBindings raster, hybrid({true, true}), query({true, false});
+    REQUIRE(raster.count == 4); REQUIRE(hybrid.count == 9);
+    CHECK_FALSE(raster.HasHybridSignals()); CHECK(hybrid.HasHybridSignals());
+    for (uint32_t i = 0; i < 4; ++i)
+    {
+        CHECK(raster.bindings[i].binding == i);
+        CHECK(raster.bindings[i].descriptorCount == 1);
+        CHECK(raster.bindings[i].descriptorType == (i < 3 ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER));
+        CHECK(raster.bindings[i].stageFlags == (VK_SHADER_STAGE_FRAGMENT_BIT | (i == 0 ? VK_SHADER_STAGE_COMPUTE_BIT : 0)));
+        CHECK(raster.flags[i] == (i < 3 ? VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT : 0));
+        CHECK(raster.bindings[i].descriptorType == hybrid.bindings[i].descriptorType);
+        CHECK(raster.bindings[i].stageFlags == hybrid.bindings[i].stageFlags);
+        CHECK(raster.flags[i] == hybrid.flags[i]);
+    }
+    for (uint32_t i = 4; i < 9; ++i)
+    {
+        CHECK(hybrid.bindings[i].binding == i);
+        CHECK(hybrid.bindings[i].descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        CHECK(hybrid.bindings[i].descriptorCount == 1);
+        CHECK(hybrid.bindings[i].stageFlags == (VK_SHADER_STAGE_FRAGMENT_BIT | (i == 4 ? VK_SHADER_STAGE_RAYGEN_BIT_KHR : 0)));
+        CHECK(query.bindings[i].stageFlags == VK_SHADER_STAGE_FRAGMENT_BIT);
+        CHECK(hybrid.flags[i] == 0);
+    }
 }

@@ -175,6 +175,7 @@ namespace Luth
         VkImageView              m_ShadowLayerViews[k_ShadowCascadeCount] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
         VkSampler                m_ShadowSampler        = VK_NULL_HANDLE;
         VkSampler                m_SunShadowMaskSampler = VK_NULL_HANDLE;  // Set 3 binding 4: RT sun shadow mask (linear, clamp-to-edge, no compare)
+        bool m_HybridSignalsEnabled = false;
         VkDescriptorSetLayout    m_LightSetLayout = VK_NULL_HANDLE;
 
         // Shadow pipelines + SPV.

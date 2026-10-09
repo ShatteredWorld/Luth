@@ -63,7 +63,13 @@ namespace Luth
             return sh ? sh->GetSpirV() : std::vector<u32>{};
         };
         m_PBRVertSpv                 = loadSpv("shaders/pbr_vert.slang");
-        m_PBRFragSpv                 = loadSpv("shaders/pbr.slang");
+        m_HybridLightingEnabled = VulkanContext::Get().SupportsRayTracing();
+        const auto variant = m_HybridLightingEnabled ? ShaderCompileVariant::Hybrid : ShaderCompileVariant::Raster;
+        if (auto shader = ShaderLibrary::LoadEngineVariant("shaders/pbr.slang", variant))
+        {
+            m_PBRFragSpv = shader->spirv;
+            m_PBRShaderName = ShaderVariantCache::Name(shader->source, shader->variant);
+        }
         m_PBRSkinnedVertSpv          = loadSpv("shaders/pbr_skinned.slang");
         m_DepthPrepassVertSpv        = loadSpv("shaders/depthPrepass.slang");
         m_DepthPrepassSkinnedVertSpv = loadSpv("shaders/depthPrepass_skinned.slang");
@@ -96,7 +102,15 @@ namespace Luth
         for (const auto& [name, sh] : ShaderLibrary::GetAll())
         {
             if (sh && sh->Handle == fragShaderUUID && !sh->GetSpirV().empty())
-                return m_GraphFragSpv.emplace(fragShaderUUID, sh->GetSpirV()).first->second;
+            {
+                const auto variant = m_HybridLightingEnabled ? ShaderCompileVariant::Hybrid : ShaderCompileVariant::Raster;
+                if (auto program = ShaderLibrary::LoadEngineVariant(sh->GetPath().string(), variant))
+                {
+                    m_GraphShaderNames[fragShaderUUID] = ShaderVariantCache::Name(program->source, program->variant);
+                    return m_GraphFragSpv.emplace(fragShaderUUID, program->spirv).first->second;
+                }
+                return m_PBRFragSpv;
+            }
         }
         return m_PBRFragSpv;  // not yet registered/loaded: stock this frame, retried next
     }
@@ -431,6 +445,8 @@ namespace Luth
     void GeometrySubsystem::Shutdown()
     {
         LH_PROFILE_FUNCTION();
+        m_GraphShaderNames.clear(); m_GraphFragSpv.clear();
+        m_PBRShaderName.clear(); m_PBRFragSpv.clear(); m_HybridLightingEnabled = false;
         VkDevice device = VulkanContext::Get().GetDevice();
 
         m_SlimGBufferCutoutSkinnedPipeline.reset();
@@ -464,8 +480,19 @@ namespace Luth
                 VulkanContext::Get().PushDeletion([raw]() { delete raw; });
         };
 
+        bool graphMatch = false;
+        for (const auto& [id, key] : m_GraphShaderNames)
+            if (name == key)
+            {
+                m_GraphFragSpv.at(id) = spv;
+                m_GeoPipelineManager.DeferredInvalidateShader(id);
+                m_GeoSkinnedPipelineManager.DeferredInvalidateShader(id);
+                graphMatch = true;
+            }
+        const bool stockFragment = !m_PBRShaderName.empty() && name == m_PBRShaderName;
+        if (graphMatch && !stockFragment) return true;
         if      (name == "pbr_vert.slang")                   m_PBRVertSpv                 = spv;
-        else if (name == "pbr.slang")                  m_PBRFragSpv                 = spv;
+        else if (stockFragment)                  m_PBRFragSpv                 = spv;
         else if (name == "pbr_skinned.slang")           m_PBRSkinnedVertSpv          = spv;
         else if (name == "depthPrepass.slang")          m_DepthPrepassVertSpv        = spv;
         else if (name == "depthPrepass_skinned.slang")  m_DepthPrepassSkinnedVertSpv = spv;
@@ -499,8 +526,7 @@ namespace Luth
         else
         {
             // pbr.*: invalidate the pipeline manager cache, rebuild the manager.
-            const bool isPBR = (name == "pbr_vert.slang" || name == "pbr.slang");
-            if (isPBR) {
+            if (stockFragment) {
                 UUID pbrKey = ShaderLibrary::Get("pbr_vert.slang")->Handle;
                 m_GeoPipelineManager.DeferredInvalidateShader(pbrKey);
                 m_GeoSkinnedPipelineManager.DeferredInvalidateShader(pbrKey);
