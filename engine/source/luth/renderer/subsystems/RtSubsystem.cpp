@@ -17,6 +17,8 @@
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/scene/systems/RenderingSystem.h"
 #include "luth/assets/FileSystem.h"
+#include "luth/assets/AssetManager.h"
+#include "luth/renderer/resources/Model.h"
 #include "luth/core/diagnostics/Log.h"
 #include "luth/core/BuildConfig.h"
 #include "luth/core/FrameData.h"
@@ -464,6 +466,12 @@ namespace Luth
         auto prepared = std::make_shared<PreparedRtScene>();
         prepared->frameIndex = frameIndex;
         prepared->emptyFallback = m_PersistentEmptyTlas;
+        // Request only meshes referenced by this demanded scene. Missing assets retry naturally
+        // on a later frame; repeated instances/views share the mesh's existing native resource.
+        for (const auto& instance : meshes)
+            if (const auto model = AssetManager::GetAsset<Model>(instance.modelUUID))
+                if (const auto mesh = model->GetMesh(instance.meshIndex))
+                    m_MeshResources.Ensure(*mesh, instance.isSkinned || instance.isDeformable);
         prepared->blas[0] = VKAccelerationStructure::PreparePendingStaticBuilds(static_cast<u32>(frameIndex));
         prepared->blas[1] = TlasBuilder::PrepareSkinnedBLASes(meshes, static_cast<u32>(frameIndex));
         if (prepared->blas[0].FirstBuildCount() || prepared->blas[1].FirstBuildCount())

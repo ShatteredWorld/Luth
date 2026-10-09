@@ -5,6 +5,7 @@
 #include <limits>
 #include "luth/renderer/backend/vulkan/TlasBuilder.h"
 #include "luth/renderer/subsystems/RtSubsystem.h"
+#include "luth/renderer/backend/vulkan/VulkanRtMeshResources.h"
 using namespace Luth;
 
 TEST_CASE("MeshDeformation: interleaved current and previous slices preserve absolute frame parity")
@@ -331,4 +332,84 @@ TEST_CASE("MeshDeformation: RT scene records frozen BLAS barrier TLAS exactly on
     const auto secondView = retained;
     secondView->Record(VK_NULL_HANDLE);
     CHECK(events == std::vector<u32>{1, 2, 3});
+}
+
+TEST_CASE("MeshDeformation: RT mesh resources are lazy and shared across scene requests")
+{
+    static u32 rigidCalls, deformableCalls;
+    rigidCalls = deformableCalls = 0;
+    VulkanRtMeshResources resources(
+        [](const Mesh&) { ++rigidCalls; return std::make_shared<VKAccelerationStructure>(); },
+        [](const Mesh& mesh) { ++deformableCalls; return std::make_shared<VKAccelerationStructure>(mesh.GetDeformation()); });
+    Mesh rigid({}, {}, 0, false);
+    Mesh wind({}, {}, 0, false);
+    Mesh skinned({}, {}, 0, true);
+    auto deformation = std::make_shared<VKMeshDeformation>();
+    wind.SetDeformation(deformation);
+    skinned.SetDeformation(std::make_shared<VKMeshDeformation>());
+    CHECK_FALSE(rigid.GetBlas()); CHECK_FALSE(wind.GetBlas()); CHECK_FALSE(skinned.GetBlas());
+    CHECK(rigidCalls == 0); CHECK(deformableCalls == 0);
+    auto first = resources.Ensure(rigid);
+    CHECK(first);
+    CHECK(resources.Ensure(rigid) == first);
+    CHECK(rigidCalls == 1);
+    const auto windBlas = resources.Ensure(wind);
+    CHECK(windBlas);
+    CHECK(windBlas->GetDeformation() == deformation);
+    CHECK(resources.Ensure(wind) == windBlas);
+    CHECK(resources.Ensure(skinned));
+    CHECK(resources.Ensure(skinned) == skinned.GetBlas());
+    CHECK(deformableCalls == 2);
+    wind.SetBlas({});
+    CHECK(wind.GetDeformation() == deformation); // RT release never discards raster deformation.
+}
+
+TEST_CASE("MeshDeformation: failed lazy RT creation retries and existing resources bypass factories")
+{
+    static u32 attempts;
+    attempts = 0;
+    VulkanRtMeshResources resources(
+        [](const Mesh&) -> std::shared_ptr<VKAccelerationStructure> {
+            if (++attempts == 1) return {};
+            return std::make_shared<VKAccelerationStructure>();
+        });
+    Mesh mesh({}, {}, 0, false);
+    CHECK_FALSE(resources.Ensure(mesh));
+    CHECK_FALSE(mesh.GetBlas());
+    CHECK(attempts == 1);
+    auto result = resources.Ensure(mesh);
+    CHECK(result);
+    CHECK(attempts == 2);
+    CHECK(resources.Ensure(mesh) == result);
+    CHECK(attempts == 2);
+    const auto replacement = std::make_shared<VKAccelerationStructure>();
+    mesh.SetBlas(replacement);
+    CHECK(resources.Ensure(mesh) == replacement);
+    CHECK(attempts == 2);
+}
+
+TEST_CASE("MeshDeformation: missing deformation never falls back to rigid RT geometry")
+{
+    static u32 rigidCalls, deformableCalls;
+    rigidCalls = deformableCalls = 0;
+    VulkanRtMeshResources resources(
+        [](const Mesh&) { ++rigidCalls; return std::make_shared<VKAccelerationStructure>(); },
+        [](const Mesh& mesh) -> std::shared_ptr<VKAccelerationStructure> {
+            ++deformableCalls;
+            if (!mesh.GetDeformation()) return {};
+            return std::make_shared<VKAccelerationStructure>(mesh.GetDeformation());
+        });
+    Mesh wind({}, {}, 0, false);
+    CHECK_FALSE(resources.Ensure(wind, true));
+    CHECK_FALSE(wind.GetBlas());
+    CHECK(rigidCalls == 0);
+    CHECK(deformableCalls == 1);
+    const auto deformation = std::make_shared<VKMeshDeformation>();
+    wind.SetDeformation(deformation); // Independent raster allocation becomes available.
+    const auto result = resources.Ensure(wind, true);
+    REQUIRE(result);
+    CHECK(result->GetDeformation() == deformation);
+    CHECK(resources.Ensure(wind) == result);
+    CHECK(rigidCalls == 0);
+    CHECK(deformableCalls == 2);
 }

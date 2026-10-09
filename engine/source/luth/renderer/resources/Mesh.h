@@ -13,7 +13,7 @@ namespace Luth
     // Vertex and index buffer pair, owned by a Model. Each importer mesh primitive becomes one
     // Mesh. Sharing the same Mesh across MeshRenderer components avoids duplicating GPU buffers
     // for identical geometry. Persistent deformation output has independent mesh ownership.
-    // The optional BLAS (built at import on RT-capable backends) is
+    // The optional BLAS (requested lazily by the RT scene service) is
     // referenced by per-frame TLAS instance entries.
     class Mesh
     {

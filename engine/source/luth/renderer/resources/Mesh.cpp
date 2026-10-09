@@ -31,8 +31,7 @@ namespace Luth
         uint32_t vertexCount,
         bool isSkinned)
     {
-        // BLAS construction happens at Model::ProcessMeshData where the CPU SkinnedVertex source
-        // data is available; keeps static + skinned paths uniform at one call site.
+        // Model loading prepares raster resources; the RT domain requests BLAS independently.
         return std::make_shared<Mesh>(vb, ib, vertexCount, isSkinned);
     }
 }

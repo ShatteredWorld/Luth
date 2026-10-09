@@ -2,6 +2,7 @@
 
 #include "luth/core/types/LuthTypes.h"
 #include "luth/renderer/backend/vulkan/TlasBuilder.h"
+#include "luth/renderer/backend/vulkan/VulkanRtMeshResources.h"
 #include "luth/renderer/backend/vulkan/VulkanAllocator.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 #include "luth/renderer/rendergraph/RenderGraphResources.h"
@@ -128,5 +129,6 @@ namespace Luth
         TlasBuildResult m_LastResult{};
         u64             m_BlasReadyGeneration = 0;  // ++ when a deferred BLAS first-builds; forces one TLAS rebuild (H1)
         std::shared_ptr<const PreparedRtScene> m_PreparedScene;
+        VulkanRtMeshResources m_MeshResources;
     };
 }
