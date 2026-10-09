@@ -15,6 +15,7 @@
 #include <vk_mem_alloc.h>
 #include <fstream>
 #include <cstdlib>
+#include <stdexcept>
 
 namespace Luth::RG
 {
@@ -543,7 +544,8 @@ namespace Luth::RG
 
     // ---- State -> Vulkan Mapping ----
 
-    std::pair<VkPipelineStageFlags2, VkAccessFlags2> RenderGraph::GetStateInfo(ResourceState state)
+    std::pair<VkPipelineStageFlags2, VkAccessFlags2> RenderGraph::GetStateInfo(ResourceState state,
+        VulkanBarrierCapabilities capabilities)
     {
         switch (state)
         {
@@ -555,21 +557,20 @@ namespace Luth::RG
             case ResourceState::TransferSrc:            return { VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT };
             case ResourceState::ShaderResource:         return { VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT };
             case ResourceState::Present:                return { VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0 };
-            // Stage mask widened to include RT-pipeline shaders so a raygen-shader storage-image write (or read)
-            // emits a barrier whose srcStage/dstStage matches the actual writer/reader pipeline. Mirrors how
-            // AccelerationStructureRead unions consumer stages.
+            // Include RT-pipeline stages only when enabled. Compute ray queries use
+            // the ordinary compute stage, including on query-only devices.
             case ResourceState::ComputeRead:            return { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                                                              | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                                                              | capabilities.RayTracingShaderStage(),
                                                                 VK_ACCESS_2_SHADER_READ_BIT };
             case ResourceState::ComputeWrite:           return { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                                                              | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                                                              | capabilities.RayTracingShaderStage(),
                                                                 VK_ACCESS_2_SHADER_WRITE_BIT };
             // Storage-image read that must stay GENERAL (imageLoad on a UAV-style storage descriptor).
             // Same stage/access as ComputeRead; only GetLayout differs (GENERAL, no SHADER_READ_ONLY
             // transition), so a ComputeWrite->ComputeReadStorage hand-off emits a RAW barrier with no
             // layout change. Used for storage images threaded across compute passes (SVGF chain).
             case ResourceState::ComputeReadStorage:     return { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                                                              | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                                                              | capabilities.RayTracingShaderStage(),
                                                                 VK_ACCESS_2_SHADER_READ_BIT };
             case ResourceState::StorageBufferRead:      return { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT };
             case ResourceState::StorageBufferWrite:     return { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT };
@@ -579,14 +580,18 @@ namespace Luth::RG
             case ResourceState::FragmentStorageWrite:   return { VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT };
             case ResourceState::IndirectRead:           return { VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT };
             case ResourceState::AccelerationStructureBuild:
+                if (!capabilities.accelerationStructures)
+                    throw std::invalid_argument("AccelerationStructureBuild requires enabled acceleration structures");
                 return { VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                          VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR };
             case ResourceState::AccelerationStructureRead:
+                if (!capabilities.accelerationStructures)
+                    throw std::invalid_argument("AccelerationStructureRead requires enabled acceleration structures");
                 // Superset stage covers ray-query consumers in frag/compute shaders + RT-pipeline raygen reads;
                 // tighten per-pass if a single-consumer case ever warrants it.
                 return { VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
                        | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                       | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                       | capabilities.RayTracingShaderStage(),
                          VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR };
             default:                                    return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0 };
         }
@@ -756,9 +761,30 @@ namespace Luth::RG
         };
     }
 
+    void RenderGraph::ValidateBarrierCapabilities(VulkanBarrierCapabilities capabilities) const
+    {
+        for (const auto& pass : m_Passes)
+        {
+            if (pass.culled) continue;
+            const auto validate = [&](const auto& barriers) {
+                for (const auto& barrier : barriers)
+                {
+                    GetStateInfo(barrier.before, capabilities);
+                    GetStateInfo(barrier.after, capabilities);
+                }
+            };
+            validate(pass.preBarriers);
+            validate(pass.postBarriers);
+            validate(pass.bufferPreBarriers);
+        }
+    }
+
     bool RenderGraph::Execute(QueueRecorders recorders, Luth::GPUTimerPool* timers)
     {
         LH_PROFILE_FUNCTION();
+        const auto barrierCapabilities = VulkanBarrierCapabilities::ForEnabledRtPackage(
+            VulkanContext::Get().SupportsRayTracing());
+        ValidateBarrierCapabilities(barrierCapabilities);
         AllocatePhysicalResources();
 
         // Timer query pool is shared across queues per arch/multi-queue.md (timestampValidBits compatibility
@@ -929,8 +955,8 @@ namespace Luth::RG
             for (const auto& b : pass.preBarriers)
             {
                 ResourceNode& res = m_Resources[b.resource.index - 1];
-                auto [srcStage, srcAccess] = GetStateInfo(b.before);
-                auto [dstStage, dstAccess] = GetStateInfo(b.after);
+                auto [srcStage, srcAccess] = GetStateInfo(b.before, barrierCapabilities);
+                auto [dstStage, dstAccess] = GetStateInfo(b.after, barrierCapabilities);
                 if (b.crossQueueSrc) { srcStage = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT; srcAccess = 0; }
 
                 VkImageMemoryBarrier2& vkBarrier = imgBarriers[imgBarrierCount++];
@@ -950,8 +976,8 @@ namespace Luth::RG
             for (const auto& b : pass.bufferPreBarriers)
             {
                 BufferNode& buf = m_Buffers[b.resource.index - 1];
-                auto [srcStage, srcAccess] = GetStateInfo(b.before);
-                auto [dstStage, dstAccess] = GetStateInfo(b.after);
+                auto [srcStage, srcAccess] = GetStateInfo(b.before, barrierCapabilities);
+                auto [dstStage, dstAccess] = GetStateInfo(b.after, barrierCapabilities);
                 if (b.crossQueueSrc) { srcStage = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT; srcAccess = 0; }
 
                 VkBufferMemoryBarrier2& vkBarrier = bufBarriers[bufBarrierCount++];
@@ -990,8 +1016,8 @@ namespace Luth::RG
                 for (const auto& b : pass.postBarriers)
                 {
                     ResourceNode& res = m_Resources[b.resource.index - 1];
-                    auto [srcStage, srcAccess] = GetStateInfo(b.before);
-                    auto [dstStage, dstAccess] = GetStateInfo(b.after);
+                    auto [srcStage, srcAccess] = GetStateInfo(b.before, barrierCapabilities);
+                    auto [dstStage, dstAccess] = GetStateInfo(b.after, barrierCapabilities);
                     if (b.crossQueueSrc) { srcStage = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT; srcAccess = 0; }
 
                     VkImageMemoryBarrier2& vkBarrier = imgBarriers[imgBarrierCount++];

@@ -6,6 +6,7 @@
 #include "luth/memory/Memory.h"
 #include "luth/jobs/JobSystem.h"
 #include "luth/renderer/backend/vulkan/DynamicRendering.h"
+#include "luth/renderer/backend/vulkan/VulkanBarrierCapabilities.h"
 
 #include <vulkan/vulkan.h>
 #include <vector>
@@ -301,7 +302,9 @@ namespace Luth::RG
         static bool BarrierCapture();
 
         // State -> (stage, access) for barrier emission; public for headless emission tests. see arch/rendering-pipeline.md
-        static std::pair<VkPipelineStageFlags2, VkAccessFlags2> GetStateInfo(ResourceState state);
+        static std::pair<VkPipelineStageFlags2, VkAccessFlags2> GetStateInfo(ResourceState state,
+            VulkanBarrierCapabilities capabilities = {});
+        void ValidateBarrierCapabilities(VulkanBarrierCapabilities capabilities) const;
 
         // Archive sink: invoked after each non-culled pass during Execute. Optional.
         // The sink is responsible for restoring source RT layouts (see IArchiveSink.h).

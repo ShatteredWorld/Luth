@@ -3,6 +3,7 @@
 #include "luth/renderer/settings/WindSettings.h"
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
 #include "luth/renderer/backend/vulkan/VulkanMeshDeformation.h"
+#include "luth/renderer/backend/vulkan/VulkanBarrierCapabilities.h"
 #include "luth/renderer/backend/vulkan/UploadContext.h"
 #include "luth/renderer/resources/BoneMatrixBuffer.h"
 #include "luth/renderer/resources/Mesh.h"
@@ -234,6 +235,10 @@ namespace Luth
         auto windCommands = m_DeformPipeline ? PrepareWind(snapshot, wind, time, frameAbs, retainedMeshes) : std::vector<DeformPC>{};
         const auto* skinPipeline = m_ComputePipeline.get();
         const auto* windPipeline = m_DeformPipeline.get();
+        const auto barrierCapabilities = (skinPipeline || windPipeline)
+            ? VulkanBarrierCapabilities::ForEnabledRtPackage(VulkanContext::Get().SupportsRayTracing())
+            : VulkanBarrierCapabilities{};
+        const auto deformationReadStages = barrierCapabilities.DeformationReadStages();
         const VkDescriptorSet boneSet = skinCommands.empty() ? VK_NULL_HANDLE
             : BoneMatrixBuffer::GetDescriptorSet(frameAbs % MAX_FRAMES_IN_FLIGHT);
         struct DeformData {};
@@ -246,7 +251,7 @@ namespace Luth
                 builder.SetHasSideEffect();
             },
             [skinCommands = std::move(skinCommands), windCommands = std::move(windCommands),
-             retainedMeshes = std::move(retainedMeshes), skinPipeline, windPipeline, boneSet](DeformData&, RG::RenderPassContext& ctx) {
+             retainedMeshes = std::move(retainedMeshes), skinPipeline, windPipeline, boneSet, deformationReadStages](DeformData&, RG::RenderPassContext& ctx) {
                 VkCommandBuffer cmd = ctx.commandBuffer;
                 // Domain pipelines remain alive through recording. No active-view/frame/settings reads.
                 // Repeat per view to preserve the existing vertex-fetch synchronization.
@@ -278,10 +283,7 @@ namespace Luth
                 VkMemoryBarrier2 mem{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
                 mem.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
                 mem.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
-                mem.dstStageMask  = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT
-                                  | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
-                                  | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR
-                                  | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                mem.dstStageMask  = deformationReadStages;
                 mem.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
                 VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
                 dep.memoryBarrierCount = 1;
