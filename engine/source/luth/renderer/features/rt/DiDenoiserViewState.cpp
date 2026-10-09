@@ -1,4 +1,4 @@
-﻿#include "luthpch.h"
+#include "luthpch.h"
 #include "luth/renderer/features/rt/DiDenoiserViewState.h"
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
 #include "luth/renderer/backend/vulkan/VulkanTexture.h"
@@ -6,14 +6,16 @@
 namespace Luth
 {
     std::shared_ptr<DiDenoiserViewState> DiDenoiserViewState::Create(RenderViewId id,
-        const ViewStateConfig& config, const std::array<VkDescriptorSetLayout, 4>& layouts)
+        const ViewStateConfig& config, const std::array<VkDescriptorSetLayout, 4>& layouts, DiDenoiserSignal signal)
     {
+        if (signal != DiDenoiserSignal::Diffuse && signal != DiDenoiserSignal::Specular)
+            throw std::invalid_argument("DI denoiser: invalid signal");
         const auto extent = RestirDiViewState::WorkingExtent(config);
         if (!id.value) throw std::invalid_argument("DI denoiser: invalid view identity");
         for (auto layout : layouts)
             if (!layout) throw std::runtime_error("DI denoiser: native layout unavailable");
         auto state = std::make_shared<DiDenoiserViewState>();
-        state->id = id; state->width = extent[0]; state->height = extent[1];
+        state->signal = signal; state->id = id; state->width = extent[0]; state->height = extent[1];
         state->sourceGeneration = config.resourceGeneration;
         auto texture = [](u32 w, u32 h) {
             return std::make_shared<VKTexture>(w, h, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);

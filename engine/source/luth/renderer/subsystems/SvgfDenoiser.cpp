@@ -86,13 +86,13 @@ namespace Luth
             }
             if (ch == DenoiserChannel::DiSpecular)
             {
-                const bool diSpecHalf = vr.svgfDiSpecHalf && vr.svgfDiSpecColorHist[0] && vr.svgfDiSpecDenoised
-                    && std::static_pointer_cast<VKTexture>(vr.svgfDiSpecColorHist[0])->GetWidth()
-                       < std::static_pointer_cast<VKTexture>(vr.svgfDiSpecDenoised)->GetWidth();
-                return { vr.svgfDiSpecColorHist, vr.svgfDiSpecMoments, vr.svgfDiSpecGeom, vr.svgfDiSpecAtrous,
-                         diSpecHalf ? &vr.svgfDiSpecHalf : &vr.svgfDiSpecDenoised, vr.restirDi ? &vr.restirDi->restirDISpec : nullptr,
-                         &vr.svgfDiSpecPassthroughDescSet, vr.svgfDiSpecReprojectDescSet,
-                         vr.svgfDiSpecMomentsDescSet, vr.svgfDiSpecAtrousDescSet };
+                const auto& state = *vr.diSpecDenoiser;
+                const bool diSpecHalf = state.width != state.svgfDenoised->GetWidth()
+                    || state.height != state.svgfDenoised->GetHeight();
+                return { vr.diSpecDenoiser->svgfColorHist, vr.diSpecDenoiser->svgfMoments, vr.diSpecDenoiser->svgfGeom, vr.diSpecDenoiser->svgfAtrous,
+                         diSpecHalf ? &vr.diSpecDenoiser->svgfDiHalf : &vr.diSpecDenoiser->svgfDenoised, vr.diSpecDenoiser->Noisy(),
+                         &vr.diSpecDenoiser->svgfPassthroughDescSet, vr.diSpecDenoiser->svgfReprojectDescSet,
+                         vr.diSpecDenoiser->svgfMomentsDescSet, vr.diSpecDenoiser->svgfAtrousDescSet };
             }
             if (ch == DenoiserChannel::Gi)
             {
@@ -120,7 +120,7 @@ namespace Luth
     std::shared_ptr<DiDenoiserViewState> SvgfDenoiser::EnsureDiView(RenderViewId id,
         FrameTargets& targets, const std::shared_ptr<RestirDiViewState>& input)
     {
-        if (m_Channel != DenoiserChannel::Di || !m_PassLayout || !m_ReprojectLayout
+        if ((m_Channel != DenoiserChannel::Di && m_Channel != DenoiserChannel::DiSpecular) || !m_PassLayout || !m_ReprojectLayout
             || !m_MomentsLayout || !m_AtrousLayout || !input) return {};
         std::array<std::shared_ptr<Texture>, 5> sources{targets.GetSceneDepth(), targets.GetSlimNormal(),
             targets.GetSlimMotion(), targets.GetSlimMaterialID(), targets.GetSlimRoughness()};
@@ -138,9 +138,11 @@ namespace Luth
             targets.GetSceneColor()->GetHeight(), half, generation);
         return m_DiViews.Ensure(id, config, [&](const ViewStateConfig& c) {
             auto state = DiDenoiserViewState::Create(id, c,
-                {m_PassLayout, m_ReprojectLayout, m_MomentsLayout, m_AtrousLayout});
+                {m_PassLayout, m_ReprojectLayout, m_MomentsLayout, m_AtrousLayout}, m_Channel == DenoiserChannel::Di ? DiDenoiserSignal::Diffuse : DiDenoiserSignal::Specular);
             state->input = input; state->sources = sources; state->sourceViews = views;
-            ViewResources bridge; bridge.diDenoiser = state; bridge.restirDi = input;
+            ViewResources bridge; bridge.restirDi = input;
+            if (m_Channel == DenoiserChannel::Di) bridge.diDenoiser = state;
+            else bridge.diSpecDenoiser = state;
             WriteNativeView(bridge, targets);
             return state;
         }, [] { Renderer::WaitForGPU(); });
@@ -389,7 +391,7 @@ namespace Luth
     void SvgfDenoiser::AllocateViewSets(ViewResources& vr)
     {
         LH_PROFILE_FUNCTION();
-        if (m_Channel == DenoiserChannel::Di || vr.descPool == VK_NULL_HANDLE) return;
+        if (m_Channel == DenoiserChannel::Di || m_Channel == DenoiserChannel::DiSpecular || vr.descPool == VK_NULL_HANDLE) return;
         VkDevice device = VulkanContext::Get().GetDevice();
         ChannelRefs c = Resolve(m_Channel, vr);
         const std::string pfx = (m_Channel == DenoiserChannel::Gi) ? "View.SvgfGi" : "View.Svgf";
@@ -460,7 +462,7 @@ namespace Luth
 
     void SvgfDenoiser::WriteView(ViewResources& vr, FrameTargets& targets)
     {
-        if (m_Channel == DenoiserChannel::Di) return; // Immutable local sets are written by EnsureDiView.
+        if (m_Channel == DenoiserChannel::Di || m_Channel == DenoiserChannel::DiSpecular) return; // Immutable local sets are written by EnsureDiView.
         WriteNativeView(vr, targets);
     }
     void SvgfDenoiser::WriteNativeView(ViewResources& vr, FrameTargets& targets)
@@ -619,7 +621,7 @@ namespace Luth
         if (m_Channel == DenoiserChannel::Di || !in.di.IsValid()) return {};
 
         ViewResources* vr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
-        if (!vr || (m_Channel == DenoiserChannel::Di && !vr->diDenoiser)) return {};
+        if (!vr || (m_Channel == DenoiserChannel::DiSpecular && !vr->diSpecDenoiser)) return {};
         ChannelRefs c = Resolve(m_Channel, *vr);
         if (!*c.denoised) return {};
 

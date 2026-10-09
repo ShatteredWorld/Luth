@@ -77,9 +77,9 @@ TEST_CASE("RestirDiViewState: native pool removes exactly DI bindings from the c
         CHECK(local.sizes[2].type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         CHECK(local.sizes[2].descriptorCount == 3 * frames);
         const DiDenoiserPoolBudget diffuse;
-        CHECK(shared.maxSets + local.maxSets + diffuse.maxSets == 205 - 13 * frames - 16);
-        CHECK(shared.sizes[1].descriptorCount + local.sizes[1].descriptorCount + diffuse.sizes[1].descriptorCount == 248 - 8 * frames - 13);
-        CHECK(shared.sizes[2].descriptorCount + local.sizes[0].descriptorCount + diffuse.sizes[0].descriptorCount == 317 - 25 * frames - 21);
+        CHECK(shared.maxSets + local.maxSets + 2 * diffuse.maxSets == 205 - 13 * frames - 16);
+        CHECK(shared.sizes[1].descriptorCount + local.sizes[1].descriptorCount + 2 * diffuse.sizes[1].descriptorCount == 248 - 8 * frames - 13);
+        CHECK(shared.sizes[2].descriptorCount + local.sizes[0].descriptorCount + 2 * diffuse.sizes[0].descriptorCount == 317 - 25 * frames - 21);
         CHECK(shared.sizes[3].descriptorCount + local.sizes[2].descriptorCount == 126 - 5 * frames - 1);
     }
 }

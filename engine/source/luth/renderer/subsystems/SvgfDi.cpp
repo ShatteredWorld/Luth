@@ -35,7 +35,7 @@ namespace Luth
         DiDenoiserBindings native;
         if (m_Channel != DenoiserChannel::Di || !vr.diDenoiser || !vr.diDenoiser->input) return native;
         const auto& state = *vr.diDenoiser;
-        if (state.id != id || state.input->id != id)
+        if (state.id != id || state.input->id != id || state.signal != DiDenoiserSignal::Diffuse)
             throw std::invalid_argument("DenoiseDI: incompatible native view owner");
         native.retained = vr.diDenoiser; native.settings = settings;
         native.view = id; native.generation = generation; native.frameIndex = frame;

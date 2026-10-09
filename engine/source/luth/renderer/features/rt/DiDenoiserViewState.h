@@ -1,9 +1,10 @@
-﻿#pragma once
+#pragma once
 #include "luth/renderer/features/rt/RestirDiViewState.h"
 
 namespace Luth
 {
-    // One motion-reprojection diffuse channel. Physical ownership only; no RG handles.
+    enum class DiDenoiserSignal { Diffuse, Specular };
+    // One motion-reprojection DI channel. Separate domain instances own separate stores.
     struct DiDenoiserPoolBudget
     {
         std::array<VkDescriptorPoolSize, 2> sizes{{
@@ -20,7 +21,12 @@ namespace Luth
         static ViewStateConfig Config(u32 width, u32 height, bool half, u64 sourceGeneration)
         { return RestirDiViewState::Config(width, height, half, sourceGeneration); }
         static std::shared_ptr<DiDenoiserViewState> Create(RenderViewId, const ViewStateConfig&,
-            const std::array<VkDescriptorSetLayout, 4>&);
+            const std::array<VkDescriptorSetLayout, 4>&, DiDenoiserSignal = DiDenoiserSignal::Diffuse);
+        DiDenoiserSignal signal = DiDenoiserSignal::Diffuse;
+        std::shared_ptr<Texture>* Noisy() const {
+            if (!input) return nullptr;
+            return signal == DiDenoiserSignal::Specular ? &input->restirDISpec : &input->restirDI;
+        }
         RenderViewId id;
         u32 width = 0, height = 0;
         u64 sourceGeneration = 0;

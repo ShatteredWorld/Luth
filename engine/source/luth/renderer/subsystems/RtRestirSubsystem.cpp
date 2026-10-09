@@ -844,7 +844,7 @@ namespace Luth
             vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 4, w, 0, nullptr);
         };
         if (vr.diDenoiser) writeSet(vr.diUpscaleDescSet, vr.diDenoiser->svgfDiHalf, vr.diDenoiser->svgfDenoised);
-        writeSet(vr.diSpecUpscaleDescSet, vr.svgfDiSpecHalf, vr.svgfDiSpecDenoised);
+        if (vr.diSpecDenoiser) writeSet(vr.diSpecUpscaleDescSet, vr.diSpecDenoiser->svgfDiHalf, vr.diSpecDenoiser->svgfDenoised);
     }
 
     RG::ResourceHandle RtRestirSubsystem::AddUpscalePass(RG::RenderGraph& rg, RG::ResourceHandle half,
@@ -855,8 +855,8 @@ namespace Luth
         ViewResources* preflightVr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
         if (!preflightVr) return half;
         const VkDescriptorSet descSet = specular ? preflightVr->diSpecUpscaleDescSet : preflightVr->diUpscaleDescSet;
-        if (!specular && !preflightVr->diDenoiser) return {};
-        const std::shared_ptr<Texture>& outShared = specular ? preflightVr->svgfDiSpecDenoised : preflightVr->diDenoiser->svgfDenoised;
+        if (specular ? !preflightVr->diSpecDenoiser : !preflightVr->diDenoiser) return {};
+        const std::shared_ptr<Texture>& outShared = specular ? preflightVr->diSpecDenoiser->svgfDenoised : preflightVr->diDenoiser->svgfDenoised;
         if (descSet == VK_NULL_HANDLE || !outShared) return half;
 
         struct UpData { RG::ResourceHandle half, depth, normal, out; };
@@ -870,7 +870,7 @@ namespace Luth
                 if (slimNormal.IsValid()) data.normal = builder.ReadStorageImage(slimNormal);
 
                 ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                auto outTex = std::static_pointer_cast<VKTexture>(specular ? vr->svgfDiSpecDenoised : vr->diDenoiser->svgfDenoised);
+                auto outTex = std::static_pointer_cast<VKTexture>(specular ? vr->diSpecDenoiser->svgfDenoised : vr->diDenoiser->svgfDenoised);
                 RG::TextureDesc desc;
                 desc.name   = specular ? "SvgfDiSpecDenoised" : "SvgfDenoised";
                 desc.width  = outTex->GetWidth();
@@ -886,8 +886,8 @@ namespace Luth
                 ViewResources*  vr  = m_Pipeline->GetCurrentViewResources();
                 if (!vr) return;
                 const VkDescriptorSet set = specular ? vr->diSpecUpscaleDescSet : vr->diUpscaleDescSet;
-                auto fullShared = specular ? vr->svgfDiSpecDenoised : vr->diDenoiser->svgfDenoised;
-                auto halfShared = specular ? vr->svgfDiSpecHalf     : vr->diDenoiser->svgfDiHalf;
+                auto fullShared = specular ? vr->diSpecDenoiser->svgfDenoised : vr->diDenoiser->svgfDenoised;
+                auto halfShared = specular ? vr->diSpecDenoiser->svgfDiHalf     : vr->diDenoiser->svgfDiHalf;
                 if (set == VK_NULL_HANDLE || !fullShared || !halfShared) return;
 
                 const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;

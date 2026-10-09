@@ -96,10 +96,10 @@ TEST_CASE("GlobalBindings: raster view pool fits shared layouts without RT descr
             CHECK(size.descriptorCount == required * frames);
         }
         CHECK(hybrid.count == 5);
-        CHECK(hybrid.maxSets == 205 - 14 * frames - 23);
+        CHECK(hybrid.maxSets == 205 - 14 * frames - 30);
         CHECK(hybrid.sizes[0].descriptorCount == 48 - 4 * frames);
-        CHECK(hybrid.sizes[1].descriptorCount == 248 - 10 * frames - 38);
-        CHECK(hybrid.sizes[2].descriptorCount == 317 - 29 * frames - 42);
+        CHECK(hybrid.sizes[1].descriptorCount == 248 - 10 * frames - 63);
+        CHECK(hybrid.sizes[2].descriptorCount == 317 - 29 * frames - 63);
         CHECK(hybrid.sizes[3].descriptorCount == 126 - 8 * frames - 1);
         CHECK(hybrid.sizes[4].type == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
         CHECK(hybrid.sizes[4].descriptorCount == 8);

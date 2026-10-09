@@ -113,6 +113,12 @@ namespace Luth
         vr.diDenoiser = std::move(diDenoiser);
         if (diDenoiserReplaced) vr.generation = m_System.InvalidateView(id);
 
+        auto* specularDenoiser = static_cast<SvgfDenoiser*>(m_DenoiseDiSpec.get());
+        auto diSpecDenoiser = m_RtNativeInitialized ? specularDenoiser->EnsureDiView(id, targets, vr.restirDi) : nullptr;
+        const bool diSpecDenoiserReplaced = vr.diSpecDenoiser && vr.diSpecDenoiser != diSpecDenoiser;
+        vr.diSpecDenoiser = std::move(diSpecDenoiser);
+        if (diSpecDenoiserReplaced) vr.generation = m_System.InvalidateView(id);
+
         if (inserted || vr.descPool == VK_NULL_HANDLE)
         {
             // Borrow the owner's identity; native allocation does not mint a new view.
@@ -144,7 +150,6 @@ namespace Luth
                 m_Reflections.WriteUpscaleView(vr, targets);    // re-bind refl upscale half-input + full output
                 m_DenoiseGi->WriteView(vr, targets);    // re-bind GI SVGF inputs + output to the new images
                 m_DenoiseRefl->WriteView(vr, targets);  // re-bind specular SVGF inputs + output to the new images
-                m_DenoiseDiSpec->WriteView(vr, targets);// re-bind ReSTIR-DI specular SVGF
             }
             m_Lighting.WriteShadowView(vr);         // re-bind Set 3 b4 sun mask + b5 denoised DI + b6 denoised GI
             // Set 0 bindings 1-4 reference the (re)created IBL + GTAO textures.
@@ -154,11 +159,8 @@ namespace Luth
         vr.width  = newW;
         vr.height = newH;
         // Source views can change without an extent change. Refresh the consumer's mask binding.
-        if (shadowReplaced || diDenoiserReplaced) m_Lighting.WriteShadowView(vr);
-        if (diDenoiserReplaced && m_RtNativeInitialized) m_Restir.WriteUpscaleView(vr, targets);
-        if (restirDiReplaced && m_RtNativeInitialized) {
-            m_DenoiseDiSpec->WriteView(vr, targets);
-        }
+        if (shadowReplaced || diDenoiserReplaced || diSpecDenoiserReplaced) m_Lighting.WriteShadowView(vr);
+        if ((diDenoiserReplaced || diSpecDenoiserReplaced) && m_RtNativeInitialized) m_Restir.WriteUpscaleView(vr, targets);
         return vr;
     }
 
@@ -169,6 +171,7 @@ namespace Luth
         m_Volumetric.ReleaseView(id);
         m_Rt.ReleaseShadowView(id);
         static_cast<SvgfDenoiser*>(m_Denoise.get())->ReleaseDiView(id);
+        static_cast<SvgfDenoiser*>(m_DenoiseDiSpec.get())->ReleaseDiView(id);
         m_Restir.ReleaseView(id);
         m_Transparency.ReleaseView(id);
         m_PostProcess.ReleaseTaaView(id);
@@ -280,7 +283,6 @@ namespace Luth
             allocSingle(m_Reflections.GetUpscaleLayout(),    vr.reflUpscaleDescSet,   "View.ReflUpscale");
             m_DenoiseGi->AllocateViewSets(vr);
             m_DenoiseRefl->AllocateViewSets(vr);
-            m_DenoiseDiSpec->AllocateViewSets(vr);
         }
         m_Lighting.WriteShadowView(vr);
         if (m_RtNativeInitialized)
@@ -294,7 +296,6 @@ namespace Luth
             m_Reflections.WriteUpscaleView(vr, targets);    // bind refl upscale half-input + full output
             m_DenoiseGi->WriteView(vr, targets);
             m_DenoiseRefl->WriteView(vr, targets);
-            m_DenoiseDiSpec->WriteView(vr, targets);
         }
         // Global writes borrow the final AO binding from the independent GTAO state.
         m_Global.WriteView(vr, MakeGlobalCtx(*this, vr));
@@ -316,8 +317,8 @@ namespace Luth
         // Half-res DI (RestirSettings::halfResolution): both DI channels (diffuse + specular) trace +
         // denoise at half; svgfDenoised + svgfDiSpecDenoised stay full (the bilateral-upscale outputs).
         const bool diHalf = m_System.GetRestirSettings().halfResolution;
-        const u32  diW    = diHalf ? halfW : fullW;
-        const u32  diH    = diHalf ? halfH : fullH;
+
+
         vr.diHalfCached   = diHalf ? 1u : 0u;
 
         // Half-res reflections (ReflectionsSettings::halfResolution): reflRadiance trace output + svgfSpec*
@@ -385,20 +386,6 @@ namespace Luth
         vr.svgfSpecAtrous[0] = std::make_shared<VKTexture>(reflW, reflH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
         vr.svgfSpecAtrous[1] = std::make_shared<VKTexture>(reflW, reflH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
 
-        // ReSTIR-DI specular SVGF history: flat parallel to the reflection-spec SVGF above.
-        // Bootstrap-cleared below (cross-frame temporal read).
-        vr.svgfDiSpecDenoised = std::make_shared<VKTexture>(fullW, fullH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-        for (u32 i = 0; i < 2; ++i)
-        {
-            vr.svgfDiSpecColorHist[i] = std::make_shared<VKTexture>(diW, diH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-            vr.svgfDiSpecMoments[i]   = std::make_shared<VKTexture>(diW, diH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-            vr.svgfDiSpecGeom[i]      = std::make_shared<VKTexture>(diW, diH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-        }
-        vr.svgfDiSpecAtrous[0] = std::make_shared<VKTexture>(diW, diH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-        vr.svgfDiSpecAtrous[1] = std::make_shared<VKTexture>(diW, diH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-        // Half-res DI specular a-trous final (upscale input); svgfDiSpecDenoised stays full.
-        vr.svgfDiSpecHalf = std::make_shared<VKTexture>(diW, diH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-
         // ReSTIR GI scratch reservoir: same lifecycle as the DI one but 64 B/pixel (a GIReservoir is
         // a world-space path vertex). Tags from the GI subsystem's disjoint 0xFFFF8000 range.
         if (vr.restirGiReservoirTag != 0)
@@ -424,7 +411,7 @@ namespace Luth
         // pixel content. The SVGF reproject
         // imageLoads its prev history on frame 0; without this clear the first read is NaN-prone garbage
         // (and imageLoad needs GENERAL). One-shot submit per view-resize only.
-        VkImage clearTargets[25] = {
+        VkImage clearTargets[17] = {
             // GI SVGF history: bootstrap-cleared so frame 0's prev imageLoad is well-defined.
             std::static_pointer_cast<VKTexture>(vr.svgfGiColorHist[0])->GetImage(),
             std::static_pointer_cast<VKTexture>(vr.svgfGiColorHist[1])->GetImage(),
@@ -445,17 +432,8 @@ namespace Luth
             std::static_pointer_cast<VKTexture>(vr.svgfSpecGeom[1])->GetImage(),
             std::static_pointer_cast<VKTexture>(vr.svgfSpecAtrous[0])->GetImage(),
             std::static_pointer_cast<VKTexture>(vr.svgfSpecAtrous[1])->GetImage(),
-            // ReSTIR-DI specular SVGF history: frame 0's prev imageLoad must be well-defined.
-            std::static_pointer_cast<VKTexture>(vr.svgfDiSpecColorHist[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfDiSpecColorHist[1])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfDiSpecMoments[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfDiSpecMoments[1])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfDiSpecGeom[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfDiSpecGeom[1])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfDiSpecAtrous[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfDiSpecAtrous[1])->GetImage(),
         };
-        constexpr u32 kClearCount = 25;
+        constexpr u32 kClearCount = 17;
         VulkanContext::Get().ImmediateSubmit([&](VkCommandBuffer cmd) {
             VkImageMemoryBarrier toDst[kClearCount]{};
             for (u32 i = 0; i < kClearCount; ++i)
@@ -514,7 +492,7 @@ namespace Luth
         vr.svgfGiDenoised.reset();
         vr.svgfGiHalf.reset();
 
-        vr.svgfDiSpecHalf.reset();
+
         for (u32 i = 0; i < 2; ++i)
         {
             vr.svgfGiColorHist[i].reset();
@@ -536,15 +514,7 @@ namespace Luth
         }
         vr.svgfSpecAtrous[0].reset();
         vr.svgfSpecAtrous[1].reset();
-        vr.svgfDiSpecDenoised.reset();
-        for (u32 i = 0; i < 2; ++i)
-        {
-            vr.svgfDiSpecColorHist[i].reset();
-            vr.svgfDiSpecMoments[i].reset();
-            vr.svgfDiSpecGeom[i].reset();
-        }
-        vr.svgfDiSpecAtrous[0].reset();
-        vr.svgfDiSpecAtrous[1].reset();
+        vr.diSpecDenoiser.reset();
         // ReSTIR GI reserved-range tags: same deferred-destroy path as the DI tags above.
         if (vr.restirGiReservoirTag != 0)
         {

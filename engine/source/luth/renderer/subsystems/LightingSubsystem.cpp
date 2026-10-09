@@ -408,12 +408,12 @@ namespace Luth
             reflImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
 
-        // Binding 8: post-denoise ReSTIR-DI specular. Bound to vr.svgfDiSpecDenoised; pbr.frag
+        // Binding 8: post-denoise ReSTIR-DI specular. Bound to vr.diSpecDenoiser->svgfDenoised; pbr.frag
         // adds it under restirParams.z. GeometryPass's Read transitions it to SHADER_READ_ONLY.
         VkDescriptorImageInfo diSpecImgInfo{};
-        if (m_HybridSignalsEnabled && vr.svgfDiSpecDenoised)
+        if (m_HybridSignalsEnabled && vr.diSpecDenoiser && vr.diSpecDenoiser->svgfDenoised)
         {
-            auto vkDiSpec = std::static_pointer_cast<VKTexture>(vr.svgfDiSpecDenoised);
+            auto vkDiSpec = std::static_pointer_cast<VKTexture>(vr.diSpecDenoiser->svgfDenoised);
             diSpecImgInfo.sampler     = m_SunShadowMaskSampler;
             diSpecImgInfo.imageView   = vkDiSpec->GetImageView();
             diSpecImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

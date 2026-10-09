@@ -193,7 +193,7 @@ namespace Luth
         // Half-res DI (both channels): a-trous finals write svgfDiHalf / svgfDiSpecHalf; bilateral upscales
         // resolve them into the full-res svgfDenoised / svgfDiSpecDenoised. diHalfCached drives realloc.
 
-        std::shared_ptr<Texture> svgfDiSpecHalf;
+
         u32 diHalfCached = ~0u;
         VkDescriptorSet diUpscaleDescSet     = VK_NULL_HANDLE;   // half-res DI diffuse upscale set
         VkDescriptorSet diSpecUpscaleDescSet = VK_NULL_HANDLE;   // half-res DI specular upscale set
@@ -221,15 +221,7 @@ namespace Luth
         // (direct point-light specular is surface-attached, not a reflection's virtual image, so it reuses
         // svgf_reproject.slang, not the hit-distance spec variant); svgfDiSpecDenoised feeds pbr.frag Set 3
         // b8. Same shapes/clears as the GI SVGF. see arch/rendering-pipeline.md
-        std::shared_ptr<Texture> svgfDiSpecDenoised;
-        VkDescriptorSet svgfDiSpecPassthroughDescSet = VK_NULL_HANDLE;
-        std::shared_ptr<Texture> svgfDiSpecColorHist[2];
-        std::shared_ptr<Texture> svgfDiSpecMoments[2];
-        std::shared_ptr<Texture> svgfDiSpecGeom[2];
-        VkDescriptorSet svgfDiSpecReprojectDescSet[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-        std::shared_ptr<Texture> svgfDiSpecAtrous[2];
-        VkDescriptorSet svgfDiSpecMomentsDescSet[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-        VkDescriptorSet svgfDiSpecAtrousDescSet[2]  = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+        std::shared_ptr<DiDenoiserViewState> diSpecDenoiser; // Borrowed specular-channel state.
 
         // Path-traced reference mode. ptAccum = viewport-sized RGBA32F STORAGE, the
         // in-place fp32 progressive running mean, kept GENERAL, only ever touched by the PT megakernel
