@@ -14,10 +14,8 @@
 #include "luth/renderer/resources/Texture.h"
 #include "luth/renderer/shader/ShaderCompiler.h"
 #include "luth/renderer/shader/ShaderLibrary.h"
-#include "luth/renderer/subsystems/SkinningSubsystem.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/scene/systems/RenderingSystem.h"
-#include "luth/scene/systems/SystemRegistry.h"
 #include "luth/assets/FileSystem.h"
 #include "luth/core/diagnostics/Log.h"
 #include "luth/core/BuildConfig.h"
@@ -228,7 +226,7 @@ namespace Luth
         }
 
         // Final per-frame TLAS: push to deletion so FlushAllDeletionQueues catches it on shutdown.
-        // The hash-skip path inside AddTlasBuildPass only pushes when REPLACING the slot, so a
+        // The hash-skip path inside PrepareScene only pushes when REPLACING the slot, so a
         // long-stable m_LastResult lives until shutdown without ever being deferred.
         if (m_LastResult.tlas != VK_NULL_HANDLE)
         {
@@ -246,7 +244,7 @@ namespace Luth
             });
         }
         m_LastResult = {};
-        m_LastBuildFrame = ~u64(0);
+        m_PreparedScene.reset();
         m_Pipeline = nullptr;
     }
 
@@ -441,89 +439,69 @@ namespace Luth
         return outputHandle;
     }
 
+    void PreparedRtScene::Record(VkCommandBuffer cmd) const
+    {
+        if (recorded) return;
+        for (const auto& batch : blas) batch.Record(cmd);
+        // Preserve BLAS/refit-write -> TLAS-build-read synchronization and submission routing.
+        VkMemoryBarrier2 memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        memory.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        memory.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        memory.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        memory.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dependency.memoryBarrierCount = 1;
+        dependency.pMemoryBarriers = &memory;
+        barrier(cmd, &dependency);
+        tlas.Record(cmd);
+        recorded = true;
+    }
+
+    std::shared_ptr<const PreparedRtScene> RtSubsystem::PrepareScene(std::span<const MeshDrawSnapshot> meshes, u64 frameIndex,
+        const std::unordered_map<UUID, u32, UUIDHash>& materialSlots, bool markEmitters)
+    {
+        if (IsPreparedFor(frameIndex)) return m_PreparedScene;
+        auto prepared = std::make_shared<PreparedRtScene>();
+        prepared->frameIndex = frameIndex;
+        prepared->emptyFallback = m_PersistentEmptyTlas;
+        prepared->blas[0] = VKAccelerationStructure::PreparePendingStaticBuilds(static_cast<u32>(frameIndex));
+        prepared->blas[1] = TlasBuilder::PrepareSkinnedBLASes(meshes, static_cast<u32>(frameIndex));
+        if (prepared->blas[0].FirstBuildCount() || prepared->blas[1].FirstBuildCount())
+            ++m_BlasReadyGeneration;
+        // Interrupted graph construction must never reuse a TLAS whose build did not record.
+        const auto previous = m_PreparedScene ? m_PreparedScene->ReuseCandidate() : m_LastResult;
+        prepared->tlas = TlasBuilder::PrepareTlas(meshes, static_cast<u32>(frameIndex),
+            previous, materialSlots, m_BlasReadyGeneration, markEmitters, prepared->blas);
+        const auto& fresh = prepared->tlas.result;
+        if (!fresh.reused && m_LastResult.tlas != VK_NULL_HANDLE)
+        {
+            const auto old = m_LastResult;
+            VulkanContext::Get().PushDeletion([old]() {
+                auto& context = VulkanContext::Get();
+                context.GetRtFn().vkDestroyAccelerationStructureKHR(context.GetDevice(), old.tlas, nullptr);
+                if (old.storageBuffer != VK_NULL_HANDLE)
+                    VulkanAllocator::FreeBuffer(old.storageBuffer, old.storageAlloc);
+                if (old.geomTableBuffer != VK_NULL_HANDLE)
+                    VulkanAllocator::FreeBuffer(old.geomTableBuffer, old.geomTableAlloc);
+            });
+        }
+        // Publish the pair before global descriptors and parallel recording consume it.
+        m_LastResult = fresh;
+        m_PreparedScene = std::move(prepared);
+        return m_PreparedScene;
+    }
+
     void RtSubsystem::AddTlasBuildPass(RG::RenderGraph& rg)
     {
         LH_PROFILE_FUNCTION();
+        if (!m_PreparedScene) throw std::logic_error("RT scene must be prepared before graph construction");
         struct TlasBuildData {};
+        const auto prepared = m_PreparedScene;
         rg.AddComputePass<TlasBuildData>(
-            "TlasBuild",
-            RG::QueueFamily::AsyncCompute,
-            [&](TlasBuildData&, RG::RenderPassBuilder& builder) {
-                // No RG-tracked resources: all per-frame allocations live outside the RG (per-frame VMA +
-                // PushDeletion / tagged-heap large-one-shot scratch). The pass's actual output
-                // (m_LastResult.tlas -> Set 0 binding 6 via UpdateUBO) is an engine-side side effect;
-                // SetHasSideEffect keeps the pass alive through CullDeadPasses (which otherwise drops
-                // passes with no Write/Read).
-                builder.SetHasSideEffect();
-            },
-            [this](TlasBuildData&, RG::RenderPassContext& ctx) {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                const u64 frameAbs = Renderer::GetFrameData()->GetRenderFrameIndex();
-
-                // Multi-view guard: Execute runs per view; TLAS is scene-global. Second view
-                // returns the same m_LastResult.tlas without re-recording any GPU commands.
-                if (m_LastBuildFrame == frameAbs) return;
-                m_LastBuildFrame = frameAbs;
-
-                auto* rs = SystemRegistry::GetSystem<RenderingSystem>();
-                if (!rs) return;
-                const RenderSnapshot& snapshot = rs->GetActiveSnapshot();
-
-                // Skinning now runs in SkinningSubsystem::AddDeformPass at frame start (graphics queue);
-                // the deformed buffers are ready for both raster and this refit. The gA->compute timeline
-                // semaphore makes the deform writes visible to this async-compute refit; no inline
-                // compute-write barrier here. see arch/multi-queue.md
-
-                // Deferred static BLAS builds: record the MODE_BUILD for every queued static mesh whose
-                // VB/IB upload has retired. Batched on this async-compute cmd before the refit + TLAS
-                // build; the AS-build -> AS-read barrier below covers both writer steps.
-                const u32 staticBuilt = VKAccelerationStructure::DrainPendingStaticBuilds(cmd, static_cast<u32>(frameAbs));
-
-                // Batched skinned refits + deformable first-builds: one vkCmdBuildAccelerationStructuresKHR
-                // call, N infos sharing one scratch (per-mesh sub-regions, no overlap).
-                const u32 refitBuilt = TlasBuilder::RefitSkinnedBLASes(cmd, snapshot.meshes, static_cast<u32>(frameAbs));
-
-                // A first-build this frame (static or deformable) advances the ready-generation so BuildTlas
-                // rebuilds once to fold the now-ready BLAS in (its instance hash is otherwise unchanged).
-                if (staticBuilt != 0u || refitBuilt != 0u) ++m_BlasReadyGeneration;
-
-                // Refit-write -> TLAS-build-read barrier. Same shape as above; the TLAS build
-                // reads the freshly-refitted BLAS device addresses through the instance buffer.
-                VkMemoryBarrier2 mem2{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-                mem2.srcStageMask  = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
-                mem2.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-                mem2.dstStageMask  = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
-                mem2.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-                VkDependencyInfo dep2{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-                dep2.memoryBarrierCount = 1;
-                dep2.pMemoryBarriers    = &mem2;
-                vkCmdPipelineBarrier2(cmd, &dep2);
-
-                // TLAS build with hash-skip. When skip fires, prior TLAS + storage + geom table stay
-                // alive; PushDeletion only fires when an actual rebuild replaces them. The geom table
-                // shares the TLAS lifetime exactly (same retire schedule).
-                // Emissive area lights: mark emitter instances in the geometry table when the feature and
-                // ReSTIR DI are both on (DI then owns their direct lighting; GI drops the on-hit seed).
-                const bool markEmitters = rs->GetEmissiveLightSettings().enabled && rs->GetRestirSettings().enabled;
-                TlasBuildResult fresh = TlasBuilder::BuildTlas(
-                    cmd, snapshot.meshes, static_cast<u32>(frameAbs), m_LastResult,
-                    m_Pipeline->GetMaterialSlotMap(), m_BlasReadyGeneration, markEmitters);
-                if (!fresh.reused && m_LastResult.tlas != VK_NULL_HANDLE)
-                {
-                    auto old       = m_LastResult.tlas;
-                    auto oldBuf    = m_LastResult.storageBuffer;
-                    auto oldAlloc  = m_LastResult.storageAlloc;
-                    auto oldGeom   = m_LastResult.geomTableBuffer;
-                    auto oldGeomAl = m_LastResult.geomTableAlloc;
-                    VulkanContext::Get().PushDeletion([old, oldBuf, oldAlloc, oldGeom, oldGeomAl]() {
-                        auto& ctx2 = VulkanContext::Get();
-                        if (old != VK_NULL_HANDLE)
-                            ctx2.GetRtFn().vkDestroyAccelerationStructureKHR(ctx2.GetDevice(), old, nullptr);
-                        if (oldBuf != VK_NULL_HANDLE)  VulkanAllocator::FreeBuffer(oldBuf, oldAlloc);
-                        if (oldGeom != VK_NULL_HANDLE) VulkanAllocator::FreeBuffer(oldGeom, oldGeomAl);
-                    });
-                }
-                m_LastResult = fresh;
+            "TlasBuild", RG::QueueFamily::AsyncCompute,
+            [](TlasBuildData&, RG::RenderPassBuilder& builder) { builder.SetHasSideEffect(); },
+            [prepared](TlasBuildData&, RG::RenderPassContext& context) {
+                prepared->Record(context.commandBuffer);
             });
     }
 }

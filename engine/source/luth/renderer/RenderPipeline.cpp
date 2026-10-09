@@ -438,6 +438,20 @@ namespace Luth
         m_System.RefreshViewDebugOutputs(m_System.GetViews().Find(&m_System.GetSceneTargets()), m_System.GetSceneTargets());
     }
 
+    void RenderPipeline::PrepareRtScene(const RenderView& view, const DirectionalLightShadowParams& shadows)
+    {
+        m_ViewRequiresRtScene = false;
+        if (!m_RtNativeInitialized) return;
+        const bool demanded = (shadows.mode == ShadowingMode::RtShadows && shadows.castShadows)
+            || m_Restir.IsEnabled() || m_RestirGi.IsEnabled() || m_PathTrace.IsEnabled() || m_Reflections.IsEnabled()
+            || (view.camera.enableVolumetricFog && m_Volumetric.IsRtShadowsEnabled());
+        if (!demanded) return;
+        m_ViewRequiresRtScene = true;
+        const bool markEmitters = m_System.GetEmissiveLightSettings().enabled && m_System.GetRestirSettings().enabled;
+        m_Rt.PrepareScene(m_System.GetActiveSnapshot().meshes, Renderer::GetFrameData()->GetRenderFrameIndex(),
+            GetMaterialSlotMap(), markEmitters);
+    }
+
     void RenderPipeline::PrepareForTargets(FrameTargets& targets)
     {
         m_CurrentViewResources = &EnsureViewResources(targets);
@@ -472,6 +486,7 @@ namespace Luth
         // pass so raster geometry (gA) reads the current-frame deformation. Decoupled from needTlas:
         // raster always needs it, even when no RT consumer builds a TLAS this frame.
         const bool ptEnabled = m_PathTrace.IsEnabled() && m_CurrentViewResources
+                            && m_Rt.IsPreparedFor(Renderer::GetFrameData()->GetRenderFrameIndex())
                             && m_Rt.GetTlas() != VK_NULL_HANDLE;
         VisibilityParameters visibilityParams;
         visibilityParams.cameraPlanes = CreateFrustumFromCamera(m_Global.GetCachedViewProj()).planes;
@@ -663,7 +678,7 @@ namespace Luth
         const Memory::GPUSubRegion lightIndexRegion = lightIndices.binding.slice ? *lightIndices.binding.slice : Memory::GPUSubRegion{};
         m_Lighting.WriteSet3PerView(lightSSBORegion, clusterGridRegion, lightIndexRegion);
         // RT acceleration structures: per-frame skinning + skinned BLAS refit + TLAS build, on AsyncCompute.
-        // Built BEFORE the volumetric chain so the inject-scatter pass's RT fog-shadow rayQuery reads a BUILT TLAS;
+        // Prepared before global descriptor writes; recorded BEFORE the volumetric chain so its rayQuery reads a BUILT TLAS.
         // passes execute in registration order on the shared compute primary; the inline AS barrier gives memory visibility,
         // not execution ordering. Multi-view guard inside RtSubsystem short-circuits the second view (TLAS is scene-global).
         const bool runRtShadows = m_RtNativeInitialized && (m_Global.GetShadowParams().mode == ShadowingMode::RtShadows)
@@ -671,11 +686,9 @@ namespace Luth
         // Per-view fog toggle: also gates the volumetric term in needTlas, so a fog-off view doesn't
         // build a TLAS the (then-unregistered) scatter pass would never read.
         const bool volumetricEnabled = view.camera.enableVolumetricFog;
-        // Build the TLAS whenever ANY RT consumer needs it: RT shadows / ReSTIR DI/GI / PathTrace /
-        // reflections / volumetric RT fog shadows. The RT sun-shadow trace below stays runRtShadows-only.
-        const bool needTlas = m_RtNativeInitialized && (runRtShadows || m_Restir.IsEnabled() || m_RestirGi.IsEnabled()
-                            || m_PathTrace.IsEnabled() || m_Reflections.IsEnabled()
-                            || (volumetricEnabled && m_Volumetric.IsRtShadowsEnabled()));
+        // Preserve the per-view demand decision frozen before uniform writes. The scene-global
+        // packet is shared, while views with no RT consumers still register no scene-build pass.
+        const bool needTlas = m_ViewRequiresRtScene && m_Rt.IsPreparedFor(Renderer::GetFrameData()->GetRenderFrameIndex());
         if (needTlas)
             m_Rt.AddTlasBuildPass(rg);
 

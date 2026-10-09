@@ -393,6 +393,7 @@ namespace Luth
 
         // Must precede the per-view UBO writes below; they read m_CurrentViewResources, which PrepareForTargets sets.
         m_Pipeline->PrepareForTargets(*view.targets);
+        m_Pipeline->PrepareRtScene(view, lighting->GetShadowParams());
 
         // Light UBO (Set 3) is hoisted to Update: view-independent, and a single global Set 3 would
         // race across views otherwise.

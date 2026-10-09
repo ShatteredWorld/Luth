@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <array>
 #include <vulkan/vulkan.h>
 
 namespace Luth
@@ -17,6 +18,29 @@ namespace Luth
     class FrameTargets;
     struct ViewResources;
     namespace RG { class RenderGraph; }
+
+    // Frame-local native scene packet. Recording is serialized on the existing compute primary.
+    // Valid empty fallback and populated scene bindings are distinct states.
+    struct PreparedRtScene
+    {
+        PreparedRtScene() = default;
+        PreparedRtScene(const PreparedRtScene&) = delete;
+        PreparedRtScene& operator=(const PreparedRtScene&) = delete;
+        u64 frameIndex = 0;
+        std::array<PreparedBlasBuild, 2> blas;
+        PreparedTlasBuild tlas;
+        VkAccelerationStructureKHR emptyFallback = VK_NULL_HANDLE;
+        PFN_vkCmdPipelineBarrier2 barrier = vkCmdPipelineBarrier2;
+        mutable bool recorded = false;
+        VkAccelerationStructureKHR GetTlas() const
+        { return tlas.result.tlas != VK_NULL_HANDLE ? tlas.result.tlas : emptyFallback; }
+        VkDeviceAddress GetGeometryTableBDA() const { return tlas.result.geomTableBDA; }
+        bool HasSceneData() const
+        { return tlas.result.instanceCount != 0 && tlas.result.tlas != VK_NULL_HANDLE && tlas.result.geomTableBDA != 0; }
+        TlasBuildResult ReuseCandidate() const
+        { return recorded ? tlas.result : TlasBuildResult{}; }
+        void Record(VkCommandBuffer) const;
+    };
 
     // Houses RT-domain state: per-frame TLAS rebuild + skinned-BLAS refit on AsyncCompute with
     // hash-based dirty skip and a multi-view guard, plus the sun-shadow surface:
@@ -34,9 +58,13 @@ namespace Luth
 
         bool OnShaderReloaded(const std::string& name, const std::vector<u32>& spv);
 
-        // Registers the AsyncCompute pass: SkinningSubsystem::DispatchAllSkinned ->
-        // TlasBuilder::RefitSkinnedBLASes -> TlasBuilder::BuildTlas. Snapshot is read through
-        // RenderingSystem::GetActiveSnapshot() inside the execute body.
+        // CPU preparation must precede all per-view descriptor writes and recording.
+        // Repeated views of the same render frame share one paired scene packet.
+        std::shared_ptr<const PreparedRtScene> PrepareScene(std::span<const MeshDrawSnapshot>, u64 frameIndex,
+            const std::unordered_map<UUID, u32, UUIDHash>& materialSlots, bool markEmitters);
+        bool IsPreparedFor(u64 frameIndex) const
+        { return m_PreparedScene && m_PreparedScene->frameIndex == frameIndex; }
+        // Captures the prepared packet; recording performs no global/domain lookups or allocation.
         void AddTlasBuildPass(RG::RenderGraph& rg);
 
         // Registers the RT sun-shadow compute pass on AsyncCompute. Imports the per-view sunShadowMask
@@ -59,7 +87,7 @@ namespace Luth
 
         VkDescriptorSetLayout GetShadowPassLayout() const { return m_ShadowPassSetLayout; }
 
-        // Returns per-frame TLAS once TlasBuildPass has populated it; otherwise the persistent
+        // Returns the paired CPU-prepared TLAS before recording; otherwise the persistent
         // empty TLAS so Set 0 binding 6 is never null. Keeping them as separate fields prevents
         // the hash-skip PushDeletion in AddTlasBuildPass from accidentally destroying the
         // persistent handle when a per-frame TLAS first replaces it.
@@ -77,9 +105,9 @@ namespace Luth
         void BuildShadowPipeline();
 
         // Frame-0 binding-6 safety: built at Init, kept alive until Shutdown. The persistent
-        // empty TLAS handle is seeded into m_LastResult.tlas so GlobalSubsystem::UpdateUBO's
-        // existing `if (tlas != VK_NULL_HANDLE)` write always fires; per-frame TlasBuildPass
-        // overwrites m_LastResult once the scene has meshes, but m_PersistentEmptyTlas + its
+        // empty TLAS is separate from m_LastResult; PrepareScene publishes a populated pair
+        // or keeps the valid empty fallback before GlobalSubsystem::UpdateUBO writes bindings.
+        // m_PersistentEmptyTlas + its
         // storage buffer stay alive (the deletion-queue retires per-frame TLAS handles fenced
         // on N+2; the persistent handle has no fence and outlives them all).
         VkAccelerationStructureKHR m_PersistentEmptyTlas      = VK_NULL_HANDLE;
@@ -99,8 +127,6 @@ namespace Luth
         RenderPipeline* m_Pipeline      = nullptr;
         TlasBuildResult m_LastResult{};
         u64             m_BlasReadyGeneration = 0;  // ++ when a deferred BLAS first-builds; forces one TLAS rebuild (H1)
-        u64             m_LastBuildFrame = ~u64(0);  // TLAS is scene-global; guard short-circuits the
-                                                     // second view's rebuild. RT shadow trace is per-view
-                                                     // (each view's depth/camera/mask differ) so no guard.
+        std::shared_ptr<const PreparedRtScene> m_PreparedScene;
     };
 }

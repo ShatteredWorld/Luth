@@ -4,6 +4,7 @@
 #include "luth/renderer/resources/Mesh.h"
 #include <limits>
 #include "luth/renderer/backend/vulkan/TlasBuilder.h"
+#include "luth/renderer/subsystems/RtSubsystem.h"
 using namespace Luth;
 
 TEST_CASE("MeshDeformation: interleaved current and previous slices preserve absolute frame parity")
@@ -262,4 +263,72 @@ TEST_CASE("MeshDeformation: abandoned BLAS batches retry without publishing reco
     CHECK(empty.FirstBuildCount() == 0);
     CHECK_FALSE(empty.IsScheduled(target.get(), 0));
     CHECK_NOTHROW(empty.Record(VK_NULL_HANDLE));
+}
+
+TEST_CASE("MeshDeformation: RT scene preparation shares paired bindings across views and refreshes next frame")
+{
+    RtSubsystem rt;
+    const std::unordered_map<UUID, u32, UUIDHash> slots;
+    CHECK_FALSE(rt.IsPreparedFor(3));
+    const auto first = rt.PrepareScene({}, 3, slots, false);
+    CHECK(rt.IsPreparedFor(3));
+    CHECK_FALSE(first->recorded);
+    CHECK_FALSE(first->HasSceneData());
+    CHECK(first->GetTlas() == rt.GetTlas());
+    CHECK(first->GetGeometryTableBDA() == rt.GetGeometryTableBDA());
+    CHECK(rt.PrepareScene({}, 3, slots, false) == first);
+    const auto next = rt.PrepareScene({}, 4, slots, false);
+    CHECK(next != first);
+    CHECK(rt.IsPreparedFor(4));
+    CHECK_FALSE(rt.IsPreparedFor(3));
+    CHECK(first->frameIndex == 3);
+    CHECK(next->frameIndex == 4);
+}
+
+TEST_CASE("MeshDeformation: RT scene records frozen BLAS barrier TLAS exactly once")
+{
+    static std::vector<u32> events;
+    events.clear();
+    auto blas = std::make_shared<BlasBuildCommand>();
+    blas->infos.resize(1); blas->ranges.resize(1); blas->rangePtrs = {&blas->ranges[0]};
+    blas->record = [](VkCommandBuffer, uint32_t,
+        const VkAccelerationStructureBuildGeometryInfoKHR*,
+        const VkAccelerationStructureBuildRangeInfoKHR* const*) { events.push_back(1); };
+    auto tlas = std::make_shared<TlasBuildCommand>();
+    tlas->record = [](VkCommandBuffer, uint32_t,
+        const VkAccelerationStructureBuildGeometryInfoKHR*,
+        const VkAccelerationStructureBuildRangeInfoKHR* const*) { events.push_back(3); };
+    auto scene = std::make_shared<PreparedRtScene>();
+    scene->blas[0].commands = {blas};
+    scene->tlas.command = tlas;
+    scene->emptyFallback = reinterpret_cast<VkAccelerationStructureKHR>(uintptr_t(7));
+    CHECK(scene->GetTlas() == scene->emptyFallback);
+    CHECK_FALSE(scene->HasSceneData());
+    scene->tlas.result.tlas = reinterpret_cast<VkAccelerationStructureKHR>(uintptr_t(11));
+    scene->tlas.result.geomTableBDA = 29;
+    scene->tlas.result.instanceCount = 1;
+    CHECK(scene->HasSceneData());
+    CHECK(scene->GetTlas() == scene->tlas.result.tlas);
+    CHECK(scene->GetGeometryTableBDA() == 29);
+    CHECK(scene->ReuseCandidate().tlas == VK_NULL_HANDLE);
+    CHECK(scene->ReuseCandidate().geomTableBDA == 0);
+    scene->barrier = [](VkCommandBuffer, const VkDependencyInfo* dependency) {
+        events.push_back(2);
+        REQUIRE(dependency->memoryBarrierCount == 1);
+        const auto& memory = *dependency->pMemoryBarriers;
+        CHECK(memory.srcStageMask == VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR);
+        CHECK(memory.srcAccessMask == VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
+        CHECK(memory.dstStageMask == VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR);
+        CHECK(memory.dstAccessMask == VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+    };
+    std::shared_ptr<const PreparedRtScene> retained = scene;
+    blas.reset(); tlas.reset(); scene.reset();
+    retained->Record(VK_NULL_HANDLE);
+    CHECK(events == std::vector<u32>{1, 2, 3});
+    CHECK(retained->recorded);
+    CHECK(retained->ReuseCandidate().tlas == retained->GetTlas());
+    CHECK(retained->ReuseCandidate().geomTableBDA == retained->GetGeometryTableBDA());
+    const auto secondView = retained;
+    secondView->Record(VK_NULL_HANDLE);
+    CHECK(events == std::vector<u32>{1, 2, 3});
 }

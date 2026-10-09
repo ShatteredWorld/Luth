@@ -339,6 +339,7 @@ namespace Luth
         // Cache m_CurrentViewResources before the per-view UBO writes in RenderingSystem::RecordView run
         // (they read it). Safe to call every frame; only re-allocates on target-size change.
         void PrepareForTargets(FrameTargets& targets);
+        void PrepareRtScene(const RenderView&, const DirectionalLightShadowParams&);
 
         // Reload the environment HDR -> irradiance + prefiltered cubemaps + BRDF LUT.
         void ReloadSkybox(const fs::path& hdrPath);
@@ -461,6 +462,7 @@ namespace Luth
         EditorOverlaysSubsystem m_EditorOverlays;
         DebugDrawSubsystem      m_DebugDraw;
         bool                    m_RtNativeInitialized = false;
+        bool                    m_ViewRequiresRtScene = false; // Compatibility preparation decision.
         RtSubsystem             m_Rt;
         RtRestirSubsystem       m_Restir;
         RtRestirGiSubsystem     m_RestirGi;
