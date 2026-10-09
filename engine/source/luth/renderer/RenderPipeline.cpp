@@ -133,16 +133,20 @@ namespace Luth
         if (!gtaoCompiled.ReplaceIfValid(m_GtaoPipeline))
             throw std::runtime_error("GTAO feature definition failed semantic validation");
         m_Volumetric.Init(*this);
-        m_Rt.Init(*this);
-        m_Restir.Init(*this);
-        m_RestirGi.Init(*this);
-        m_SlangParity.Init(*this);
-        m_PathTrace.Init(*this);
-        m_Reflections.Init(*this);
-        m_Denoise->Init(*this);
-        m_DenoiseGi->Init(*this);
-        m_DenoiseRefl->Init(*this);
-        m_DenoiseDiSpec->Init(*this);
+        m_RtNativeInitialized = VulkanContext::Get().SupportsRayTracing();
+        if (m_RtNativeInitialized)
+        {
+            m_Rt.Init(*this);
+            m_Restir.Init(*this);
+            m_RestirGi.Init(*this);
+            m_SlangParity.Init(*this);
+            m_PathTrace.Init(*this);
+            m_Reflections.Init(*this);
+            m_Denoise->Init(*this);
+            m_DenoiseGi->Init(*this);
+            m_DenoiseRefl->Init(*this);
+            m_DenoiseDiSpec->Init(*this);
+        }
         m_Skinning.Init();
         RenderPipelineDefinition deformationDefinition;
         deformationDefinition.AddFeature<VisibilityFeature>(m_Geometry, &m_System.GetFrameDebugger());
@@ -346,19 +350,23 @@ namespace Luth
             });
         };
         add("Transparency", m_Transparency);
-        add("SlangParity", m_SlangParity);
+
         add("GTAO", m_GTAO);
         add("Volumetric", m_Volumetric);
         add("Skinning", m_Skinning);
-        add("RaySceneAndShadows", m_Rt);
-        add("ReSTIR_DI", m_Restir);
-        add("ReSTIR_GI", m_RestirGi);
-        add("PathTrace", m_PathTrace);
-        add("Reflections", m_Reflections);
-        add("Denoise_DI", *m_Denoise);
-        add("Denoise_GI", *m_DenoiseGi);
-        add("Denoise_Reflections", *m_DenoiseRefl);
-        add("Denoise_DI_Specular", *m_DenoiseDiSpec);
+        if (m_RtNativeInitialized)
+        {
+            add("SlangParity", m_SlangParity);
+            add("RaySceneAndShadows", m_Rt);
+            add("ReSTIR_DI", m_Restir);
+            add("ReSTIR_GI", m_RestirGi);
+            add("PathTrace", m_PathTrace);
+            add("Reflections", m_Reflections);
+            add("Denoise_DI", *m_Denoise);
+            add("Denoise_GI", *m_DenoiseGi);
+            add("Denoise_Reflections", *m_DenoiseRefl);
+            add("Denoise_DI_Specular", *m_DenoiseDiSpec);
+        }
         add("PostProcess", m_PostProcess);
         add("DebugDraw", m_DebugDraw);
     }
@@ -398,16 +406,20 @@ namespace Luth
         m_SkyComposition.reset();
         m_ForwardComposition.reset();
         m_Skinning.Shutdown();
-        m_DenoiseDiSpec->Shutdown();
-        m_DenoiseRefl->Shutdown();
-        m_DenoiseGi->Shutdown();
-        m_Denoise->Shutdown();
-        m_Reflections.Shutdown();
-        m_PathTrace.Shutdown();
-        m_SlangParity.Shutdown();
-        m_RestirGi.Shutdown();
-        m_Restir.Shutdown();
-        m_Rt.Shutdown();
+        if (m_RtNativeInitialized)
+        {
+            m_DenoiseDiSpec->Shutdown();
+            m_DenoiseRefl->Shutdown();
+            m_DenoiseGi->Shutdown();
+            m_Denoise->Shutdown();
+            m_Reflections.Shutdown();
+            m_PathTrace.Shutdown();
+            m_SlangParity.Shutdown();
+            m_RestirGi.Shutdown();
+            m_Restir.Shutdown();
+            m_Rt.Shutdown();
+            m_RtNativeInitialized = false;
+        }
         m_DebugDraw.Shutdown();
         m_EditorOverlays.Shutdown();
         m_PostProcess.Shutdown();
@@ -469,7 +481,7 @@ namespace Luth
         visibilityParams.objectCount = m_Geometry.GetGPUObjectCount();
         visibilityParams.realtime = !ptEnabled;
         visibilityParams.cullCascades = m_Global.GetShadowParams().castShadows
-            && (m_Global.GetShadowParams().mode == ShadowingMode::RasterCSM || view.camera.enableVolumetricFog);
+            && (!m_RtNativeInitialized || m_Global.GetShadowParams().mode == ShadowingMode::RasterCSM || view.camera.enableVolumetricFog);
         if (visibilityParams.cullCascades)
             for (u32 cascade = 0; cascade < k_ShadowCascadeCount; ++cascade)
                 visibilityParams.cascadePlanes[cascade] = CreateFrustumFromCamera(m_Global.GetCascades().lightSpaceMatrix[cascade]).planes;
@@ -654,16 +666,16 @@ namespace Luth
         // Built BEFORE the volumetric chain so the inject-scatter pass's RT fog-shadow rayQuery reads a BUILT TLAS;
         // passes execute in registration order on the shared compute primary; the inline AS barrier gives memory visibility,
         // not execution ordering. Multi-view guard inside RtSubsystem short-circuits the second view (TLAS is scene-global).
-        const bool runRtShadows = (m_Global.GetShadowParams().mode == ShadowingMode::RtShadows)
+        const bool runRtShadows = m_RtNativeInitialized && (m_Global.GetShadowParams().mode == ShadowingMode::RtShadows)
                                && m_Global.GetShadowParams().castShadows;
         // Per-view fog toggle: also gates the volumetric term in needTlas, so a fog-off view doesn't
         // build a TLAS the (then-unregistered) scatter pass would never read.
         const bool volumetricEnabled = view.camera.enableVolumetricFog;
         // Build the TLAS whenever ANY RT consumer needs it: RT shadows / ReSTIR DI/GI / PathTrace /
         // reflections / volumetric RT fog shadows. The RT sun-shadow trace below stays runRtShadows-only.
-        const bool needTlas = runRtShadows || m_Restir.IsEnabled() || m_RestirGi.IsEnabled()
+        const bool needTlas = m_RtNativeInitialized && (runRtShadows || m_Restir.IsEnabled() || m_RestirGi.IsEnabled()
                             || m_PathTrace.IsEnabled() || m_Reflections.IsEnabled()
-                            || (volumetricEnabled && m_Volumetric.IsRtShadowsEnabled());
+                            || (volumetricEnabled && m_Volumetric.IsRtShadowsEnabled()));
         if (needTlas)
             m_Rt.AddTlasBuildPass(rg);
 
@@ -676,7 +688,7 @@ namespace Luth
                 fogVolumeRegion = m_Volumetric.UploadFogVolumeSSBO(lighting->GetFogVolumes());
         const auto fogNative = m_Volumetric.PrepareComputeBindings(*m_CurrentViewResources->fog, fogFrameAbs,
             view.camera, m_CurrentViewResources->globalDescriptorSet[fogFrameAbs % MAX_FRAMES_IN_FLIGHT],
-            volumetricEnabled && !ptEnabled, m_Volumetric.IsRtShadowsEnabled(), &m_Rt,
+            volumetricEnabled && !ptEnabled, m_Volumetric.IsRtShadowsEnabled(), m_RtNativeInitialized ? &m_Rt : nullptr,
             fogVolumeRegion, lightSSBORegion, clusterGridRegion, lightIndexRegion);
         GraphBufferRef fogVolumes;
         if (fogNative.enabled && fogVolumeRegion.buffer)

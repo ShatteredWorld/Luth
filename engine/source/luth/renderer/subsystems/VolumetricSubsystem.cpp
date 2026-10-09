@@ -1138,7 +1138,7 @@ namespace Luth
 
     bool VolumetricSubsystem::IsRtShadowsEnabled() const
     {
-        return m_Pipeline && m_Pipeline->GetSystem().GetVolumetricSettings().rtShadows;
+        return m_Pipeline && m_Pipeline->HasRtNativeResources() && m_Pipeline->GetSystem().GetVolumetricSettings().rtShadows;
     }
 
     void VolumetricSubsystem::WriteVizView(FogViewState& vr, FrameTargets& targets)

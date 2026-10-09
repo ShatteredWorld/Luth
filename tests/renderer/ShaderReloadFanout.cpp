@@ -1,5 +1,12 @@
 #include <doctest/doctest.h>
 #include "luth/renderer/shader/ShaderReloadFanout.h"
+#include "luth/core/types/LuthMath.h"
+#include "luth/renderer/subsystems/RtSubsystem.h"
+#include "luth/renderer/subsystems/RtRestirSubsystem.h"
+#include "luth/renderer/subsystems/RtRestirGiSubsystem.h"
+#include "luth/renderer/subsystems/PathTraceSubsystem.h"
+#include "luth/renderer/subsystems/ReflectionsSubsystem.h"
+#include "luth/renderer/subsystems/SvgfDenoiser.h"
 using namespace Luth;
 
 TEST_CASE("ShaderReloadFanout: shared SVGF shaders reach all four channels")
@@ -55,4 +62,36 @@ TEST_CASE("ShaderReloadFanout: invalid inputs never invoke clients and registrat
     CHECK(calls == 0);
     CHECK(fanout.Notify("debugDepth.slang", {1}) == std::vector<std::string>{"CapturePreview"});
     CHECK(calls == 1);
+}
+
+TEST_CASE("ShaderReloadFanout: dormant RT domains contribute no native passes")
+{
+    Memory::LinearAllocator scratch(64 * 1024);
+    RG::RenderGraph graph(scratch);
+    RtSubsystem scene;
+    RtRestirSubsystem di;
+    RtRestirGiSubsystem gi;
+    PathTraceSubsystem pt;
+    ReflectionsSubsystem reflections;
+    const RG::ResourceHandle input{1, 1};
+    CHECK(scene.GetTlas() == VK_NULL_HANDLE);
+    CHECK(scene.GetShadowPassLayout() == VK_NULL_HANDLE);
+    CHECK_FALSE(di.IsEnabled()); CHECK_FALSE(gi.IsEnabled());
+    CHECK_FALSE(pt.IsEnabled()); CHECK_FALSE(reflections.IsEnabled());
+    CHECK_FALSE(scene.AddRtSunShadowsPass(graph, input, input).IsValid());
+    const auto direct = di.AddPasses(graph, input, input, input, input);
+    CHECK_FALSE(direct.di.IsValid()); CHECK_FALSE(direct.spec.IsValid());
+    GraphBufferRef spatial{{99, 1}, {}};
+    CHECK_FALSE(gi.AddPasses(graph, input, input, input, &spatial).IsValid());
+    CHECK_FALSE(spatial.handle.IsValid());
+    CHECK_FALSE(pt.AddPasses(graph).IsValid());
+    CHECK_FALSE(reflections.AddPasses(graph, input, input, input).IsValid());
+    for (const auto channel : {DenoiserChannel::Di, DenoiserChannel::Gi,
+                              DenoiserChannel::Reflections, DenoiserChannel::DiSpecular})
+    {
+        SvgfDenoiser denoiser(channel);
+        CHECK_FALSE(denoiser.IsEnabled());
+        CHECK_FALSE(denoiser.AddPasses(graph, DenoiseInputs{input}).IsValid());
+    }
+    CHECK(graph.GetPasses().empty());
 }

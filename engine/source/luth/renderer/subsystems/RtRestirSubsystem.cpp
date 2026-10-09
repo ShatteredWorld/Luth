@@ -483,6 +483,7 @@ namespace Luth
                                                     RG::ResourceHandle slimRoughness)
     {
         LH_PROFILE_FUNCTION();
+        if (!m_Pipeline) return {};
         const RestirSettings& settings = m_Pipeline->GetSystem().GetRestirSettings();
         if (!settings.enabled || !m_InitialPipeline || !m_TemporalPipeline || !m_SpatialPipeline || !m_ShadePipeline) return {};
 

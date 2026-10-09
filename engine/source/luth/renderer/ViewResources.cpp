@@ -121,19 +121,22 @@ namespace Luth
             RecreateViewTextures(vr, newW, newH, halfW, halfH);
 
 
-            m_Rt.WriteShadowPassView(vr, targets);  // re-bind binding 2 (mask storage) to the new viewport-sized image
-            m_Restir.WriteView(vr, targets);        // re-bind Set 2 depth/normal + reservoir + new DI image
-            m_RestirGi.WriteView(vr, targets);      // re-bind GI Set 2 depth/normal + reservoir + new GI image
-            m_RestirGi.WriteReservoirVizView(vr, targets);  // re-bind GI reservoir-viz depth + spatial reservoir
-            m_RestirGi.WriteUpscaleView(vr, targets);       // re-bind GI upscale half-input + full output
-            m_Restir.WriteUpscaleView(vr, targets);         // re-bind DI diffuse + specular upscale sets
-            m_PathTrace.WriteView(vr);              // re-bind PT accumulator + display image (recreated on resize)
-            m_Reflections.WriteView(vr, targets);   // re-bind reflection output + slim G-buffer samplers
-            m_Reflections.WriteUpscaleView(vr, targets);    // re-bind refl upscale half-input + full output
-            m_Denoise->WriteView(vr, targets);      // re-bind DI SVGF inputs + output to the new images
-            m_DenoiseGi->WriteView(vr, targets);    // re-bind GI SVGF inputs + output to the new images
-            m_DenoiseRefl->WriteView(vr, targets);  // re-bind specular SVGF inputs + output to the new images
-            m_DenoiseDiSpec->WriteView(vr, targets);// re-bind ReSTIR-DI specular SVGF
+            if (m_RtNativeInitialized)
+            {
+                m_Rt.WriteShadowPassView(vr, targets);  // re-bind binding 2 (mask storage) to the new viewport-sized image
+                m_Restir.WriteView(vr, targets);        // re-bind Set 2 depth/normal + reservoir + new DI image
+                m_RestirGi.WriteView(vr, targets);      // re-bind GI Set 2 depth/normal + reservoir + new GI image
+                m_RestirGi.WriteReservoirVizView(vr, targets);  // re-bind GI reservoir-viz depth + spatial reservoir
+                m_RestirGi.WriteUpscaleView(vr, targets);       // re-bind GI upscale half-input + full output
+                m_Restir.WriteUpscaleView(vr, targets);         // re-bind DI diffuse + specular upscale sets
+                m_PathTrace.WriteView(vr);              // re-bind PT accumulator + display image (recreated on resize)
+                m_Reflections.WriteView(vr, targets);   // re-bind reflection output + slim G-buffer samplers
+                m_Reflections.WriteUpscaleView(vr, targets);    // re-bind refl upscale half-input + full output
+                m_Denoise->WriteView(vr, targets);      // re-bind DI SVGF inputs + output to the new images
+                m_DenoiseGi->WriteView(vr, targets);    // re-bind GI SVGF inputs + output to the new images
+                m_DenoiseRefl->WriteView(vr, targets);  // re-bind specular SVGF inputs + output to the new images
+                m_DenoiseDiSpec->WriteView(vr, targets);// re-bind ReSTIR-DI specular SVGF
+            }
             m_Lighting.WriteShadowView(vr);         // re-bind Set 3 b4 sun mask + b5 denoised DI + b6 denoised GI
             // Set 0 bindings 1-4 reference the (re)created IBL + GTAO textures.
             m_Global.WriteView(vr, MakeGlobalCtx(*this, vr));
@@ -258,37 +261,40 @@ namespace Luth
         allocCycled(m_Lighting.GetSetLayout(),           vr.lightDescSet,         "View.Light");
         allocCycled(m_Lighting.GetClusterBuildLayout(),  vr.clusterBuildDescSet,  "View.ClusterBuild");
         allocCycled(m_Lighting.GetLightAssignLayout(),   vr.lightAssignDescSet,   "View.LightAssign");
-        allocCycled(m_Rt.GetShadowPassLayout(),          vr.rtShadowPassDescSet,  "View.RtShadowPass");
-        allocCycled(m_Restir.GetSetLayout(),             vr.restirDescSet,        "View.Restir");
-        allocCycled(m_RestirGi.GetSetLayout(),           vr.restirGiDescSet,      "View.RestirGi");
-        allocSingle(m_RestirGi.GetReservoirVizLayout(),  vr.giReservoirVizDescSet,"View.GiReservoirViz");
-        allocSingle(m_RestirGi.GetUpscaleLayout(),       vr.giUpscaleDescSet,     "View.GiUpscale");
-        allocSingle(m_Restir.GetUpscaleLayout(),         vr.diUpscaleDescSet,     "View.DiUpscale");
-        allocSingle(m_Restir.GetUpscaleLayout(),         vr.diSpecUpscaleDescSet, "View.DiSpecUpscale");
-        allocSingle(m_PathTrace.GetSetLayout(),          vr.ptDescSet,            "View.PathTrace");
-        allocSingle(m_Reflections.GetSetLayout(),        vr.reflDescSet,          "View.Reflections");
-        allocSingle(m_Reflections.GetUpscaleLayout(),    vr.reflUpscaleDescSet,   "View.ReflUpscale");
-        m_Denoise->AllocateViewSets(vr);
-        m_DenoiseGi->AllocateViewSets(vr);
-        m_DenoiseRefl->AllocateViewSets(vr);
-        m_DenoiseDiSpec->AllocateViewSets(vr);
-
-
-
+        if (m_RtNativeInitialized)
+        {
+            allocCycled(m_Rt.GetShadowPassLayout(),          vr.rtShadowPassDescSet,  "View.RtShadowPass");
+            allocCycled(m_Restir.GetSetLayout(),             vr.restirDescSet,        "View.Restir");
+            allocCycled(m_RestirGi.GetSetLayout(),           vr.restirGiDescSet,      "View.RestirGi");
+            allocSingle(m_RestirGi.GetReservoirVizLayout(),  vr.giReservoirVizDescSet,"View.GiReservoirViz");
+            allocSingle(m_RestirGi.GetUpscaleLayout(),       vr.giUpscaleDescSet,     "View.GiUpscale");
+            allocSingle(m_Restir.GetUpscaleLayout(),         vr.diUpscaleDescSet,     "View.DiUpscale");
+            allocSingle(m_Restir.GetUpscaleLayout(),         vr.diSpecUpscaleDescSet, "View.DiSpecUpscale");
+            allocSingle(m_PathTrace.GetSetLayout(),          vr.ptDescSet,            "View.PathTrace");
+            allocSingle(m_Reflections.GetSetLayout(),        vr.reflDescSet,          "View.Reflections");
+            allocSingle(m_Reflections.GetUpscaleLayout(),    vr.reflUpscaleDescSet,   "View.ReflUpscale");
+            m_Denoise->AllocateViewSets(vr);
+            m_DenoiseGi->AllocateViewSets(vr);
+            m_DenoiseRefl->AllocateViewSets(vr);
+            m_DenoiseDiSpec->AllocateViewSets(vr);
+        }
         m_Lighting.WriteShadowView(vr);
-        m_Rt.WriteShadowPassView(vr, targets);
-        m_Restir.WriteView(vr, targets);
-        m_RestirGi.WriteView(vr, targets);
-        m_RestirGi.WriteReservoirVizView(vr, targets);
-        m_RestirGi.WriteUpscaleView(vr, targets);
-        m_Restir.WriteUpscaleView(vr, targets);
-        m_PathTrace.WriteView(vr);
-        m_Reflections.WriteView(vr, targets);
-        m_Reflections.WriteUpscaleView(vr, targets);    // bind refl upscale half-input + full output
-        m_Denoise->WriteView(vr, targets);
-        m_DenoiseGi->WriteView(vr, targets);
-        m_DenoiseRefl->WriteView(vr, targets);
-        m_DenoiseDiSpec->WriteView(vr, targets);
+        if (m_RtNativeInitialized)
+        {
+            m_Rt.WriteShadowPassView(vr, targets);
+            m_Restir.WriteView(vr, targets);
+            m_RestirGi.WriteView(vr, targets);
+            m_RestirGi.WriteReservoirVizView(vr, targets);
+            m_RestirGi.WriteUpscaleView(vr, targets);
+            m_Restir.WriteUpscaleView(vr, targets);
+            m_PathTrace.WriteView(vr);
+            m_Reflections.WriteView(vr, targets);
+            m_Reflections.WriteUpscaleView(vr, targets);    // bind refl upscale half-input + full output
+            m_Denoise->WriteView(vr, targets);
+            m_DenoiseGi->WriteView(vr, targets);
+            m_DenoiseRefl->WriteView(vr, targets);
+            m_DenoiseDiSpec->WriteView(vr, targets);
+        }
         // Global writes borrow the final AO binding from the independent GTAO state.
         m_Global.WriteView(vr, MakeGlobalCtx(*this, vr));
     }

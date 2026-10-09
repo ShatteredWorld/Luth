@@ -460,6 +460,7 @@ namespace Luth
         PostProcessSubsystem    m_PostProcess;
         EditorOverlaysSubsystem m_EditorOverlays;
         DebugDrawSubsystem      m_DebugDraw;
+        bool                    m_RtNativeInitialized = false;
         RtSubsystem             m_Rt;
         RtRestirSubsystem       m_Restir;
         RtRestirGiSubsystem     m_RestirGi;
@@ -493,6 +494,7 @@ namespace Luth
     public:
         EditorOverlaysSubsystem&       GetEditorOverlays()       { return m_EditorOverlays; }
         const EditorOverlaysSubsystem& GetEditorOverlays() const { return m_EditorOverlays; }
+        bool HasRtNativeResources() const { return m_RtNativeInitialized; }
         RtSubsystem&                   GetRt()                   { return m_Rt; }
         const RtSubsystem&             GetRt()             const { return m_Rt; }
         RtRestirSubsystem&             GetRestir()               { return m_Restir; }
