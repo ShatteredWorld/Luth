@@ -267,6 +267,7 @@ namespace Luth
     void RtRestirGiSubsystem::Shutdown()
     {
         LH_PROFILE_FUNCTION();
+        m_UpscaleViews.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_Views.ReleaseAll([] { Renderer::WaitForGPU(); });
         VkDevice device = VulkanContext::Get().GetDevice();
         m_InitialPipeline.reset();
@@ -418,6 +419,7 @@ namespace Luth
 
     void RtRestirGiSubsystem::ReleaseView(RenderViewId id)
     {
+        m_UpscaleViews.Release(id, [] { Renderer::WaitForGPU(); });
         m_Views.Release(id, [] { Renderer::WaitForGPU(); });
     }
 
@@ -827,91 +829,4 @@ namespace Luth
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 2, w, 0, nullptr);
     }
 
-    void RtRestirGiSubsystem::WriteUpscaleView(ViewResources& vr, FrameTargets& targets)
-    {
-        LH_PROFILE_FUNCTION();
-        if (vr.giUpscaleDescSet == VK_NULL_HANDLE) return;
-        if (!vr.giDenoiser || !vr.giDenoiser->svgfGiHalf || !vr.giDenoiser->svgfDenoised || !targets.GetSceneDepth() || !targets.GetSlimNormal()) return;
-
-        VkDescriptorImageInfo halfInfo{ m_Sampler,
-            std::static_pointer_cast<VKTexture>(vr.giDenoiser->svgfGiHalf)->GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
-        VkDescriptorImageInfo depthInfo{ m_Sampler,
-            std::static_pointer_cast<VKTexture>(targets.GetSceneDepth())->GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkDescriptorImageInfo normalInfo{ m_Sampler,
-            std::static_pointer_cast<VKTexture>(targets.GetSlimNormal())->GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkDescriptorImageInfo outInfo{ VK_NULL_HANDLE,
-            std::static_pointer_cast<VKTexture>(vr.giDenoiser->svgfDenoised)->GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
-
-        VkWriteDescriptorSet w[4]{};
-        for (u32 i = 0; i < 4; ++i)
-        {
-            w[i] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            w[i].dstSet = vr.giUpscaleDescSet; w[i].dstBinding = i; w[i].descriptorCount = 1;
-        }
-        w[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[0].pImageInfo = &halfInfo;
-        w[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[1].pImageInfo = &depthInfo;
-        w[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[2].pImageInfo = &normalInfo;
-        w[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          w[3].pImageInfo = &outInfo;
-        vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 4, w, 0, nullptr);
-    }
-
-    RG::ResourceHandle RtRestirGiSubsystem::AddUpscalePass(RG::RenderGraph& rg, RG::ResourceHandle giHalf,
-                                                           RG::ResourceHandle sceneDepth, RG::ResourceHandle slimNormal)
-    {
-        LH_PROFILE_FUNCTION();
-        if (!m_UpscalePipeline || !giHalf.IsValid()) return giHalf;
-        ViewResources* preflightVr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
-        if (!preflightVr || !preflightVr->giDenoiser || preflightVr->giUpscaleDescSet == VK_NULL_HANDLE || !preflightVr->giDenoiser->svgfDenoised)
-            return giHalf;
-
-        struct UpData { RG::ResourceHandle half, depth, normal, out; };
-        RG::ResourceHandle outHandle{};
-        rg.AddComputePass<UpData>(
-            "GiUpscale",
-            RG::QueueFamily::AsyncCompute,
-            [&, this](UpData& data, RG::RenderPassBuilder& builder) {
-                data.half = builder.ReadStorageImageGeneral(giHalf);  // svgfGiHalf stays GENERAL (atrous imageStore)
-                if (sceneDepth.IsValid()) data.depth  = builder.ReadStorageImage(sceneDepth);
-                if (slimNormal.IsValid()) data.normal = builder.ReadStorageImage(slimNormal);
-
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                auto outTex = std::static_pointer_cast<VKTexture>(vr->giDenoiser->svgfDenoised);
-                RG::TextureDesc desc;
-                desc.name   = "SvgfGiDenoised";
-                desc.width  = outTex->GetWidth();
-                desc.height = outTex->GetHeight();
-                desc.format = RG::TextureFormat::RGBA16_Float;
-                data.out = rg.ImportResource(desc, (void*)outTex->GetImage(), (void*)outTex->GetImageView(),
-                                             RG::ResourceState::Undefined);
-                data.out  = builder.WriteStorageImage(data.out);
-                outHandle = data.out;
-            },
-            [this](UpData&, RG::RenderPassContext& ctx) {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                ViewResources*  vr  = m_Pipeline->GetCurrentViewResources();
-                if (!vr || !vr->giDenoiser || vr->giUpscaleDescSet == VK_NULL_HANDLE || !vr->giDenoiser->svgfDenoised || !vr->giDenoiser->svgfGiHalf) return;
-
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                m_UpscalePipeline->Bind(cmd);
-                VkDescriptorSet sets[2] = { vr->globalDescriptorSet[slot], vr->giUpscaleDescSet };
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    m_UpscalePipeline->GetLayout(), 0, 2, sets, 0, nullptr);
-
-                auto full = std::static_pointer_cast<VKTexture>(vr->giDenoiser->svgfDenoised);
-                auto half = std::static_pointer_cast<VKTexture>(vr->giDenoiser->svgfGiHalf);
-                const RestirGiSettings& s = m_Pipeline->GetSystem().GetRestirGiSettings();
-                GiUpscalePC pc{};
-                pc.fullW = (i32)full->GetWidth();  pc.fullH = (i32)full->GetHeight();
-                pc.halfW = (i32)half->GetWidth();  pc.halfH = (i32)half->GetHeight();
-                pc.phiDepth  = s.spatialDepthThreshold;
-                pc.phiNormal = 32.0f;
-                vkCmdPushConstants(cmd, m_UpscalePipeline->GetLayout(),
-                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(GiUpscalePC), &pc);
-
-                const u32 gx = (full->GetWidth()  + 7) / 8;
-                const u32 gy = (full->GetHeight() + 7) / 8;
-                vkCmdDispatch(cmd, gx, gy, 1);
-            });
-        return outHandle;
-    }
 }

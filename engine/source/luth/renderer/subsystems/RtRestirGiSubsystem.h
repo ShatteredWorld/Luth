@@ -2,6 +2,7 @@
 
 #include "luth/core/types/LuthTypes.h"
 #include "luth/renderer/features/rt/RestirGiBindings.h"
+#include "luth/renderer/features/rt/GiUpscaleViewState.h"
 #include "luth/renderer/features/rt/GiReservoirVizBindings.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
@@ -52,10 +53,12 @@ namespace Luth
 
         // Half-res GI bilateral upscale: reads the half-res denoised GI (svgfGiHalf) + full-res depth/normal
         // guides, writes the full-res svgfGiDenoised. Only wired when RestirGiSettings::halfResolution.
-        VkDescriptorSetLayout GetUpscaleLayout() const { return m_UpscaleSetLayout; }
-        void WriteUpscaleView(ViewResources& vr, FrameTargets& targets);
-        RG::ResourceHandle AddUpscalePass(RG::RenderGraph& rg, RG::ResourceHandle giHalf,
-                                          RG::ResourceHandle sceneDepth, RG::ResourceHandle slimNormal);
+        std::shared_ptr<GiUpscaleViewState> EnsureUpscaleView(RenderViewId, const FrameTargets&,
+            const std::shared_ptr<GiDenoiserViewState>&);
+        GiUpscaleBindings PrepareUpscaleBindings(const ViewResources&, u64 frameIndex, RenderViewId,
+            u64 generation, const RestirGiSettings&) const;
+        static RG::ResourceHandle AddUpscalePass(RG::RenderGraph&,
+            const std::array<RG::ResourceHandle, 3>&, const GiUpscaleBindings&);
 
         VkSampler             GetSampler()   const { return m_Sampler; }
         VkDescriptorSetLayout GetSetLayout() const { return m_SetLayout; }
@@ -110,6 +113,8 @@ namespace Luth
         std::vector<u32>            m_ReservoirVizFragSpv;
 
         RestirGiViewStates m_Views;
+        GiUpscaleViewStates m_UpscaleViews;
+        u64 m_NextUpscaleGeneration = 1;
         u64 m_NextSourceGeneration = 1;
         u32  m_NextTag = 0xFFFF8000u;  // reserved range for persistent reservoir allocations (disjoint from DI)
     };

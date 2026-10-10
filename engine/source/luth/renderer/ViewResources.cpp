@@ -117,6 +117,10 @@ namespace Luth
         const bool giDenoiserReplaced = vr.giDenoiser && vr.giDenoiser != giDenoiser;
         vr.giDenoiser = std::move(giDenoiser);
         if (giDenoiserReplaced) vr.generation = m_System.InvalidateView(id);
+        auto giUpscale = m_RtNativeInitialized ? m_RestirGi.EnsureUpscaleView(id, targets, vr.giDenoiser) : nullptr;
+        const bool giUpscaleReplaced = vr.giUpscale && vr.giUpscale != giUpscale;
+        vr.giUpscale = std::move(giUpscale);
+        if (giUpscaleReplaced) vr.generation = m_System.InvalidateView(id);
 
         auto* diffuseDenoiser = static_cast<SvgfDenoiser*>(m_Denoise.get());
         auto diDenoiser = m_RtNativeInitialized ? diffuseDenoiser->EnsureDiView(id, targets, vr.restirDi) : nullptr;
@@ -154,7 +158,6 @@ namespace Luth
 
             if (m_RtNativeInitialized)
             {
-                m_RestirGi.WriteUpscaleView(vr, targets);       // re-bind GI upscale half-input + full output
                 m_PathTrace.WriteView(vr);              // re-bind PT accumulator + display image (recreated on resize)
                 m_Reflections.WriteView(vr, targets);   // re-bind reflection output + slim G-buffer samplers
                 m_Reflections.WriteUpscaleView(vr, targets);    // re-bind refl upscale half-input + full output
@@ -167,8 +170,7 @@ namespace Luth
         }
 
         if (giDenoiserReplaced && m_RtNativeInitialized) {
-            // Both stable legacy sets borrow the new GI outputs; EnsureGiView completed the safe point.
-            m_RestirGi.WriteUpscaleView(vr, targets);
+            // Lighting borrows the new GI output; EnsureGiView completed the safe point.
             m_Lighting.WriteShadowView(vr);
         }
         vr.width  = newW;
@@ -292,7 +294,6 @@ namespace Luth
         allocCycled(m_Lighting.GetLightAssignLayout(),   vr.lightAssignDescSet,   "View.LightAssign");
         if (m_RtNativeInitialized)
         {
-            allocSingle(m_RestirGi.GetUpscaleLayout(),       vr.giUpscaleDescSet,     "View.GiUpscale");
             allocSingle(m_PathTrace.GetSetLayout(),          vr.ptDescSet,            "View.PathTrace");
             allocSingle(m_Reflections.GetSetLayout(),        vr.reflDescSet,          "View.Reflections");
             allocSingle(m_Reflections.GetUpscaleLayout(),    vr.reflUpscaleDescSet,   "View.ReflUpscale");
@@ -302,7 +303,6 @@ namespace Luth
         m_Lighting.WriteShadowView(vr);
         if (m_RtNativeInitialized)
         {
-            m_RestirGi.WriteUpscaleView(vr, targets);
             m_PathTrace.WriteView(vr);
             m_Reflections.WriteView(vr, targets);
             m_Reflections.WriteUpscaleView(vr, targets);    // bind refl upscale half-input + full output
@@ -435,6 +435,7 @@ namespace Luth
         vr.restirDi.reset();
         vr.restirGi.reset();
         vr.diUpscale.reset();
+        vr.giUpscale.reset();
         vr.diDenoiser.reset();
         vr.giDenoiser.reset();
         vr.ptAccum.reset();

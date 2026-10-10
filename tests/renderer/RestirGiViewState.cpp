@@ -1,3 +1,4 @@
+#include "luth/renderer/features/rt/GiUpscaleViewState.h"
 #include <doctest/doctest.h>
 #include "luth/renderer/features/rt/GiDenoiserViewState.h"
 #include "luth/renderer/features/rt/RestirGiViewState.h"
@@ -77,9 +78,9 @@ TEST_CASE("RestirGiViewState: local pool includes cycled raw and reservoir visua
         CHECK(local.sizes[2].type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         CHECK(local.sizes[2].descriptorCount == 3 * frames + 1);
         const VulkanViewPool shared(true, frames);
-        CHECK(shared.maxSets + GiDenoiserPoolBudget{}.maxSets + local.maxSets == 205 - 14 * frames - 32);
-        CHECK(shared.sizes[1].descriptorCount + GiDenoiserPoolBudget{}.sizes[1].descriptorCount + local.sizes[1].descriptorCount == 248 - 10 * frames - 65);
-        CHECK(shared.sizes[2].descriptorCount + GiDenoiserPoolBudget{}.sizes[0].descriptorCount + local.sizes[0].descriptorCount == 317 - 29 * frames - 69);
+        CHECK(shared.maxSets + GiUpscalePoolBudget{}.maxSets + GiDenoiserPoolBudget{}.maxSets + local.maxSets == 205 - 14 * frames - 32);
+        CHECK(shared.sizes[1].descriptorCount + GiUpscalePoolBudget{}.sizes[1].descriptorCount + GiDenoiserPoolBudget{}.sizes[1].descriptorCount + local.sizes[1].descriptorCount == 248 - 10 * frames - 65);
+        CHECK(shared.sizes[2].descriptorCount + GiUpscalePoolBudget{}.sizes[0].descriptorCount + GiDenoiserPoolBudget{}.sizes[0].descriptorCount + local.sizes[0].descriptorCount == 317 - 29 * frames - 69);
         CHECK(shared.sizes[3].descriptorCount + local.sizes[2].descriptorCount == 126 - 8 * frames - 1);
     }
 }

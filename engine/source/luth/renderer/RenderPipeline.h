@@ -2,6 +2,7 @@
 #include "luth/renderer/features/rt/DiDenoiserViewState.h"
 #include "luth/renderer/features/rt/GiDenoiserViewState.h"
 #include "luth/renderer/features/rt/DiUpscaleViewState.h"
+#include "luth/renderer/features/rt/GiUpscaleViewState.h"
 
 #include "luth/core/types/LuthMath.h"
 #include "luth/core/UUID.h"
@@ -171,7 +172,7 @@ namespace Luth
         std::shared_ptr<DiDenoiserViewState> diDenoiser; // Borrowed diffuse-channel state.
 
         std::shared_ptr<GiDenoiserViewState> giDenoiser; // Borrowed GI-channel owner.
-        VkDescriptorSet giUpscaleDescSet = VK_NULL_HANDLE;   // half-res GI bilateral-upscale set (Set 1)
+        std::shared_ptr<GiUpscaleViewState> giUpscale; // Borrowed immutable GI upscale bindings.
         std::shared_ptr<DiUpscaleViewState> diUpscale; // Borrowed immutable bilateral-upscale bindings.
 
         // RT-reflection specular SVGF: flat parallel to the GI SVGF fields. A third SvgfDenoiser

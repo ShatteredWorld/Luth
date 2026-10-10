@@ -53,6 +53,7 @@ add_library(Luth STATIC
     source/luth/renderer/features/rt/DiDenoiserViewState.cpp
     source/luth/renderer/features/rt/GiDenoiserViewState.cpp
     source/luth/renderer/features/rt/DiUpscaleViewState.cpp
+    source/luth/renderer/features/rt/GiUpscaleViewState.cpp
     source/luth/renderer/features/rt/DiUpscaleFeature.cpp
     source/luth/renderer/features/rt/RestirDiViewState.cpp
     source/luth/renderer/features/rt/RestirGiViewState.cpp
@@ -188,6 +189,7 @@ add_library(Luth STATIC
     source/luth/renderer/subsystems/PostProcessSubsystem.cpp
     source/luth/renderer/subsystems/ReflectionsSubsystem.cpp
     source/luth/renderer/subsystems/RtRestirGiSubsystem.cpp
+    source/luth/renderer/subsystems/RtRestirGiUpscale.cpp
     source/luth/renderer/subsystems/RtGiReservoirViz.cpp
     source/luth/renderer/subsystems/RtRestirSubsystem.cpp
     source/luth/renderer/subsystems/RtSubsystem.cpp

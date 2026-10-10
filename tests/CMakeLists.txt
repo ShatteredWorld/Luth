@@ -63,6 +63,7 @@ add_executable(LuthTests
     renderer/DiDenoiserViewState.cpp
     renderer/GiDenoiserViewState.cpp
     renderer/DiUpscaleViewState.cpp
+    renderer/GiUpscaleViewState.cpp
     renderer/DiUpscaleFeature.cpp
     renderer/RestirDiViewState.cpp
     renderer/RestirGiViewState.cpp
