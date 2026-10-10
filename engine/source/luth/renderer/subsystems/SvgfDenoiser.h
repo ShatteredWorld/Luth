@@ -8,6 +8,7 @@
 #include "luth/renderer/features/rt/ReflectionDenoiserViewState.h"
 #include "luth/renderer/features/rt/DiDenoiserBindings.h"
 #include "luth/renderer/features/rt/GiDenoiserBindings.h"
+#include "luth/renderer/features/rt/ReflectionDenoiserBindings.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -61,18 +62,15 @@ namespace Luth
             u64 generation, const SvgfSettings&) const;
         static RG::ResourceHandle AddGiPasses(RG::RenderGraph&,
             const std::array<RG::ResourceHandle, 6>&, const GiDenoiserBindings&);
+        ReflectionDenoiserBindings PrepareReflectionBindings(const ViewResources&, u64 frameIndex, RenderViewId,
+            u64 generation, const SvgfSettings&) const;
+        static RG::ResourceHandle AddReflectionPasses(RG::RenderGraph&,
+            const std::array<RG::ResourceHandle, 5>&, const ReflectionDenoiserBindings&);
 
     private:
         void WriteNativeView(ViewResources&, FrameTargets&);
-        // enabled + full pipeline -> reproject -> moments -> a-trous xN chain; disabled -> raw copy (the
-        // A/B). Both write svgfDenoised and return its handle; an invalid input handle returns invalid.
-        RG::ResourceHandle AddDenoiseChain(RG::RenderGraph& rg, const DenoiseInputs& in);
-        RG::ResourceHandle AddPassthroughPass(RG::RenderGraph& rg, const DenoiseInputs& in);
-
-        // Channel-selected SvgfSettings instance + RG/debug pass names (the ViewResources image/set
-        // selection lives in a file-local Resolve() in the .cpp).
+        // Channel-selected UI settings; graph recording uses frozen native packets.
         const SvgfSettings& Settings() const;
-        const char*         PassName(int which) const;  // 0=reproject 1=moments 2=atrous 3=passthrough
 
         DiDenoiserViewStates m_DiViews;
         GiDenoiserViewStates m_GiViews;

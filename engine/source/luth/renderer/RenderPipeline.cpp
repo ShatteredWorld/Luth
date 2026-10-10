@@ -27,6 +27,7 @@
 #include "luth/renderer/features/rt/RestirDiFeature.h"
 #include "luth/renderer/features/rt/RestirGiFeature.h"
 #include "luth/renderer/features/rt/ReflectionFeature.h"
+#include "luth/renderer/features/rt/ReflectionDenoiserFeature.h"
 #include "luth/renderer/features/rt/GiDenoiserFeature.h"
 #include "luth/renderer/features/rt/GiUpscaleFeature.h"
 #include "luth/renderer/features/rt/DiDenoiserFeature.h"
@@ -182,8 +183,10 @@ namespace Luth
                 throw std::runtime_error("RT sun-shadow definition failed semantic validation");
             RenderPipelineDefinition reflectionDefinition;
             reflectionDefinition.AddFeature<ReflectionFeature>();
+            reflectionDefinition.AddFeature<ReflectionDenoiserFeature>();
             PipelineInputContract reflectionInputs;
             reflectionInputs.resources = {{RtSceneResources::Parameters}, {ReflectionResources::Bindings},
+                {ReflectionDenoiserResources::Bindings}, {RenderResources::MaterialID},
                 {RenderResources::SurfaceDepth}, {RenderResources::Normal}, {RenderResources::Roughness},
                 {RenderResources::LightData}, {RtSceneResources::Scene, ResourceOutputPresence::Optional}};
             reflectionInputs.capabilities = {&RtSceneResources::RayScene};
@@ -1032,21 +1035,25 @@ namespace Luth
         RG::ResourceHandle denoisedGiHandle = filteredGi.handle;
 
         // RT specular reflections: one GGX-VNDF ray/pixel from the slim G-buffer, then
-        // a dedicated specular SVGF (3rd instance, DenoiserChannel::Reflections). The DenoiseInputs.motion
-        // slot carries slim ROUGHNESS (the spec reproject's b3: it computes the reflection's motion
-        // internally via hit-distance virtual reprojection; hitDist rides reflRadiance's alpha).
+        // a dedicated specular SVGF with explicit roughness and radiance/hit-distance contracts.
+        // The spec reproject computes virtual motion internally from the raw signal's hit distance.
         // denoisedReflHandle feeds GeometryPass (pbr.frag composites it via Set 3 b7). AsyncCompute,
         // after the TLAS build (Reflections declares scene demand).
-        GraphTextureRef reflectionOutput;
+        GraphTextureRef reflectionOutput, denoisedReflection;
         if (m_ReflectionComposition) {
             const auto frameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
             const auto native = m_Reflections.PrepareBindings(*m_CurrentViewResources, frameIndex, view.id,
                 m_CurrentViewResources->generation, rayScene.native, s.GetReflectionsSettings(),
                 Math::Inverse(m_Global.GetCachedViewProj()), lightSSBORegion, m_Lighting.IsIBLReady());
             const ReflectionBindingRef binding{&native};
+            const auto denoiser = static_cast<SvgfDenoiser&>(*m_DenoiseRefl).PrepareReflectionBindings(
+                *m_CurrentViewResources, frameIndex, view.id, m_CurrentViewResources->generation, s.GetSvgfSpecSettings());
+            const ReflectionDenoiserBindingRef denoiserBinding{&denoiser};
             const std::array resources{
                 RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters),
                 RenderInputBinding::Present(ReflectionResources::Bindings, binding),
+                RenderInputBinding::Present(ReflectionDenoiserResources::Bindings, denoiserBinding),
+                RenderInputBinding::Present(RenderResources::MaterialID, materialOutput),
                 RenderInputBinding::Present(RenderResources::LightData, uploadedLights),
                 RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
                 RenderInputBinding::Present(RenderResources::Normal, normalOutput),
@@ -1056,7 +1063,8 @@ namespace Luth
             if (rayScene.native) frame.capabilities = RtSceneResources::Requests;
             ViewRenderInputs inputs; inputs.id = view.id; inputs.resourceGeneration = m_CurrentViewResources->generation;
             inputs.width = m_CurrentViewResources->width; inputs.height = m_CurrentViewResources->height;
-            const std::array exports{RenderOutputBinding::Capture(ReflectionResources::Radiance, reflectionOutput)};
+            const std::array exports{RenderOutputBinding::Capture(ReflectionResources::Radiance, reflectionOutput),
+                RenderOutputBinding::Capture(ReflectionDenoiserResources::Radiance, denoisedReflection)};
             const auto built = m_ReflectionComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports);
             if (!built.success) {
                 for (const auto& diagnostic : built.diagnostics)
@@ -1064,12 +1072,8 @@ namespace Luth
                 return false;
             }
         }
-        const auto reflHandle = reflectionOutput.handle;
-        RG::ResourceHandle denoisedReflHandle = m_DenoiseRefl->AddPasses(rg, DenoiseInputs{
-            reflHandle, surfaceDepth.handle, slimGB.normal, slimGB.roughness,
-            slimGB.roughness, slimGB.materialID, {}, {} });
-        // Half-res reflections: AddPasses returns the half svgfSpecHalf handle; bilaterally upscale it into
-        // the full-res svgfSpecDenoised that pbr.frag Set 3 b7 consumes. Full-res mode is a no-op.
+        RG::ResourceHandle denoisedReflHandle = denoisedReflection.handle;
+        // Bilateral upscale bridges the working signal into the full output consumed by Set 3 b7.
         if (denoisedReflHandle.IsValid() && m_System.GetReflectionsSettings().halfResolution)
             denoisedReflHandle = m_Reflections.AddUpscalePass(rg, denoisedReflHandle, surfaceDepth.handle, slimGB.normal);
 
