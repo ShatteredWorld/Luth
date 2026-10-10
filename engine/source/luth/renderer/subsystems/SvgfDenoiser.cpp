@@ -96,6 +96,7 @@ namespace Luth
             }
             if (ch == DenoiserChannel::Gi)
             {
+                if (!vr.restirGi) throw std::invalid_argument("SVGF GI: missing raw GI view owner");
                 // Half-res GI: the chain runs below full res, so the a-trous final + passthrough write the
                 // half svgfGiHalf (a bilateral upscale resolves it into the full svgfGiDenoised). Detect
                 // from the history extent vs the full-res denoised image; no setting plumbing needed.
@@ -103,7 +104,7 @@ namespace Luth
                     && std::static_pointer_cast<VKTexture>(vr.svgfGiColorHist[0])->GetWidth()
                        < std::static_pointer_cast<VKTexture>(vr.svgfGiDenoised)->GetWidth();
                 return { vr.svgfGiColorHist, vr.svgfGiMoments, vr.svgfGiGeom, vr.svgfGiAtrous,
-                         giHalf ? &vr.svgfGiHalf : &vr.svgfGiDenoised, &vr.restirGiDI,
+                         giHalf ? &vr.svgfGiHalf : &vr.svgfGiDenoised, &vr.restirGi->restirGiDI,
                          &vr.svgfGiPassthroughDescSet, vr.svgfGiReprojectDescSet,
                          vr.svgfGiMomentsDescSet, vr.svgfGiAtrousDescSet };
             }

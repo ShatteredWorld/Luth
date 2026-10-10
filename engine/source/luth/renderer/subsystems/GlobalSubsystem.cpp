@@ -217,7 +217,7 @@ namespace Luth
                                && m_Pipeline->GetRt().GetTlas() != VK_NULL_HANDLE;
         // .y mirrors .x for the GI path; pbr.frag adds the demodulated indirect-diffuse image when set.
         const bool restirGiActive = m_TlasBindingEnabled && m_Pipeline->GetRestirGi().IsEnabled()
-                                 && vr && vr->restirGiDI
+                                 && vr && vr->restirGi && vr->restirGi->restirGiDI
                                  && m_Pipeline->GetRt().GetTlas() != VK_NULL_HANDLE;
         // .z = ReSTIR-DI specular gate x intensity; 0 when DI inactive or the specular toggle is off.
         const RestirSettings& restirS = m_Pipeline->GetSystem().GetRestirSettings();

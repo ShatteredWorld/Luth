@@ -163,13 +163,7 @@ namespace Luth
         // a world-space path vertex, not a light index). Same scratch + spatial/history shape;
         // tags mint from RtRestirGiSubsystem's disjoint 0xFFFF8000 reserved range. restirGiDI is the
         // viewport-sized rgba16f STORAGE+SAMPLED demodulated indirect-diffuse image (pbr.frag Set 3 b6).
-        Memory::GPUSubRegion restirGiReservoir{};
-        u32 restirGiReservoirTag = 0;
-        Memory::GPUSubRegion restirGiSpatial{};
-        u32 restirGiSpatialTag = 0;
-        std::shared_ptr<Texture> restirGiDI;
-        std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT> restirGiDescSet{};
-        VkDescriptorSet giReservoirVizDescSet = VK_NULL_HANDLE;  // ShadeMode::RestirGiReservoir debug viz (b0 depth, b1 spatial reservoir)
+        std::shared_ptr<RestirGiViewState> restirGi; // Borrowed GI domain state.
 
         // SVGF denoiser output: viewport-sized RGBA16F STORAGE+SAMPLED, same shape as restirDI. The
         // Diffuse DI histories, output images and descriptors belong to SvgfDenoiser.

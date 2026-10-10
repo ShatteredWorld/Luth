@@ -1,6 +1,7 @@
 #pragma once
 
 #include "luth/core/types/LuthTypes.h"
+#include "luth/renderer/features/rt/RestirGiViewState.h"
 #include "luth/renderer/features/rt/GiReservoirVizBindings.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
@@ -19,7 +20,7 @@ namespace Luth
     // ReSTIR GI (Ouyang 2021): spatiotemporal reservoir resampling for 1-bounce indirect diffuse.
     // Owns 4 compute pipelines (initial 1-bounce sample, temporal, spatial + final visibility,
     // demodulated shade) + the pass-local Set 2 layout (same 7-binding shape as the DI subsystem).
-    // Single scratch reservoir + spatial/history buffer + GI image are per-view (ViewResources);
+    // Single scratch reservoir + spatial/history buffer + GI image are domain-owned per-view;
     // temporal history is the previous frame's SPATIAL output. rayQuery-in-compute (initial +
     // spatial) reads the TLAS via Set 0 binding 6. see arch/rendering-pipeline.md
     class RtRestirGiSubsystem
@@ -32,7 +33,9 @@ namespace Luth
 
         // Stable per-view Set 2 writes: b0 depth, b1 slimNormal, b2 scratch reservoir, b3 GI image,
         // b4 history (= the spatial buffer), b5 motion, b6 spatial output (same buffer as b4).
-        void WriteView(ViewResources& vr, FrameTargets& targets);
+        std::shared_ptr<RestirGiViewState> EnsureView(RenderViewId, const FrameTargets&, bool half);
+        void ReleaseView(RenderViewId);
+        void WriteView(RestirGiViewState&, const FrameTargets&);
 
         // Initial 1-bounce path sample, temporal + spatial reuse (spatial ends with the final-visibility
         // trace), then demodulated shade. Returns the GI image handle (demodulated indirect-diffuse
@@ -56,16 +59,19 @@ namespace Luth
         // reservoir's M (confidence) + age (staleness) over LDR. Its own 1-set layout (b0 depth sampler,
         // b1 spatial-reservoir SSBO (the buffer is CONCURRENT, so the graphics-queue read is sync-safe)).
         VkDescriptorSetLayout GetReservoirVizLayout() const { return m_ReservoirVizSetLayout; }
-        void WriteReservoirVizView(ViewResources& vr, FrameTargets& targets);
+        void WriteReservoirVizView(RestirGiViewState&, const FrameTargets&);
         RG::ResourceHandle AddReservoirVizPass(RG::RenderGraph& rg, RG::ResourceHandle ldrInput,
                                                RG::ResourceHandle sceneDepth, RG::BufferHandle reservoir, const GiReservoirVizBindings&);
         GiReservoirVizBindings PrepareReservoirVizBindings(VkDescriptorSet, std::shared_ptr<Texture> depth,
             const Memory::GPUSubRegion&, u32 width, u32 height, u32 resWidth, u32 resHeight,
             u32 temporalMCap, u32 spatialNeighbours, u32 maxAge, bool enabled) const;
 
-        // Per-view persistent reservoir buffer tag: Garlic large-tagged, freed only on resize. Reserved
+        // Per-view persistent reservoir buffer tag: Garlic large-tagged, retired with its view state. Reserved
         // high range DISJOINT from DI's 0xFFFF0000; both subsystems mint into the same heap.
-        u32 NextReservoirTag() { return m_NextTag++; }
+        u32 NextReservoirTag() {
+            if (m_NextTag == 0xFFFFFFFFu) throw std::overflow_error("ReSTIR GI: reservoir tag range exhausted");
+            return m_NextTag++;
+        }
 
         // Backed by RestirGiSettings::enabled on the RenderingSystem (the editor toggles the setting).
         // GlobalSubsystem reads IsEnabled() to gate restirParams.y. Out-of-line: needs the
@@ -98,6 +104,8 @@ namespace Luth
         std::vector<u32>            m_FullscreenVertSpv;
         std::vector<u32>            m_ReservoirVizFragSpv;
 
+        RestirGiViewStates m_Views;
+        u64 m_NextSourceGeneration = 1;
         u32  m_NextTag = 0xFFFF8000u;  // reserved range for persistent reservoir allocations (disjoint from DI)
     };
 }

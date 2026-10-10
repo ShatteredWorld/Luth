@@ -107,6 +107,12 @@ namespace Luth
         vr.restirDi = std::move(restirDi);
         if (restirDiReplaced) vr.generation = m_System.InvalidateView(id);
 
+        auto restirGi = m_RtNativeInitialized ? m_RestirGi.EnsureView(id, targets,
+            m_System.GetRestirGiSettings().halfResolution) : nullptr;
+        const bool restirGiReplaced = vr.restirGi && vr.restirGi != restirGi;
+        vr.restirGi = std::move(restirGi);
+        if (restirGiReplaced) vr.generation = m_System.InvalidateView(id);
+
         auto* diffuseDenoiser = static_cast<SvgfDenoiser*>(m_Denoise.get());
         auto diDenoiser = m_RtNativeInitialized ? diffuseDenoiser->EnsureDiView(id, targets, vr.restirDi) : nullptr;
         const bool diDenoiserReplaced = vr.diDenoiser && vr.diDenoiser != diDenoiser;
@@ -144,8 +150,6 @@ namespace Luth
 
             if (m_RtNativeInitialized)
             {
-                m_RestirGi.WriteView(vr, targets);      // re-bind GI Set 2 depth/normal + reservoir + new GI image
-                m_RestirGi.WriteReservoirVizView(vr, targets);  // re-bind GI reservoir-viz depth + spatial reservoir
                 m_RestirGi.WriteUpscaleView(vr, targets);       // re-bind GI upscale half-input + full output
                 m_PathTrace.WriteView(vr);              // re-bind PT accumulator + display image (recreated on resize)
                 m_Reflections.WriteView(vr, targets);   // re-bind reflection output + slim G-buffer samplers
@@ -158,6 +162,7 @@ namespace Luth
             m_Global.WriteView(vr, MakeGlobalCtx(*this, vr));
         }
 
+        if (restirGiReplaced && m_RtNativeInitialized) m_DenoiseGi->WriteView(vr, targets);
         vr.width  = newW;
         vr.height = newH;
         // Explicit owner invalidation must reach temporal preparation even when
@@ -177,6 +182,7 @@ namespace Luth
         static_cast<SvgfDenoiser*>(m_Denoise.get())->ReleaseDiView(id);
         static_cast<SvgfDenoiser*>(m_DenoiseDiSpec.get())->ReleaseDiView(id);
         m_Restir.ReleaseView(id);
+        m_RestirGi.ReleaseView(id);
         m_Transparency.ReleaseView(id);
         m_PostProcess.ReleaseTaaView(id);
         m_EditorOverlays.ReleaseView(id);
@@ -277,8 +283,6 @@ namespace Luth
         allocCycled(m_Lighting.GetLightAssignLayout(),   vr.lightAssignDescSet,   "View.LightAssign");
         if (m_RtNativeInitialized)
         {
-            allocCycled(m_RestirGi.GetSetLayout(),           vr.restirGiDescSet,      "View.RestirGi");
-            allocSingle(m_RestirGi.GetReservoirVizLayout(),  vr.giReservoirVizDescSet,"View.GiReservoirViz");
             allocSingle(m_RestirGi.GetUpscaleLayout(),       vr.giUpscaleDescSet,     "View.GiUpscale");
             allocSingle(m_PathTrace.GetSetLayout(),          vr.ptDescSet,            "View.PathTrace");
             allocSingle(m_Reflections.GetSetLayout(),        vr.reflDescSet,          "View.Reflections");
@@ -289,8 +293,6 @@ namespace Luth
         m_Lighting.WriteShadowView(vr);
         if (m_RtNativeInitialized)
         {
-            m_RestirGi.WriteView(vr, targets);
-            m_RestirGi.WriteReservoirVizView(vr, targets);
             m_RestirGi.WriteUpscaleView(vr, targets);
             m_PathTrace.WriteView(vr);
             m_Reflections.WriteView(vr, targets);
@@ -307,7 +309,7 @@ namespace Luth
         // This remaining compatibility allocation group is entirely RT-owned.
         if (!m_RtNativeInitialized) return;
 
-        // Half-res GI (RestirGiSettings::halfResolution): GI reservoirs + restirGiDI + svgfGi* history
+        // Half-res GI (RestirGiSettings::halfResolution): remaining svgfGi* history
         // allocate at half extent; svgfGiDenoised stays full (the bilateral-upscale output). giHalfCached
         // lets EnsureViewResources detect a runtime toggle and realloc (like other allocation settings).
         const bool giHalf = m_System.GetRestirGiSettings().halfResolution;
@@ -321,13 +323,6 @@ namespace Luth
         const u32  reflW    = reflHalf ? halfW : fullW;
         const u32  reflH    = reflHalf ? halfH : fullH;
         vr.reflHalfCached   = reflHalf ? 1u : 0u;
-
-        // ReSTIR GI demodulated indirect-diffuse image: GI working res (half when halfResolution).
-        // STORAGE for the GI shade pass's imageStore + SAMPLED (ctor) for the denoiser input.
-        vr.restirGiDI = std::make_shared<VKTexture>(
-            giW, giH, TextureFormat::RGBA16F,
-            /*arrayLayers*/ 1, /*createFlags*/ 0u, /*mipLevels*/ 1,
-            VK_IMAGE_USAGE_STORAGE_BIT);
 
         // Path-traced reference mode. ptAccum = viewport-sized RGBA32F STORAGE: the in-place fp32
         // progressive running mean, kept GENERAL, only ever touched by the PT megakernel (read-before-write
@@ -379,27 +374,6 @@ namespace Luth
         }
         vr.svgfSpecAtrous[0] = std::make_shared<VKTexture>(reflW, reflH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
         vr.svgfSpecAtrous[1] = std::make_shared<VKTexture>(reflW, reflH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-
-        // ReSTIR GI scratch reservoir: same lifecycle as the DI one but 64 B/pixel (a GIReservoir is
-        // a world-space path vertex). Tags from the GI subsystem's disjoint 0xFFFF8000 range.
-        if (vr.restirGiReservoirTag != 0)
-        {
-            Memory::GPUTaggedPageAllocator::Get().FreeTagAndDestroy(vr.restirGiReservoirTag);
-            vr.restirGiReservoir = {};
-        }
-        vr.restirGiReservoirTag = m_RestirGi.NextReservoirTag();
-        vr.restirGiReservoir = Memory::GPUTaggedPageAllocator::Get().AllocateLargeTaggedDeviceLocal(
-            vr.restirGiReservoirTag, static_cast<u64>(giW) * static_cast<u64>(giH) * 64u, 16);
-
-        // ReSTIR GI spatial-output / temporal-history buffer, 64 B/pixel (same topology as DI's).
-        if (vr.restirGiSpatialTag != 0)
-        {
-            Memory::GPUTaggedPageAllocator::Get().FreeTagAndDestroy(vr.restirGiSpatialTag);
-            vr.restirGiSpatial = {};
-        }
-        vr.restirGiSpatialTag = m_RestirGi.NextReservoirTag();
-        vr.restirGiSpatial = Memory::GPUTaggedPageAllocator::Get().AllocateLargeTaggedDeviceLocal(
-            vr.restirGiSpatialTag, static_cast<u64>(giW) * static_cast<u64>(giH) * 64u, 16);
 
         // Bootstrap clear: freshly-allocated VMA storage images have UNDEFINED layout and undefined
         // pixel content. The SVGF reproject
@@ -481,7 +455,7 @@ namespace Luth
         vr.taa.reset();
         vr.rtShadow.reset();
         vr.restirDi.reset();
-        vr.restirGiDI.reset();
+        vr.restirGi.reset();
         vr.diUpscale.reset();
         vr.diDenoiser.reset();
         vr.svgfGiDenoised.reset();
@@ -510,20 +484,6 @@ namespace Luth
         vr.svgfSpecAtrous[0].reset();
         vr.svgfSpecAtrous[1].reset();
         vr.diSpecDenoiser.reset();
-        // ReSTIR GI reserved-range tags: same deferred-destroy path as the DI tags above.
-        if (vr.restirGiReservoirTag != 0)
-        {
-            Memory::GPUTaggedPageAllocator::Get().FreeTagAndDestroy(vr.restirGiReservoirTag);
-            vr.restirGiReservoirTag = 0;
-            vr.restirGiReservoir = {};
-        }
-        if (vr.restirGiSpatialTag != 0)
-        {
-            Memory::GPUTaggedPageAllocator::Get().FreeTagAndDestroy(vr.restirGiSpatialTag);
-            vr.restirGiSpatialTag = 0;
-            vr.restirGiSpatial = {};
-        }
-
         if (vr.descPool != VK_NULL_HANDLE)
         {
             VulkanContext::Get().PushDeletion([pool = vr.descPool]() {

@@ -1338,9 +1338,10 @@ namespace Luth
             fogVizEnabled && fogResolved.handle.IsValid());
         const FogVizBindingRef fogVizBinding{&fogVizNative};
         const auto& giVizSettings = s.GetRestirGiSettings();
-        const auto& giVizTexture = m_CurrentViewResources->restirGiDI;
-        const auto giVizNative = m_RestirGi.PrepareReservoirVizBindings(m_CurrentViewResources->giReservoirVizDescSet,
-            view.targets->GetSceneDepth(), m_CurrentViewResources->restirGiSpatial, bloomView.width, bloomView.height,
+        const auto& giState = m_CurrentViewResources->restirGi;
+        const auto giVizTexture = giState ? giState->restirGiDI : nullptr;
+        const auto giVizNative = m_RestirGi.PrepareReservoirVizBindings(giState ? giState->giReservoirVizDescSet : VK_NULL_HANDLE,
+            view.targets->GetSceneDepth(), giState ? giState->restirGiSpatial : Memory::GPUSubRegion{}, bloomView.width, bloomView.height,
             giVizTexture ? giVizTexture->GetWidth() : bloomView.width, giVizTexture ? giVizTexture->GetHeight() : bloomView.height,
             giVizSettings.temporalMCap, giVizSettings.spatialNeighbours, giVizSettings.maxReservoirAge,
             !ptEnabled && shadeMode == ShadeMode::RestirGiReservoir && giVizSettings.enabled && giSpatialReservoir.handle.IsValid());
