@@ -33,102 +33,96 @@ namespace Luth
         SpinLock                        g_PendingStaticLock;
     }
 
-    // The deformed vertex buffer is the interleaved Vertex layout, written field-by-field as 18
-    // hardcoded floats in skinning.slang and read at the same offsets by material.slang's geometry
-    // table; lock the layout so a Vertex field reorder/resize can't silently desync the shaders.
-    static_assert(sizeof(Vertex)              == 72, "deformed-vertex ABI: Vertex must stay 18 tight floats");
-    static_assert(offsetof(Vertex, Position)  == 0,  "deformed-vertex ABI: pos @ float 0");
-    static_assert(offsetof(Vertex, Normal)    == 12, "deformed-vertex ABI: normal @ float 3");
-    static_assert(offsetof(Vertex, TexCoord0) == 24, "deformed-vertex ABI: uv0 @ float 6");
-    static_assert(offsetof(Vertex, TexCoord1) == 32, "deformed-vertex ABI: uv1 @ float 8");
-    static_assert(offsetof(Vertex, Tangent)   == 40, "deformed-vertex ABI: tangent @ float 10");
-    static_assert(offsetof(Vertex, Color)     == 56, "deformed-vertex ABI: color @ float 14");
-
-    // skinning.slang reads the source SkinnedVertex VB directly via scalar buffer_reference; lock the
-    // tight 104 B layout so a field reorder/resize can't silently desync the compute's input fetch.
-    static_assert(sizeof(SkinnedVertex)                == 104, "skin-input ABI: SkinnedVertex must stay tight 104 B");
-    static_assert(offsetof(SkinnedVertex, Position)    == 0,   "skin-input ABI: pos @ 0");
-    static_assert(offsetof(SkinnedVertex, Normal)      == 12,  "skin-input ABI: normal @ 12");
-    static_assert(offsetof(SkinnedVertex, TexCoord0)   == 24,  "skin-input ABI: uv0 @ 24");
-    static_assert(offsetof(SkinnedVertex, TexCoord1)   == 32,  "skin-input ABI: uv1 @ 32");
-    static_assert(offsetof(SkinnedVertex, Tangent)     == 40,  "skin-input ABI: tangent @ 40");
-    static_assert(offsetof(SkinnedVertex, Color)       == 56,  "skin-input ABI: color @ 56");
-    static_assert(offsetof(SkinnedVertex, BoneIDs)     == 72,  "skin-input ABI: boneIDs @ 72");
-    static_assert(offsetof(SkinnedVertex, BoneWeights) == 88,  "skin-input ABI: weights @ 88");
-
     VKAccelerationStructure::~VKAccelerationStructure()
     {
-        if (m_Handle == VK_NULL_HANDLE && m_DeformedBuffer == VK_NULL_HANDLE) return;
+        if (m_Handle == VK_NULL_HANDLE && m_StorageBuffer == VK_NULL_HANDLE) return;
         auto handle      = m_Handle;
         auto storage     = m_StorageBuffer;
         auto storageAlloc= m_StorageAlloc;
-        auto deformed    = m_DeformedBuffer;
-        auto deformedAlloc = m_DeformedAlloc;
-        VulkanContext::Get().PushDeletion([handle, storage, storageAlloc, deformed, deformedAlloc]() {
+        VulkanContext::Get().PushDeletion([handle, storage, storageAlloc]() {
             auto& ctx = VulkanContext::Get();
             if (handle != VK_NULL_HANDLE)
                 ctx.GetRtFn().vkDestroyAccelerationStructureKHR(ctx.GetDevice(), handle, nullptr);
             if (storage != VK_NULL_HANDLE) VulkanAllocator::FreeBuffer(storage,  storageAlloc);
-            if (deformed!= VK_NULL_HANDLE) VulkanAllocator::FreeBuffer(deformed, deformedAlloc);
         });
+    }
+
+    void BlasBuildCommand::Record(VkCommandBuffer cmd) const
+    {
+        if (recorded || infos.empty()) return;
+        record(cmd, static_cast<u32>(infos.size()), infos.data(), rangePtrs.data());
+        recorded = true;
+        for (size_t i = 0; i < targets.size(); ++i)
+            if (firstBuilds[i]) targets[i]->MarkBuildRecorded(frameAbs);
+    }
+
+    u32 PreparedBlasBuild::FirstBuildCount() const
+    {
+        u32 count = 0;
+        for (const auto& command : commands)
+            for (bool first : command->firstBuilds) if (first) ++count;
+        return count;
+    }
+
+    bool PreparedBlasBuild::IsScheduled(const VKAccelerationStructure* blas, u32 frameAbs) const
+    {
+        if (!blas) return false;
+        for (const auto& command : commands)
+        {
+            if (command->frameAbs != frameAbs) continue;
+            for (const auto& target : command->targets)
+                if (target.get() == blas) return true;
+        }
+        return false;
+    }
+
+    std::shared_ptr<BlasBuildCommand> VKAccelerationStructure::PrepareBuild(
+        VkDeviceAddress scratchBda, u32 frameAbs) const
+    {
+        auto bc = std::make_shared<BlasBuildCommand>();
+        bc->infos.resize(1); bc->geoms.resize(1); bc->ranges.resize(1); bc->rangePtrs.resize(1);
+        bc->record = VulkanContext::Get().GetRtFn().vkCmdBuildAccelerationStructuresKHR;
+        bc->frameAbs = frameAbs;
+        bc->geoms[0] = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+        bc->geoms[0].geometryType                            = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        bc->geoms[0].geometry.triangles.sType                = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        bc->geoms[0].geometry.triangles.vertexFormat         = VK_FORMAT_R32G32B32_SFLOAT;
+        bc->geoms[0].geometry.triangles.vertexData.deviceAddress = m_IsDeformable ? GetDeformedBdaCurr(frameAbs) : m_BuildVbBda;
+        bc->geoms[0].geometry.triangles.vertexStride         = m_BuildVertexStride;
+        bc->geoms[0].geometry.triangles.maxVertex            = m_BuildMaxVertex;
+        bc->geoms[0].geometry.triangles.indexType            = VK_INDEX_TYPE_UINT32;
+        bc->geoms[0].geometry.triangles.indexData.deviceAddress = m_BuildIbBda;
+        bc->geoms[0].flags                                   = m_GeomFlags;
+
+        bc->infos[0] = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
+        bc->infos[0].type                     = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        bc->infos[0].flags                    = m_BuildFlags;
+        bc->infos[0].mode                     = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        bc->infos[0].dstAccelerationStructure = m_Handle;
+        bc->infos[0].geometryCount            = 1;
+        bc->infos[0].pGeometries              = &bc->geoms[0];
+        bc->infos[0].scratchData.deviceAddress = scratchBda;
+
+        bc->ranges[0]    = { m_PrimitiveCount, 0u, 0u, 0u };
+        bc->rangePtrs[0] = &bc->ranges[0];
+
+        VulkanContext::Get().PushDeletion([bc]() {});
+        return bc;
     }
 
     void VKAccelerationStructure::RecordBuild(VkCommandBuffer cmd, VkDeviceAddress scratchBda, u32 frameAbs)
     {
-        const auto& rt = VulkanContext::Get().GetRtFn();
-
-        // Deformable builds over its per-frame CURR deformed region (written by the deform compute earlier
-        // this frame); static builds over its fixed source VB. Index/stride/flags are the recipe captured
-        // at creation.
-        //
-        // invariant: vkCmdBuildAccelerationStructuresKHR retains pointers into the geometry/build-info
-        // structs until the GPU executes the build (mirrors TlasBuilder::RefitSkinnedBLASes), so heap-
-        // allocate them to outlive a deferred command buffer; free via PushDeletion (N+2).
-        struct BuildCtx
-        {
-            VkAccelerationStructureGeometryKHR              geom;
-            VkAccelerationStructureBuildGeometryInfoKHR     info;
-            VkAccelerationStructureBuildRangeInfoKHR        range;
-            const VkAccelerationStructureBuildRangeInfoKHR* rangePtr;
-        };
-        auto* bc = new BuildCtx{};
-
-        bc->geom = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
-        bc->geom.geometryType                            = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-        bc->geom.geometry.triangles.sType                = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-        bc->geom.geometry.triangles.vertexFormat         = VK_FORMAT_R32G32B32_SFLOAT;
-        bc->geom.geometry.triangles.vertexData.deviceAddress = m_IsDeformable ? GetDeformedBdaCurr(frameAbs) : m_BuildVbBda;
-        bc->geom.geometry.triangles.vertexStride         = m_BuildVertexStride;
-        bc->geom.geometry.triangles.maxVertex            = m_BuildMaxVertex;
-        bc->geom.geometry.triangles.indexType            = VK_INDEX_TYPE_UINT32;
-        bc->geom.geometry.triangles.indexData.deviceAddress = m_BuildIbBda;
-        bc->geom.flags                                   = m_GeomFlags;
-
-        bc->info = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
-        bc->info.type                     = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-        bc->info.flags                    = m_BuildFlags;
-        bc->info.mode                     = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-        bc->info.dstAccelerationStructure = m_Handle;
-        bc->info.geometryCount            = 1;
-        bc->info.pGeometries              = &bc->geom;
-        bc->info.scratchData.deviceAddress = scratchBda;
-
-        bc->range    = { m_PrimitiveCount, 0u, 0u, 0u };
-        bc->rangePtr = &bc->range;
-
-        rt.vkCmdBuildAccelerationStructuresKHR(cmd, 1, &bc->info, &bc->rangePtr);
-        VulkanContext::Get().PushDeletion([bc]() { delete bc; });
-
-        m_BuildRecorded = true;
-        m_BuildFrameAbs = frameAbs;
+        const auto command = PrepareBuild(scratchBda, frameAbs);
+        command->Record(cmd);
+        MarkBuildRecorded(frameAbs);
     }
 
-    u32 VKAccelerationStructure::DrainPendingStaticBuilds(VkCommandBuffer cmd, u32 frameAbs)
+    PreparedBlasBuild VKAccelerationStructure::PreparePendingStaticBuilds(u32 frameAbs)
     {
         std::vector<PendingStaticBuild> pending;
         {
             SpinLockGuard lock(g_PendingStaticLock);
-            if (g_PendingStatic.empty()) return 0;
+            if (g_PendingStatic.empty()) return {};
             pending.swap(g_PendingStatic);   // drain a snapshot; concurrent enqueues stay for next frame
         }
 
@@ -148,7 +142,7 @@ namespace Luth
             totalScratch += as->GetBuildScratchSize();
         }
 
-        u32 built = 0;
+        PreparedBlasBuild prepared;
         if (!ready.empty())
         {
             // One batched device-local scratch, per-build sub-region (offsets are pre-aligned scratch sizes).
@@ -167,8 +161,17 @@ namespace Luth
                 addrInfo.buffer = scratchBuf;
                 const VkDeviceAddress scratchBase = vkGetBufferDeviceAddress(ctx.GetDevice(), &addrInfo);
                 for (auto& r : ready)
-                    r.as->RecordBuild(cmd, scratchBase + r.scratchOffset, frameAbs);
-                built = static_cast<u32>(ready.size());
+                {
+                    auto command = r.as->PrepareBuild(scratchBase + r.scratchOffset, frameAbs);
+                    command->targets.push_back(r.as);
+                    command->firstBuilds.push_back(true);
+                    const std::weak_ptr<VKAccelerationStructure> target = r.as;
+                    command->abandon = [target]() {
+                        SpinLockGuard lock(g_PendingStaticLock);
+                        g_PendingStatic.push_back({target, 0u});
+                    };
+                    prepared.commands.push_back(std::move(command));
+                }
                 VulkanContext::Get().PushDeletion([scratchBuf, scratchAlloc]() {
                     VulkanAllocator::FreeBuffer(scratchBuf, scratchAlloc);
                 });
@@ -185,12 +188,20 @@ namespace Luth
             SpinLockGuard lock(g_PendingStaticLock);
             g_PendingStatic.insert(g_PendingStatic.end(), requeue.begin(), requeue.end());
         }
-        return built;
+        return prepared;
+    }
+
+    u32 VKAccelerationStructure::DrainPendingStaticBuilds(VkCommandBuffer cmd, u32 frameAbs)
+    {
+        const auto prepared = PreparePendingStaticBuilds(frameAbs);
+        prepared.Record(cmd);
+        return prepared.FirstBuildCount();
     }
 
     std::shared_ptr<VKAccelerationStructure> VKAccelerationStructure::CreateStaticBLAS(const Mesh& mesh)
     {
         auto& ctx = VulkanContext::Get();
+        if (!ctx.SupportsRayTracing()) return {};
         VkDevice device = ctx.GetDevice();
         const auto& rt  = ctx.GetRtFn();
 
@@ -270,7 +281,9 @@ namespace Luth
 
         // Capture the build recipe so RecordBuild can replay it from a deferred command buffer.
         result->m_BuildVbBda        = tri.vertexData.deviceAddress;
+        result->m_BuildVertexBuffer = vb;
         result->m_BuildIbBda        = tri.indexData.deviceAddress;
+        result->m_BuildIndexBuffer = ib;
         result->m_BuildVertexStride = static_cast<u32>(tri.vertexStride);
         result->m_BuildMaxVertex    = tri.maxVertex;
         result->m_BuildScratchSize  = scratchSize;
@@ -298,6 +311,7 @@ namespace Luth
     std::shared_ptr<VKAccelerationStructure> VKAccelerationStructure::CreateDeformableBLAS(const Mesh& mesh)
     {
         auto& ctx = VulkanContext::Get();
+        if (!ctx.SupportsRayTracing()) return {};
         VkDevice device = ctx.GetDevice();
         const auto& rt  = ctx.GetRtFn();
 
@@ -312,42 +326,22 @@ namespace Luth
         const u32 indexCount = ib->GetCount();
         if (vertCount == 0 || indexCount == 0) return nullptr;
 
-        auto result = std::make_shared<VKAccelerationStructure>();
+        const auto& deformation = mesh.GetDeformation();
+        if (!deformation || deformation->GetVertexCount() != vertCount || !deformation->GetCurrentAddress(0))
+        {
+            LH_LOG(Renderer, error, "CreateDeformableBLAS: mesh deformation must be prepared first");
+            return nullptr;
+        }
+        auto result = std::make_shared<VKAccelerationStructure>(deformation);
         result->m_IsDeformable = true;
         result->m_VertexCount  = vertCount;
         result->m_PrimitiveCount = indexCount / 3;
 
-        // Deformed vertices: interleaved Vertex layout (52 B: pos/normal/uv0/uv1/tangent) so the RT
-        // geometry table reads post-skin normals/tangents byte-identical to a static VB; the AS build
-        // reads positions at offset 0. Double-buffered (curr/prev regions) so raster motion vectors can
-        // read the previous frame's positions; region alternates by frame parity, region 0 == CURR on
-        // frame 0. The first refit does the MODE_BUILD over CURR after the deform has written it (gated on
-        // the source-VB upload), so no pre-build zero-fill is needed. see arch/multi-queue.md
-        const VkDeviceSize deformedRegionBytes = static_cast<VkDeviceSize>(vertCount) * sizeof(Vertex);
-        const VkDeviceSize deformedSize        = 2 * deformedRegionBytes;
-        result->m_DeformedRegionBytes = deformedRegionBytes;
-        {
-            VkBufferCreateInfo ci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-            ci.size        = deformedSize;
-            ci.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                           | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-                           | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
-            ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            ctx.ApplyConcurrentSharing(ci);
-            result->m_DeformedAlloc = VulkanAllocator::AllocateBuffer(
-                ci, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, result->m_DeformedBuffer);
-            VkBufferDeviceAddressInfo addrInfo{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
-            addrInfo.buffer = result->m_DeformedBuffer;
-            result->m_DeformedBda = vkGetBufferDeviceAddress(device, &addrInfo);
-        }
-
-        // Geometry desc reads positions (offset 0) from the deformed vertex buffer (NOT the source
-        // SkinnedVertex VB). The initial build sees zero positions; the first per-frame Refit
-        // overwrites with real ones.
+        // Build recipe reads the same mesh-owned Vertex region used by raster deformation.
         VkAccelerationStructureGeometryTrianglesDataKHR tri{
             VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR };
         tri.vertexFormat                = VK_FORMAT_R32G32B32_SFLOAT;
-        tri.vertexData.deviceAddress    = result->m_DeformedBda;
+        tri.vertexData.deviceAddress    = result->GetDeformedBdaCurr(0);
         tri.vertexStride                = sizeof(Vertex);
         tri.maxVertex                   = vertCount - 1;
         tri.indexType                   = VK_INDEX_TYPE_UINT32;
@@ -431,7 +425,7 @@ namespace Luth
         VkAccelerationStructureGeometryTrianglesDataKHR tri{
             VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR };
         tri.vertexFormat                = VK_FORMAT_R32G32B32_SFLOAT;
-        tri.vertexData.deviceAddress    = m_DeformedBda;
+        tri.vertexData.deviceAddress    = GetDeformedBdaCurr(0);
         tri.vertexStride                = sizeof(Vertex);
         tri.maxVertex                   = m_VertexCount - 1;
         tri.indexType                   = VK_INDEX_TYPE_UINT32;

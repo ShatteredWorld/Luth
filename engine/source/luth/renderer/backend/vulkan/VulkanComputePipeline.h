@@ -19,6 +19,7 @@ namespace Luth
 
         void Bind(VkCommandBuffer cmd) const;
         VkPipelineLayout GetLayout() const { return m_PipelineLayout; }
+        VkPipeline GetHandle() const { return m_Pipeline; }
 
     private:
         VkPipeline       m_Pipeline       = VK_NULL_HANDLE;

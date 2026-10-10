@@ -1,7 +1,45 @@
 #include "luthpch.h"
+#include "luth/renderer/shader/ShaderReloadCoordinator.h"
 #include "luth/renderer/RenderPipeline.h"
+#include "luth/renderer/features/GTAOFeature.h"
+#include "luth/renderer/features/DeformationFeature.h"
+#include "luth/renderer/features/VisibilityFeature.h"
+#include "luth/renderer/features/DepthPrepassFeature.h"
+#include "luth/renderer/features/SlimGBufferFeature.h"
+#include "luth/renderer/features/CsmFeature.h"
+#include "luth/renderer/features/ClusteredLightingFeature.h"
+#include "luth/renderer/features/FogComputeFeature.h"
+#include "luth/renderer/features/FogCompositeFeature.h"
+#include "luth/renderer/features/RefractionBackdropFeature.h"
+#include "luth/renderer/features/TransparencyFeature.h"
+#include "luth/renderer/features/TaaFeature.h"
+#include "luth/renderer/features/BloomFeature.h"
+#include "luth/renderer/features/CompositeFeature.h"
+#include "luth/renderer/features/GridFeature.h"
+#include "luth/renderer/features/SelectionMaskFeature.h"
+#include "luth/renderer/features/OutlineFeature.h"
+#include "luth/renderer/features/DebugDrawFeature.h"
+#include "luth/renderer/features/SlimVizFeature.h"
+#include "luth/renderer/features/ClusterVizFeature.h"
+#include "luth/renderer/features/FogVizFeature.h"
+#include "luth/renderer/features/rt/GiReservoirVizFeature.h"
+#include "luth/renderer/features/rt/RtSunShadowFeature.h"
+#include "luth/renderer/features/rt/RestirDiFeature.h"
+#include "luth/renderer/features/rt/RestirGiFeature.h"
+#include "luth/renderer/features/rt/ReflectionFeature.h"
+#include "luth/renderer/features/rt/ReflectionDenoiserFeature.h"
+#include "luth/renderer/features/rt/ReflectionUpscaleFeature.h"
+#include "luth/renderer/features/rt/GiDenoiserFeature.h"
+#include "luth/renderer/features/rt/GiUpscaleFeature.h"
+#include "luth/renderer/features/rt/DiDenoiserFeature.h"
+#include "luth/renderer/features/rt/DiUpscaleFeature.h"
+#include "luth/renderer/features/rt/RtFogFeature.h"
+#include "luth/renderer/features/SkyFeature.h"
+#include "luth/renderer/features/ForwardOpaqueCompatibility.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
-#include "luth/renderer/debug/FrameDebuggerContext.h"
+
+#include "luth/renderer/debug/CaptureRecordingSession.h"
+#include "luth/renderer/debug/CaptureFinalization.h"
 #include "luth/scene/systems/RenderingSystem.h"
 #include "luth/scene/systems/SystemRegistry.h"
 #include "luth/scene/systems/LightingSystem.h"
@@ -43,7 +81,6 @@ namespace Luth
 
     RenderPipeline::RenderPipeline(RenderingSystem& system)
         : m_System(system)
-        , m_Debugger(std::make_unique<FrameDebuggerContext>(*this))
         , m_Denoise(std::make_unique<SvgfDenoiser>(DenoiserChannel::Di))
         , m_DenoiseGi(std::make_unique<SvgfDenoiser>(DenoiserChannel::Gi))
         , m_DenoiseRefl(std::make_unique<SvgfDenoiser>(DenoiserChannel::Reflections))
@@ -65,9 +102,9 @@ namespace Luth
         m_Global.Init(*this);
 
         BoneMatrixBuffer::Init();
-        m_EditorOverlays.Init(*this);
-        m_DebugDraw.Init(*this);
-        m_PostProcess.Init(*this);
+        m_EditorOverlays.Init();
+        m_DebugDraw.Init();
+        m_PostProcess.Init();
 
         // Lighting owns Set 3 + shadow map + IBL + skybox VB/SPVs. Engine ships no HDR; an empty path triggers
         // IBL::Precompute's silent dummy-cubemap fallback. Editor::OnProjectChanged invokes ReloadSkybox once
@@ -81,7 +118,7 @@ namespace Luth
         m_Geometry.Init(*this);
         // Transparency's Set 6 layout must exist before its BuildPipelines below appends it to geoLayouts
         // (same Init-before-BuildPipelines invariant as Geometry's Set 5).
-        m_Transparency.Init(*this);
+        m_Transparency.Init();
 
         // Shadow / skybox / PBR / DepthPrepass pipelines all need the shared 6-layout vector.
         std::vector<VkDescriptorSetLayout> geoLayouts = {
@@ -98,126 +135,389 @@ namespace Luth
         m_EditorOverlays.BuildPipelines(geoLayouts);
         m_DebugDraw.BuildPipelines();
 
-        m_GTAO.Init(*this);
+        m_GTAO.Init();
+        RenderPipelineDefinition gtaoDefinition;
+        gtaoDefinition.AddFeature<GTAOFeature>(m_GTAO, m_GtaoStates, &m_System.GetFrameDebugger());
+        PipelineInputContract gtaoInputs;
+        gtaoInputs.resources = {{RenderResources::SurfaceDepth}, {GtaoResources::Parameters}};
+        auto gtaoCompiled = RenderPipelineCompiler{}.Compile(std::move(gtaoDefinition), {}, gtaoInputs);
+        if (!gtaoCompiled.ReplaceIfValid(m_GtaoPipeline))
+            throw std::runtime_error("GTAO feature definition failed semantic validation");
         m_Volumetric.Init(*this);
-        m_Rt.Init(*this);
-        m_Restir.Init(*this);
-        m_RestirGi.Init(*this);
-        m_SlangParity.Init(*this);
-        m_PathTrace.Init(*this);
-        m_Reflections.Init(*this);
-        m_Denoise->Init(*this);
-        m_DenoiseGi->Init(*this);
-        m_DenoiseRefl->Init(*this);
-        m_DenoiseDiSpec->Init(*this);
-        m_Skinning.Init(*this);
+        m_RtNativeInitialized = VulkanContext::Get().SupportsRayTracing();
+        if (m_RtNativeInitialized)
+        {
+            m_Rt.Init(*this);
+            m_Restir.Init(*this);
+            m_RestirGi.Init(*this);
+            m_SlangParity.Init(*this);
+            m_PathTrace.Init(*this);
+            m_Reflections.Init(*this);
+            m_Denoise->Init(*this);
+            m_DenoiseGi->Init(*this);
+            m_DenoiseRefl->Init(*this);
+            m_DenoiseDiSpec->Init(*this);
+            RenderPipelineDefinition sceneDefinition;
+            sceneDefinition.AddFeature<RtSceneFeature>(m_Rt);
+            sceneDefinition.AddFeature<RtSunShadowDemandFeature>();
+            sceneDefinition.AddFeature<RtFogDemandFeature>();
+            sceneDefinition.AddFeature<RestirDiDemandFeature>();
+            sceneDefinition.AddFeature<RestirGiDemandFeature>();
+            sceneDefinition.AddFeature<ReflectionDemandFeature>();
+            for (size_t i = 5; i < static_cast<size_t>(RtSceneConsumer::Count); ++i)
+                sceneDefinition.AddFeature<RtSceneDemandFeature>(static_cast<RtSceneConsumer>(i));
+            PipelineInputContract sceneInputs;
+            sceneInputs.resources = {{RtSceneResources::Parameters}};
+            RendererCapabilities sceneCapabilities{{&RtSceneResources::AccelerationStructures, &RtSceneResources::RayQueries}};
+            auto sceneCompiled = RenderPipelineCompiler{}.Compile(std::move(sceneDefinition), sceneCapabilities, sceneInputs);
+            if (!sceneCompiled.ReplaceIfValid(m_RtSceneComposition))
+                throw std::runtime_error("RT scene definition failed semantic validation");
+            RenderPipelineDefinition shadowDefinition;
+            shadowDefinition.AddFeature<RtSunShadowFeature>();
+            PipelineInputContract shadowInputs;
+            shadowInputs.resources = {{RtSceneResources::Parameters}, {RtSunShadowResources::Bindings},
+                {RenderResources::SurfaceDepth}, {RenderResources::Normal},
+                {RtSceneResources::Scene, ResourceOutputPresence::Optional}};
+            shadowInputs.capabilities = {&RtSceneResources::RayScene};
+            auto shadowCompiled = RenderPipelineCompiler{}.Compile(std::move(shadowDefinition), sceneCapabilities, shadowInputs);
+            if (!shadowCompiled.ReplaceIfValid(m_RtSunShadowComposition))
+                throw std::runtime_error("RT sun-shadow definition failed semantic validation");
+            RenderPipelineDefinition reflectionDefinition;
+            reflectionDefinition.AddFeature<ReflectionFeature>();
+            reflectionDefinition.AddFeature<ReflectionDenoiserFeature>();
+            reflectionDefinition.AddFeature<ReflectionUpscaleFeature>();
+            PipelineInputContract reflectionInputs;
+            reflectionInputs.resources = {{RtSceneResources::Parameters}, {ReflectionResources::Bindings},
+                {ReflectionDenoiserResources::Bindings}, {ReflectionUpscaleResources::Bindings}, {RenderResources::MaterialID},
+                {RenderResources::SurfaceDepth}, {RenderResources::Normal}, {RenderResources::Roughness},
+                {RenderResources::LightData}, {RtSceneResources::Scene, ResourceOutputPresence::Optional}};
+            reflectionInputs.capabilities = {&RtSceneResources::RayScene};
+            auto reflectionCompiled = RenderPipelineCompiler{}.Compile(std::move(reflectionDefinition), sceneCapabilities, reflectionInputs);
+            if (!reflectionCompiled.ReplaceIfValid(m_ReflectionComposition))
+                throw std::runtime_error("Reflection definition failed semantic validation");
+            RenderPipelineDefinition giDefinition;
+            giDefinition.AddFeature<RestirGiFeature>();
+            giDefinition.AddFeature<GiDenoiserFeature>();
+            giDefinition.AddFeature<GiUpscaleFeature>();
+            PipelineInputContract giInputs;
+            giInputs.resources = {{RtSceneResources::Parameters}, {RestirGiResources::Bindings},
+                {GiDenoiserResources::Bindings}, {RenderResources::MaterialID}, {RenderResources::Roughness},
+                {GiUpscaleResources::Bindings},
+                {RenderResources::SurfaceDepth}, {RenderResources::Normal}, {RenderResources::MotionVectors},
+                {RenderResources::LightData}, {RtSceneResources::Scene, ResourceOutputPresence::Optional}};
+            giInputs.capabilities = {&RtSceneResources::RayScene};
+            auto giCompiled = RenderPipelineCompiler{}.Compile(std::move(giDefinition), sceneCapabilities, giInputs);
+            if (!giCompiled.ReplaceIfValid(m_RestirGiComposition))
+                throw std::runtime_error("ReSTIR GI definition failed semantic validation");
+            RenderPipelineDefinition diDefinition;
+            diDefinition.AddFeature<RestirDiFeature>();
+            diDefinition.AddFeature<DiDenoiserFeature>();
+            diDefinition.AddFeature<DiDenoiserFeature>(DiDenoiserSignal::Specular);
+            diDefinition.AddFeature<DiUpscaleFeature>();
+            diDefinition.AddFeature<DiUpscaleFeature>(DiDenoiserSignal::Specular);
+            PipelineInputContract diInputs;
+            diInputs.resources = {{RtSceneResources::Parameters}, {RestirDiResources::Bindings}, {DiDenoiserResources::Bindings},
+                {DiDenoiserResources::SpecularBindings}, {DiUpscaleResources::Bindings},
+                {DiUpscaleResources::SpecularBindings}, {RenderResources::MaterialID},
+                {RenderResources::SurfaceDepth}, {RenderResources::Normal}, {RenderResources::MotionVectors},
+                {RenderResources::Roughness}, {RenderResources::LightData}, {RtSceneResources::Scene, ResourceOutputPresence::Optional}};
+            diInputs.capabilities = {&RtSceneResources::RayScene};
+            auto diCompiled = RenderPipelineCompiler{}.Compile(std::move(diDefinition), sceneCapabilities, diInputs);
+            if (!diCompiled.ReplaceIfValid(m_RestirDiComposition))
+                throw std::runtime_error("ReSTIR DI definition failed semantic validation");
+        }
+        m_Skinning.Init();
+        RenderPipelineDefinition deformationDefinition;
+        deformationDefinition.AddFeature<VisibilityFeature>(m_Geometry, &m_System.GetFrameDebugger());
+        deformationDefinition.AddFeature<DeformationFeature>(m_Skinning);
+        PipelineInputContract deformationInputs;
+        deformationInputs.resources = {{DeformationResources::Parameters}, {VisibilityResources::Parameters},
+            {RenderResources::ObjectData}, {RenderResources::InitializedIndirectData}};
+        auto deformationCompiled = RenderPipelineCompiler{}.Compile(std::move(deformationDefinition), {}, deformationInputs);
+        if (!deformationCompiled.ReplaceIfValid(m_GeometryPreparationPipeline))
+            throw std::runtime_error("Geometry preparation feature definition failed semantic validation");
+        RenderPipelineDefinition depthDefinition;
+        depthDefinition.AddFeature<DepthPrepassFeature>(m_Geometry, &m_System.GetFrameDebugger());
+        depthDefinition.AddFeature<SlimGBufferFeature>(m_Geometry, &m_System.GetFrameDebugger());
+        PipelineInputContract depthInputs;
+        depthInputs.resources = {{RenderResources::CameraVisibleDraws}, {DepthPrepassResources::Target},
+            {DepthPrepassResources::Bindings}, {SlimGBufferResources::NormalTarget}, {SlimGBufferResources::RoughnessTarget},
+            {SlimGBufferResources::MotionTarget}, {SlimGBufferResources::MaterialTarget}, {SlimGBufferResources::Bindings}};
+        depthInputs.capabilities = {&DeformationResources::DeformedGeometry};
+        auto depthCompiled = RenderPipelineCompiler{}.Compile(std::move(depthDefinition), {}, depthInputs);
+        if (!depthCompiled.ReplaceIfValid(m_SurfacePreparationComposition))
+            throw std::runtime_error("Surface preparation feature definition failed semantic validation");
 
-        // Shader hot-reload callback: pulls fresh SPIR-V into the cached blob and rebuilds pipelines that use it.
-        // Fires after ShaderLibrary::Reload has already recompiled and re-reflected the single-stage shader.
-        // Library keys are the shader filename (e.g. "pbr_vert.slang", "gtao_main.slang").
-        ShaderLibrary::SetReloadCallback([this](const std::string& name) {
-            // No vkDeviceWaitIdle: old pipelines are deferred-destroyed via VulkanContext::PushDeletion, which
-            // drains MAX_FRAMES_IN_FLIGHT frames later in AcquireImage; by then the GPU has retired any command
-            // buffer that bound them. Keeps shader save under steady frame pacing.
-            auto vk = std::static_pointer_cast<VulkanShader>(ShaderLibrary::Get(name));
-            if (!vk || !vk->IsValid())
-            {
-                LH_LOG(Renderer, error, "Shader reload: '{}' invalid - keeping existing pipelines", name);
-                return;
-            }
-            const auto& spv = vk->GetSpirV();
-
-            std::vector<VkDescriptorSetLayout> geoLayouts = {
-                m_Global.GetSetLayout(),
-                VulkanContext::Get().GetBindlessSet().GetLayout(),
-                MaterialSystem::GetDescriptorSetLayout(),
-                m_Lighting.GetSetLayout(),
-                BoneMatrixBuffer::GetDescriptorSetLayout(),
-                m_Geometry.GetSet5Layout()
-            };
-            // Subsystems handle their own shaders + pipeline rebuilds. Order matters: fullscreen.slang must
-            // reach both PostProcess and EditorOverlays (PostProcess returns false for it; EditorOverlays
-            // returns true). Debug shaders + IBL precompute remain RP residual.
-            // Transparency runs OUTSIDE the || chain (overlays precedent): it must also see
-            // pbr_vert.slang / pbr_skinned.slang (handled = true by Geometry) to invalidate its variants.
-            const bool transparencyHandled = m_Transparency.OnShaderReloaded(name, spv);
-            // SlangParity gate runs OUTSIDE the || chain: it re-scans restir_gi_initial.slang, which RestirGi
-            // consumes first (short-circuiting the chain), and it rebuilds no pipeline of its own.
-            m_SlangParity.OnShaderReloaded(name, spv);
-            const bool handled = m_Lighting.OnShaderReloaded(name, spv, geoLayouts)
-                              || m_Geometry.OnShaderReloaded(name, spv, geoLayouts)
-                              || m_GTAO.OnShaderReloaded(name, spv)
-                              || m_Volumetric.OnShaderReloaded(name, spv)
-                              || m_Skinning.OnShaderReloaded(name, spv)
-                              || m_Rt.OnShaderReloaded(name, spv)
-                              || m_Restir.OnShaderReloaded(name, spv)
-                              || m_RestirGi.OnShaderReloaded(name, spv)
-                              || m_PathTrace.OnShaderReloaded(name, spv)
-                              || m_Reflections.OnShaderReloaded(name, spv)
-                              || m_Denoise->OnShaderReloaded(name, spv)
-                              || m_DenoiseGi->OnShaderReloaded(name, spv)
-                              || m_DenoiseRefl->OnShaderReloaded(name, spv)
-                              || m_DenoiseDiSpec->OnShaderReloaded(name, spv);
-            // PostProcess returns false for fullscreen.slang so EditorOverlays still gets to rebuild its outline/grid pipelines below.
-            const bool ppHandled       = m_PostProcess.OnShaderReloaded(name, spv);
-            const bool overlaysHandled = m_EditorOverlays.OnShaderReloaded(name, spv, geoLayouts);
-            const bool debugHandled    = m_DebugDraw.OnShaderReloaded(name, spv);
-            if (handled || ppHandled || overlaysHandled || debugHandled || transparencyHandled)
-            {
-                if      (name == "debugBlit.slang")  m_System.GetFrameDebugger().blitFragSpv  = spv;
-                else if (name == "debugDepth.slang") m_System.GetFrameDebugger().depthFragSpv = spv;
-                LH_LOG(Renderer, info, "Pipelines rebuilt after shader reload: {}", name);
-                return;
-            }
-
-            // Debug-shader-only path (no pipeline rebuild on RP side; FrameDebuggerContext rebuilds lazily).
-            if      (name == "debugBlit.slang")  m_System.GetFrameDebugger().blitFragSpv  = spv;
-            else if (name == "debugDepth.slang") m_System.GetFrameDebugger().depthFragSpv = spv;
-            // IBL precompute shaders refresh in the library; ReloadSkybox() must run to re-bake.
-        });
-
-        // Shader hot-reload watcher (engine-shaders dir; project dirs added via RenderingSystem::OnProjectLoaded).
-        // Queues background-thread detections for main-thread Poll at the top of Execute.
-        m_ShaderWatcher.Start(FileSystem::EngineAssetsPath("shaders"));
-
-        m_GPUTimers.Init(256);   // headroom over the current ~70-pass RT graph; see ReadResults overflow warn
-        RegisterNamedTextures();
+        RenderPipelineDefinition csmDefinition;
+        csmDefinition.AddFeature<CsmFeature>(m_Lighting, &m_System.GetFrameDebugger());
+        PipelineInputContract csmInputs;
+        csmInputs.resources = {{CsmResources::Parameters}, {CsmResources::Bindings},
+            {RenderResources::CascadeVisibleDraws, ResourceOutputPresence::Optional}};
+        csmInputs.capabilities = {&DeformationResources::DeformedGeometry};
+        auto csmCompiled = RenderPipelineCompiler{}.Compile(std::move(csmDefinition), {}, csmInputs);
+        if (!csmCompiled.ReplaceIfValid(m_CsmComposition))
+            throw std::runtime_error("CSM feature definition failed semantic validation");
+        RenderPipelineDefinition clusterDefinition;
+        clusterDefinition.AddFeature<ClusteredLightingFeature>(m_Lighting, &m_System.GetFrameDebugger());
+        PipelineInputContract clusterInputs;
+        clusterInputs.resources = {{ClusterResources::Bindings},
+            {ClusterResources::UploadedLights, ResourceOutputPresence::Optional}};
+        auto clusterCompiled = RenderPipelineCompiler{}.Compile(std::move(clusterDefinition), {}, clusterInputs);
+        if (!clusterCompiled.ReplaceIfValid(m_ClusterComposition))
+            throw std::runtime_error("Clustered lighting feature definition failed semantic validation");
+        RenderPipelineDefinition fogDefinition;
+        fogDefinition.AddFeature<FogComputeFeature>(m_Volumetric, &m_System.GetFrameDebugger());
+        PipelineInputContract fogInputs;
+        fogInputs.resources = {{FogResources::Bindings},
+            {FogResources::Volumes, ResourceOutputPresence::Optional},
+            {RenderResources::LightData, ResourceOutputPresence::Optional},
+            {RenderResources::ClusterGrid, ResourceOutputPresence::Optional},
+            {RenderResources::LightIndices, ResourceOutputPresence::Optional},
+            {RenderResources::ShadowCascades, ResourceOutputPresence::Optional}};
+        auto fogCompiled = RenderPipelineCompiler{}.Compile(std::move(fogDefinition), {}, fogInputs);
+        if (!fogCompiled.ReplaceIfValid(m_FogComputeComposition))
+            throw std::runtime_error("Fog compute feature definition failed semantic validation");
+        if (m_RtNativeInitialized) {
+            RenderPipelineDefinition rtFogDefinition;
+            rtFogDefinition.AddFeature<RtFogFeature>(m_Volumetric, &m_System.GetFrameDebugger());
+            auto rtFogInputs = fogInputs;
+            rtFogInputs.resources.push_back({RtSceneResources::Parameters});
+            rtFogInputs.resources.push_back({RtSceneResources::Scene, ResourceOutputPresence::Optional});
+            rtFogInputs.capabilities = {&RtSceneResources::RayScene};
+            auto compiled = RenderPipelineCompiler{}.Compile(std::move(rtFogDefinition),
+                RendererCapabilities{{&RtSceneResources::AccelerationStructures, &RtSceneResources::RayQueries}}, rtFogInputs);
+            if (!compiled.ReplaceIfValid(m_RtFogComposition))
+                throw std::runtime_error("RT fog definition failed semantic validation");
+        }
+        RenderPipelineDefinition transparencyDefinition;
+        transparencyDefinition.AddFeature<TransparencyFeature>(m_Transparency, &m_System.GetFrameDebugger());
+        PipelineInputContract transparencyInputs;
+        transparencyInputs.resources = {{TransparencyResources::Bindings}, {RenderResources::FoggedHDR}, {RenderResources::LitDepth},
+            {RenderResources::OpaquePickingIDs}, {RenderResources::CameraVisibleDraws},
+            {RenderResources::ResolvedFog, ResourceOutputPresence::Optional}, {RenderResources::RefractionBackdrop, ResourceOutputPresence::Optional},
+            {RenderResources::LightData, ResourceOutputPresence::Optional}, {RenderResources::ClusterGrid, ResourceOutputPresence::Optional},
+            {RenderResources::LightIndices, ResourceOutputPresence::Optional}};
+        transparencyInputs.capabilities = {&DeformationResources::DeformedGeometry};
+        auto transparencyCompiled = RenderPipelineCompiler{}.Compile(std::move(transparencyDefinition), {}, transparencyInputs);
+        if (!transparencyCompiled.ReplaceIfValid(m_TransparencyComposition))
+            throw std::runtime_error("Transparency definition failed semantic validation");
+        RenderPipelineDefinition visualizationDefinition;
+        visualizationDefinition.AddFeature<SlimVizFeature>(m_PostProcess, &m_System.GetFrameDebugger());
+        visualizationDefinition.AddFeature<ClusterVizFeature>(m_Lighting, &m_System.GetFrameDebugger());
+        visualizationDefinition.AddFeature<FogVizFeature>(m_Volumetric, &m_System.GetFrameDebugger());
+        visualizationDefinition.AddFeature<GiReservoirVizFeature>(m_RestirGi);
+        PipelineInputContract visualizationInputs;
+        visualizationInputs.resources = {{RenderResources::TonemappedLDR}, {SlimVizResources::Bindings}, {ClusterVizResources::Bindings},
+            {FogVizResources::Bindings}, {GiReservoirVizResources::Bindings},
+            {GiReservoirVizResources::SpatialReservoir, ResourceOutputPresence::Optional}, {RenderResources::FogDensity, ResourceOutputPresence::Optional},
+            {RenderResources::ResolvedFog, ResourceOutputPresence::Optional},
+            {RenderResources::SurfaceDepth, ResourceOutputPresence::Optional}, {RenderResources::ClusterGrid, ResourceOutputPresence::Optional},
+            {RenderResources::Normal, ResourceOutputPresence::Optional}, {RenderResources::Roughness, ResourceOutputPresence::Optional},
+            {RenderResources::MotionVectors, ResourceOutputPresence::Optional}, {RenderResources::MaterialID, ResourceOutputPresence::Optional}};
+        auto visualizationCompiled = RenderPipelineCompiler{}.Compile(std::move(visualizationDefinition), {}, visualizationInputs);
+        if (!visualizationCompiled.ReplaceIfValid(m_VisualizationComposition))
+            throw std::runtime_error("Visualization definition failed semantic validation");
+        RenderPipelineDefinition outlineDefinition;
+        outlineDefinition.AddFeature<OutlineFeature>(m_EditorOverlays, &m_System.GetFrameDebugger());
+        PipelineInputContract outlineInputs;
+        outlineInputs.resources = {{RenderResources::VisualizedLDR}, {OutlineResources::Bindings},
+            {RenderResources::SelectionMask, ResourceOutputPresence::Optional},
+            {RenderResources::SelectionDepth, ResourceOutputPresence::Optional},
+            {RenderResources::LitDepth, ResourceOutputPresence::Optional}};
+        auto outlineCompiled = RenderPipelineCompiler{}.Compile(std::move(outlineDefinition), {}, outlineInputs);
+        if (!outlineCompiled.ReplaceIfValid(m_OutlineComposition))
+            throw std::runtime_error("Outline definition failed semantic validation");
+        RenderPipelineDefinition debugDrawDefinition;
+        debugDrawDefinition.AddFeature<DebugDrawFeature>(m_DebugDraw, &m_System.GetFrameDebugger());
+        PipelineInputContract debugDrawInputs; debugDrawInputs.resources = {{RenderResources::OutlinedLDR}, {DebugDrawResources::Bindings}};
+        auto debugDrawCompiled = RenderPipelineCompiler{}.Compile(std::move(debugDrawDefinition), {}, debugDrawInputs);
+        if (!debugDrawCompiled.ReplaceIfValid(m_DebugDrawComposition))
+            throw std::runtime_error("DebugDraw definition failed semantic validation");
+        RenderPipelineDefinition selectionDefinition;
+        selectionDefinition.AddFeature<SelectionMaskFeature>(m_EditorOverlays, &m_System.GetFrameDebugger());
+        PipelineInputContract selectionInputs; selectionInputs.resources = {{SelectionMaskResources::Bindings}};
+        auto selectionCompiled = RenderPipelineCompiler{}.Compile(std::move(selectionDefinition), {}, selectionInputs);
+        if (!selectionCompiled.ReplaceIfValid(m_SelectionMaskComposition))
+            throw std::runtime_error("SelectionMask definition failed semantic validation");
+        RenderPipelineDefinition gridDefinition;
+        gridDefinition.AddFeature<GridFeature>(m_EditorOverlays, &m_System.GetFrameDebugger());
+        PipelineInputContract gridInputs;
+        gridInputs.resources = {{RenderResources::ResolvedHDR}, {GridResources::Bindings},
+            {RenderResources::LitDepth, ResourceOutputPresence::Optional},
+            {RenderResources::BloomOutput, ResourceOutputPresence::Optional}};
+        auto gridCompiled = RenderPipelineCompiler{}.Compile(std::move(gridDefinition), {}, gridInputs);
+        if (!gridCompiled.ReplaceIfValid(m_GridComposition))
+            throw std::runtime_error("Grid definition failed semantic validation");
+        RenderPipelineDefinition compositeDefinition;
+        compositeDefinition.AddFeature<CompositeFeature>(m_PostProcess, &m_System.GetFrameDebugger());
+        PipelineInputContract compositeInputs;
+        compositeInputs.resources = {{RenderResources::GridHDR}, {RenderResources::BloomOutput, ResourceOutputPresence::Optional}, {CompositeResources::Bindings}};
+        auto compositeCompiled = RenderPipelineCompiler{}.Compile(std::move(compositeDefinition), {}, compositeInputs);
+        if (!compositeCompiled.ReplaceIfValid(m_CompositeComposition))
+            throw std::runtime_error("Composite definition failed semantic validation");
+        RenderPipelineDefinition bloomDefinition;
+        bloomDefinition.AddFeature<BloomFeature>(m_PostProcess, &m_System.GetFrameDebugger());
+        PipelineInputContract bloomInputs;
+        bloomInputs.resources = {{RenderResources::ResolvedHDR}, {BloomResources::Bindings}};
+        auto bloomCompiled = RenderPipelineCompiler{}.Compile(std::move(bloomDefinition), {}, bloomInputs);
+        if (!bloomCompiled.ReplaceIfValid(m_BloomComposition))
+            throw std::runtime_error("Bloom definition failed semantic validation");
+        RenderPipelineDefinition taaDefinition;
+        taaDefinition.AddFeature<TaaFeature>(m_PostProcess, &m_System.GetFrameDebugger());
+        PipelineInputContract taaInputs;
+        taaInputs.resources = {{RenderResources::TransparentHDR}, {RenderResources::MotionVectors},
+            {RenderResources::LitDepth}, {TaaResources::Bindings}};
+        auto taaCompiled = RenderPipelineCompiler{}.Compile(std::move(taaDefinition), {}, taaInputs);
+        if (!taaCompiled.ReplaceIfValid(m_TaaComposition))
+            throw std::runtime_error("TAA definition failed semantic validation");
+        RenderPipelineDefinition backdropDefinition;
+        backdropDefinition.AddFeature<RefractionBackdropFeature>(m_Transparency);
+        PipelineInputContract backdropInputs;
+        backdropInputs.resources = {{RenderResources::FoggedHDR}, {RefractionResources::Bindings}};
+        auto backdropCompiled = RenderPipelineCompiler{}.Compile(std::move(backdropDefinition), {}, backdropInputs);
+        if (!backdropCompiled.ReplaceIfValid(m_RefractionComposition))
+            throw std::runtime_error("Refraction backdrop feature definition failed semantic validation");
+        RenderPipelineDefinition fogCompositeDefinition;
+        fogCompositeDefinition.AddFeature<FogCompositeFeature>(m_Volumetric, &m_System.GetFrameDebugger());
+        PipelineInputContract fogCompositeInputs;
+        fogCompositeInputs.resources = {{RenderResources::SkyHDR}, {RenderResources::SurfaceDepth},
+            {FogCompositeResources::Bindings}, {RenderResources::ResolvedFog, ResourceOutputPresence::Optional}};
+        auto fogCompositeCompiled = RenderPipelineCompiler{}.Compile(std::move(fogCompositeDefinition), {}, fogCompositeInputs);
+        if (!fogCompositeCompiled.ReplaceIfValid(m_FogCompositeComposition))
+            throw std::runtime_error("Fog composite feature definition failed semantic validation");
+        RenderPipelineDefinition skyDefinition;
+        skyDefinition.AddFeature<SkyFeature>(m_Lighting, &m_System.GetFrameDebugger());
+        PipelineInputContract skyInputs;
+        skyInputs.resources = {{RenderResources::OpaqueHDR}, {RenderResources::LitDepth}, {SkyResources::Bindings}};
+        auto skyCompiled = RenderPipelineCompiler{}.Compile(std::move(skyDefinition), {}, skyInputs);
+        if (!skyCompiled.ReplaceIfValid(m_SkyComposition))
+            throw std::runtime_error("Sky feature definition failed semantic validation");
+        RenderPipelineDefinition forwardDefinition;
+        forwardDefinition.AddFeature<HybridForwardOpaqueFeature>(m_Geometry, &m_System.GetFrameDebugger());
+        PipelineInputContract forwardInputs;
+        forwardInputs.resources = {{ForwardOpaqueResources::Bindings}, {ForwardOpaqueResources::ColorTarget},
+            {ForwardOpaqueResources::PickingTarget}, {RenderResources::CameraVisibleDraws}, {RenderResources::SurfaceDepth},
+            {RenderResources::ShadowCascades, ResourceOutputPresence::Optional},
+            {RenderResources::AmbientOcclusion, ResourceOutputPresence::Optional},
+            {RenderResources::LightData, ResourceOutputPresence::Optional}, {RenderResources::ClusterGrid, ResourceOutputPresence::Optional},
+            {RenderResources::LightIndices, ResourceOutputPresence::Optional},
+            {ForwardCompatibilityResources::SunShadowMask, ResourceOutputPresence::Optional},
+            {ForwardCompatibilityResources::DenoisedDiffuseDI, ResourceOutputPresence::Optional},
+            {ForwardCompatibilityResources::DenoisedDiffuseGI, ResourceOutputPresence::Optional},
+            {ForwardCompatibilityResources::DenoisedReflectionRadiance, ResourceOutputPresence::Optional},
+            {ForwardCompatibilityResources::DenoisedSpecularDI, ResourceOutputPresence::Optional}};
+        forwardInputs.capabilities = {&DeformationResources::DeformedGeometry};
+        auto forwardCompiled = RenderPipelineCompiler{}.Compile(std::move(forwardDefinition), {}, forwardInputs);
+        if (!forwardCompiled.ReplaceIfValid(m_ForwardComposition))
+            throw std::runtime_error("Forward opaque definition failed semantic validation");
+        m_System.RefreshViewDebugOutputs(m_System.GetViews().Find(&m_System.GetSceneTargets()), m_System.GetSceneTargets());
     }
 
+    ShaderWatcher& RenderPipeline::GetShaderWatcher()
+    {
+        return m_System.GetShaderReloadCoordinator().Watcher();
+    }
+
+    void RenderPipeline::RegisterShaderReloadConsumers(ShaderReloadCoordinator& coordinator)
+    {
+        // This compatibility host contributes explicit native owners, not reload policy.
+        auto layouts = [this] {
+            return std::vector<VkDescriptorSetLayout>{m_Global.GetSetLayout(),
+                VulkanContext::Get().GetBindlessSet().GetLayout(), MaterialSystem::GetDescriptorSetLayout(),
+                m_Lighting.GetSetLayout(), BoneMatrixBuffer::GetDescriptorSetLayout(), m_Geometry.GetSet5Layout()};
+        };
+        coordinator.AddConsumer("Lighting", [this, layouts](const auto& name, const auto& spv) {
+            return m_Lighting.OnShaderReloaded(name, spv, layouts());
+        });
+        coordinator.AddConsumer("Geometry", [this, layouts](const auto& name, const auto& spv) {
+            return m_Geometry.OnShaderReloaded(name, spv, layouts());
+        });
+        coordinator.AddConsumer("EditorOverlays", [this, layouts](const auto& name, const auto& spv) {
+            return m_EditorOverlays.OnShaderReloaded(name, spv, layouts());
+        });
+        auto add = [&coordinator](const char* name, auto& domain) {
+            coordinator.AddConsumer(name, [&domain](const auto& shader, const auto& spv) {
+                return domain.OnShaderReloaded(shader, spv);
+            });
+        };
+        add("Transparency", m_Transparency);
+
+        add("GTAO", m_GTAO);
+        add("Volumetric", m_Volumetric);
+        add("Skinning", m_Skinning);
+        if (m_RtNativeInitialized)
+        {
+            add("SlangParity", m_SlangParity);
+            add("RaySceneAndShadows", m_Rt);
+            add("ReSTIR_DI", m_Restir);
+            add("ReSTIR_GI", m_RestirGi);
+            add("PathTrace", m_PathTrace);
+            add("Reflections", m_Reflections);
+            add("Denoise_DI", *m_Denoise);
+            add("Denoise_GI", *m_DenoiseGi);
+            add("Denoise_Reflections", *m_DenoiseRefl);
+            add("Denoise_DI_Specular", *m_DenoiseDiSpec);
+        }
+        add("PostProcess", m_PostProcess);
+        add("DebugDraw", m_DebugDraw);
+    }
     void RenderPipeline::Shutdown()
     {
         LH_PROFILE_FUNCTION();
         auto& s = m_System;
 
-        m_ShaderWatcher.Stop();
-        ShaderLibrary::SetReloadCallback(nullptr);
-        m_GPUTimers.Shutdown();
 
         BoneMatrixBuffer::Shutdown();
-
-        VkDevice device = VulkanContext::Get().GetDevice();
 
         // Release per-view state before the shared layouts it references.
         for (auto& [targets, vr] : m_ViewResources)
             DestroyViewResources(vr);
         m_ViewResources.clear();
-
-        m_Debugger->Shutdown();
-        m_System.GetFrameDebugger().Shutdown(device);
+        m_GtaoPipeline.reset();
+        m_GtaoStates.ReleaseAll([] { Renderer::WaitForGPU(); });
 
         // Subsystems own their layouts/pools/samplers/pipelines.
         m_Transparency.Shutdown();
+        m_GeometryPreparationPipeline.reset();
+        m_SurfacePreparationComposition.reset();
+        m_CsmComposition.reset();
+        m_ClusterComposition.reset();
+        m_FogComputeComposition.reset();
+        m_RtFogComposition.reset();
+        m_FogCompositeComposition.reset();
+        m_RefractionComposition.reset();
+        m_TransparencyComposition.reset();
+        m_TaaComposition.reset();
+        m_BloomComposition.reset();
+        m_VisualizationComposition.reset();
+        m_OutlineComposition.reset();
+        m_DebugDrawComposition.reset();
+        m_SelectionMaskComposition.reset();
+        m_GridComposition.reset();
+        m_CompositeComposition.reset();
+        m_SkyComposition.reset();
+        m_ForwardComposition.reset();
         m_Skinning.Shutdown();
-        m_DenoiseDiSpec->Shutdown();
-        m_DenoiseRefl->Shutdown();
-        m_DenoiseGi->Shutdown();
-        m_Denoise->Shutdown();
-        m_Reflections.Shutdown();
-        m_PathTrace.Shutdown();
-        m_SlangParity.Shutdown();
-        m_RestirGi.Shutdown();
-        m_Restir.Shutdown();
-        m_Rt.Shutdown();
+        if (m_RtNativeInitialized)
+        {
+            m_DenoiseDiSpec->Shutdown();
+            m_DenoiseRefl->Shutdown();
+            m_DenoiseGi->Shutdown();
+            m_Denoise->Shutdown();
+            m_Reflections.Shutdown();
+            m_PathTrace.Shutdown();
+            m_SlangParity.Shutdown();
+            m_RestirGi.Shutdown();
+            m_Restir.Shutdown();
+            m_RtScenePlan.reset();
+            m_RtSceneComposition.reset();
+            m_RtSunShadowComposition.reset();
+            m_RestirDiComposition.reset();
+            m_RestirGiComposition.reset();
+            m_ReflectionComposition.reset();
+            m_Rt.Shutdown();
+            m_RtNativeInitialized = false;
+        }
         m_DebugDraw.Shutdown();
         m_EditorOverlays.Shutdown();
         m_PostProcess.Shutdown();
@@ -233,22 +533,54 @@ namespace Luth
         // Scene-panel resize. FrameTargets is already resized by RenderingSystem::Resize;
         // EnsureViewResources picks up the size change and rebuilds textures + descriptors.
         EnsureViewResources(m_System.GetSceneTargets());
-        RegisterNamedTextures();
+        m_System.RefreshViewDebugOutputs(m_System.GetViews().Find(&m_System.GetSceneTargets()), m_System.GetSceneTargets());
+    }
+
+    void RenderPipeline::PrepareRtScene(const RenderView& view, const DirectionalLightShadowParams& shadows)
+    {
+        m_RtScenePlan.reset();
+        if (!m_RtSceneComposition) return;
+        m_RtSceneParameters.active = {
+            shadows.mode == ShadowingMode::RtShadows && shadows.castShadows,
+            view.camera.enableVolumetricFog && m_Volumetric.IsRtShadowsEnabled(),
+            m_Restir.IsEnabled(), m_RestirGi.IsEnabled(), m_Reflections.IsEnabled(), m_PathTrace.IsEnabled()};
+        m_RtSceneParameters.materialSlots = &GetMaterialSlotMap();
+        m_RtSceneParameters.markEmitters = m_System.GetEmissiveLightSettings().enabled && m_System.GetRestirSettings().enabled;
+        const std::array bindings{RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters)};
+        FrameRenderInputs frame;
+        frame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+        frame.snapshot = &m_System.GetActiveSnapshot();
+        frame.resources = bindings;
+        ViewRenderInputs inputs;
+        inputs.id = view.id;
+        inputs.resourceGeneration = m_CurrentViewResources->generation;
+        auto prepared = m_RtSceneComposition->Prepare(frame, inputs, m_System.GetFrameAllocator());
+        if (!prepared.success)
+        {
+            for (const auto& diagnostic : prepared.diagnostics)
+                LH_LOG(Renderer, error, "RT scene preparation: {}", diagnostic.message);
+            throw std::runtime_error("RT scene preparation failed");
+        }
+        m_RtScenePlan = std::move(prepared.plan);
     }
 
     void RenderPipeline::PrepareForTargets(FrameTargets& targets)
     {
         m_CurrentViewResources = &EnsureViewResources(targets);
+        m_CurrentViewResources->graphRecorded = false;
+        if (m_CurrentViewResources->restirDi) m_CurrentViewResources->restirDi->history.Begin();
+        if (m_CurrentViewResources->diDenoiser) m_CurrentViewResources->diDenoiser->history.Begin();
+        if (m_CurrentViewResources->diSpecDenoiser) m_CurrentViewResources->diSpecDenoiser->history.Begin();
+        if (m_CurrentViewResources->restirGi) m_CurrentViewResources->restirGi->history.Begin();
+        if (m_CurrentViewResources->giDenoiser) m_CurrentViewResources->giDenoiser->history.Begin();
+        if (m_CurrentViewResources->reflection) m_CurrentViewResources->reflection->history.Begin();
+        if (m_CurrentViewResources->reflectionDenoiser) m_CurrentViewResources->reflectionDenoiser->history.Begin();
+        if (m_CurrentViewResources->taa) m_CurrentViewResources->taa->recorded = false;
     }
 
     void RenderPipeline::ExecuteMinimal()
     {
-        LH_PROFILE_FUNCTION();
-        auto& s = m_System;
-        RG::RenderGraph rg(m_System.GetFrameAllocator());
-        AddImGuiPass(rg, RG::ResourceHandle{}); // invalid -> ImGuiPass skips the optional Read
-        rg.Compile();
-        Renderer::ExecuteGraph(rg, Renderer::GetFrameData()->GetFrameIndex(), nullptr);
+        m_System.ExecuteMinimal();
     }
 
     bool RenderPipeline::Execute(const RenderView& view, QueueRecorders recorders)
@@ -271,9 +603,50 @@ namespace Luth
         RG::BufferHandle hIndirectBuf = rg.ImportBuffer(indDesc, (void*)indirectRegion.buffer, RG::ResourceState::Undefined);
 
         // Deform: per-frame compute skinning into each mesh's deformed buffer, as the FIRST graphics
-        // pass so raster geometry (gA) reads the current-frame deformation. Decoupled from needTlas:
+        // pass so raster geometry (gA) reads the current-frame deformation. Independent of RT scene demand:
         // raster always needs it, even when no RT consumer builds a TLAS this frame.
-        m_Skinning.AddDeformPass(rg);
+        const bool ptEnabled = m_PathTrace.IsEnabled() && m_CurrentViewResources
+                            && m_Rt.IsPreparedFor(Renderer::GetFrameData()->GetRenderFrameIndex())
+                            && m_Rt.GetTlas() != VK_NULL_HANDLE;
+        VisibilityParameters visibilityParams;
+        visibilityParams.cameraPlanes = CreateFrustumFromCamera(m_Global.GetCachedViewProj()).planes;
+        visibilityParams.viewIndex = view.viewIndex;
+        visibilityParams.regionStride = k_IndirectRegionStride;
+        visibilityParams.maxViews = k_MaxViews;
+        visibilityParams.objectCount = m_Geometry.GetGPUObjectCount();
+        visibilityParams.realtime = !ptEnabled;
+        visibilityParams.cullCascades = m_Global.GetShadowParams().castShadows
+            && (!m_RtNativeInitialized || m_Global.GetShadowParams().mode == ShadowingMode::RasterCSM || view.camera.enableVolumetricFog);
+        if (visibilityParams.cullCascades)
+            for (u32 cascade = 0; cascade < k_ShadowCascadeCount; ++cascade)
+                visibilityParams.cascadePlanes[cascade] = CreateFrustumFromCamera(m_Global.GetCascades().lightSpaceMatrix[cascade]).planes;
+        const GraphBufferRef objectInput{hObjectBuf, {&objectRegion, objectRegion.offset, objectRegion.size}};
+        const GraphBufferRef indirectInput{hIndirectBuf, {&indirectRegion, indirectRegion.offset, indirectRegion.size}};
+        const DeformationParameters deformationParams{s.GetWindSettings(), Time::GetTime()};
+        const std::array deformationBindings{
+            RenderInputBinding::Present(DeformationResources::Parameters, deformationParams),
+            RenderInputBinding::Present(VisibilityResources::Parameters, visibilityParams),
+            RenderInputBinding::Present(RenderResources::ObjectData, objectInput),
+            RenderInputBinding::Present(RenderResources::InitializedIndirectData, indirectInput)};
+        FrameRenderInputs deformationFrame;
+        deformationFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+        deformationFrame.snapshot = &s.GetActiveSnapshot();
+        deformationFrame.resources = deformationBindings;
+        ViewRenderInputs deformationView;
+        deformationView.id = view.id;
+        VisibleDrawRange cameraVisible;
+        CascadeDrawRanges cascadeVisible;
+        const std::array visibilityOutputs{
+            RenderOutputBinding::Capture(RenderResources::CameraVisibleDraws, cameraVisible),
+            RenderOutputBinding::Capture(RenderResources::CascadeVisibleDraws, cascadeVisible)};
+        const auto deformationBuild = m_GeometryPreparationPipeline->Build(rg, deformationFrame, deformationView,
+            s.GetFrameAllocator(), visibilityOutputs);
+        if (!deformationBuild.success)
+        {
+            for (const auto& diagnostic : deformationBuild.diagnostics)
+                LH_LOG(Renderer, error, "Geometry preparation composition: {}", diagnostic.message);
+            return false;
+        }
 
         // PathTrace replaces the entire real-time pipeline: its megakernel output feeds the post chain via
         // hdrForPost below. These passes can't be dead-pass-culled in PT (GeometryPass is alive via its
@@ -283,120 +656,232 @@ namespace Luth
         // The TLAS-ready term makes ptEnabled imply ptActive below: a cold boot with PT pre-enabled renders
         // one real-time frame (which builds the TLAS) before PT takes over; never a black frame / invalid
         // geoOutput for the !ptActive overlays.
-        const bool ptEnabled = m_PathTrace.IsEnabled() && m_CurrentViewResources
-                            && m_Rt.GetTlas() != VK_NULL_HANDLE;
 
         // Real-time geometry inputs, hoisted so the post chain + overlays can reference them; produced only
         // on the real-time path (PT traces its own primary rays, so it needs none of these).
         RG::ResourceHandle shadowHandles[k_ShadowCascadeCount]{};
-        RG::ResourceHandle prepassDepth{};
+        ShadowCascadeRefs shadowOutputs;
+        GraphTextureRef surfaceDepth{}, motionVectors{};
+        GraphTextureRef normalOutput, roughnessOutput, materialOutput;
         SlimGBufferOutput  slimGB{};
         if (!ptEnabled)
         {
-            // Frustum cull: 5 dispatches per view (camera + 4 cascades). Each view owns a disjoint range within the indirect region.
-            {
-                const u32 baseRegion = view.viewIndex * k_IndirectRegionsPerView;
-                Frustum camFrustum = CreateFrustumFromCamera(m_Global.GetCachedViewProj());
-                m_Geometry.AddCullPass(rg, hObjectBuf, hIndirectBuf, camFrustum.planes, baseRegion * k_IndirectRegionStride, "FrustumCull.Cam");
-
-                // CSM cascade cull: needed when ShadowPass runs (CSM mode OR volumetric on,
-                // since volumetric_inject_scatter samples cascades in both shadow modes).
-                const bool runCsmCascades = m_Global.GetShadowParams().castShadows
-                                         && ((m_Global.GetShadowParams().mode == ShadowingMode::RasterCSM)
-                                             || view.camera.enableVolumetricFog);
-                if (runCsmCascades)
-                {
-                    for (u32 i = 0; i < k_ShadowCascadeCount; ++i)
-                    {
-                        Frustum cascadeFrustum = CreateFrustumFromCamera(m_Global.GetCascades().lightSpaceMatrix[i]);
-                        const u32 destOffset = (baseRegion + 1 + i) * k_IndirectRegionStride;
-                        const std::string name = "FrustumCull.C" + std::to_string(i);
-                        m_Geometry.AddCullPass(rg, hObjectBuf, hIndirectBuf, cascadeFrustum.planes, destOffset, name.c_str());
-                    }
-                }
-            }
-
-            // Shadow pass renders cascade depth: needed for CSM mode AND for volumetric god-rays
-            // in either shadow mode (volumetric scatter samples shadowMap at Set 1 b5).
-            const bool runCsmShadowPasses = m_Global.GetShadowParams().castShadows
-                                         && ((m_Global.GetShadowParams().mode == ShadowingMode::RasterCSM)
-                                             || view.camera.enableVolumetricFog);
-            if (runCsmShadowPasses)
-            {
-                for (u32 i = 0; i < k_ShadowCascadeCount; ++i)
-                    shadowHandles[i] = m_Lighting.AddShadowPass(rg, hIndirectBuf, i);
-            }
+            hIndirectBuf = cameraVisible.indirect.handle;
 
             // Z-prepass produces SceneDepth before forward shading. The render graph can schedule it in parallel with the shadow cascades.
-            prepassDepth = m_Geometry.AddDepthPrepass(rg, hIndirectBuf);
+            const u32 depthSlot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
+            const std::array<VkDescriptorSet, 6> depthSets{
+                m_CurrentViewResources->globalDescriptorSet[depthSlot],
+                VulkanContext::Get().GetBindlessSet().GetSet(), MaterialSystem::GetDescriptorSet(depthSlot),
+                m_Lighting.GetLightDescSet(depthSlot), BoneMatrixBuffer::GetDescriptorSet(depthSlot),
+                m_Geometry.GetObjectSSBODescSet(depthSlot)};
+            // CSM is also required by volumetric scatter in either shadow mode.
+            const CsmParameters csmParams{visibilityParams.cullCascades};
+            const auto csmNative = m_Lighting.PrepareCsmBindings(depthSets,
+                view.captureRequested && s.GetFrameDebugger().state == DebuggerState::CaptureRequested);
+            const CsmBindingRef csmNativeRef{&csmNative};
+            const std::array csmResources{RenderInputBinding::Present(CsmResources::Parameters, csmParams),
+                RenderInputBinding::Present(CsmResources::Bindings, csmNativeRef),
+                csmParams.enabled ? RenderInputBinding::Present(RenderResources::CascadeVisibleDraws, cascadeVisible)
+                    : RenderInputBinding::Absent(RenderResources::CascadeVisibleDraws)};
+            const std::array csmCapabilities{&DeformationResources::DeformedGeometry};
+            FrameRenderInputs csmFrame;
+            csmFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            csmFrame.draws = &s.GetDrawList(); csmFrame.snapshot = &s.GetActiveSnapshot();
+            csmFrame.resources = csmResources; csmFrame.capabilities = csmCapabilities;
+            ViewRenderInputs csmView;
+            csmView.id = view.id;
+            ShadowCascadeRefs csmOutput;
+            const std::array csmExports{RenderOutputBinding::Capture(RenderResources::ShadowCascades, csmOutput)};
+            const auto csmBuild = m_CsmComposition->Build(rg, csmFrame, csmView, s.GetFrameAllocator(), csmExports);
+            if (!csmBuild.success)
+            {
+                for (const auto& diagnostic : csmBuild.diagnostics)
+                    LH_LOG(Renderer, error, "CSM composition: {}", diagnostic.message);
+                return false;
+            }
+            shadowOutputs = csmOutput;
+            for (u32 i = 0; i < k_ShadowCascadeCount; ++i)
+                shadowHandles[i] = csmOutput.cascades[i].handle;
+            const auto depthNative = m_Geometry.PrepareDepthPrepassBindings(depthSets,
+                view.captureRequested && s.GetFrameDebugger().state == DebuggerState::CaptureRequested);
+            const auto slimNative = m_Geometry.PrepareSlimGBufferBindings(depthSets,
+                view.captureRequested && s.GetFrameDebugger().state == DebuggerState::CaptureRequested);
+            const SlimGBufferBindingRef slimNativeRef{&slimNative};
+            const DepthPrepassBindingRef depthNativeRef{&depthNative};
+            const auto depthTarget = m_Geometry.ImportDepthTarget(rg, *view.targets->GetSceneDepth());
+            const auto normalTarget = m_Geometry.ImportSlimTarget(rg, *view.targets->GetSlimNormal(), "SlimNormal", RG::TextureFormat::RG16_Float);
+            const auto roughnessTarget = m_Geometry.ImportSlimTarget(rg, *view.targets->GetSlimRoughness(), "SlimRoughness", RG::TextureFormat::R8_Unorm);
+            const auto motionTarget = m_Geometry.ImportSlimTarget(rg, *view.targets->GetSlimMotion(), "SlimMotion", RG::TextureFormat::RG16_Float);
+            const auto materialTarget = m_Geometry.ImportSlimTarget(rg, *view.targets->GetSlimMaterialID(), "SlimMaterialID", RG::TextureFormat::R16_Uint);
 
-            // Slim G-buffer: opaque normal/roughness/motion/matID. Reads prepass depth with EQUAL test;
-            // feeds TAA + downstream RT denoise + RT reflections.
-            slimGB = m_Geometry.AddSlimGBufferPass(rg, hIndirectBuf, prepassDepth);
+            const std::array depthBindings{
+                RenderInputBinding::Present(RenderResources::CameraVisibleDraws, cameraVisible),
+                RenderInputBinding::Present(DepthPrepassResources::Target, depthTarget),
+                RenderInputBinding::Present(DepthPrepassResources::Bindings, depthNativeRef),
+                RenderInputBinding::Present(SlimGBufferResources::NormalTarget, normalTarget),
+                RenderInputBinding::Present(SlimGBufferResources::RoughnessTarget, roughnessTarget),
+                RenderInputBinding::Present(SlimGBufferResources::MotionTarget, motionTarget),
+                RenderInputBinding::Present(SlimGBufferResources::MaterialTarget, materialTarget),
+                RenderInputBinding::Present(SlimGBufferResources::Bindings, slimNativeRef)};
+            const std::array depthCapabilities{&DeformationResources::DeformedGeometry};
+            FrameRenderInputs depthFrame;
+            depthFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            depthFrame.draws = &s.GetDrawList();
+            depthFrame.snapshot = &s.GetActiveSnapshot();
+            depthFrame.capabilities = depthCapabilities; // Published after geometry-preparation succeeds.
+            depthFrame.resources = depthBindings;
+            ViewRenderInputs depthView;
+            depthView.id = view.id;
+            depthView.width = m_CurrentViewResources->width;
+            depthView.height = m_CurrentViewResources->height;
+            GraphTextureRef depthOutput;
+
+            const std::array depthOutputs{
+                RenderOutputBinding::Capture(RenderResources::PrepassDepth, depthOutput),
+                RenderOutputBinding::Capture(RenderResources::SurfaceDepth, surfaceDepth),
+                RenderOutputBinding::Capture(RenderResources::Normal, normalOutput),
+                RenderOutputBinding::Capture(RenderResources::Roughness, roughnessOutput),
+                RenderOutputBinding::Capture(RenderResources::MotionVectors, motionVectors),
+                RenderOutputBinding::Capture(RenderResources::MaterialID, materialOutput)};
+            const auto depthBuild = m_SurfacePreparationComposition->Build(rg, depthFrame, depthView,
+                s.GetFrameAllocator(), depthOutputs);
+            if (!depthBuild.success)
+            {
+                for (const auto& diagnostic : depthBuild.diagnostics)
+                    LH_LOG(Renderer, error, "Surface preparation composition: {}", diagnostic.message);
+                return false;
+            }
+            slimGB = {normalOutput.handle, roughnessOutput.handle, motionVectors.handle, materialOutput.handle};
         }
 
-        // Forward+ cluster AABB builder + light-to-cluster assignment. Both async-compute; the assign pass
-        // consumes the build pass's AABB + grid handles directly (no re-import; see arch hazard 1).
-        // UploadLightSSBO must run BEFORE AddLightAssignPass so the assign pass can bind the same VkBuffer to
-        // its b0 read; WriteSet3PerView lands afterwards once all three per-view tagged-heap regions are known.
+        // Freeze native cluster resources before recording; retain shared Set 3 bindings.
         Memory::GPUSubRegion lightSSBORegion{};
+        u32 pointCount = 0, spotCount = 0;
         if (auto* lighting = SystemRegistry::GetSystem<LightingSystem>())
-            lightSSBORegion = m_Lighting.UploadLightSSBO(lighting->GetLights());
-        LightingSubsystem::ClusterBuildOutputs clusters = m_Lighting.AddClusterBuildPass(rg);
-        LightingSubsystem::LightAssignOutputs  assign   = m_Lighting.AddLightAssignPass(rg, clusters);
-        m_Lighting.WriteSet3PerView(lightSSBORegion, clusters.gridRegion, assign.indexRegion);
-
+        {
+            const auto& lights = lighting->GetLights();
+            lightSSBORegion = m_Lighting.UploadLightSSBO(lights);
+            pointCount = static_cast<u32>(lights.points.size());
+            spotCount = static_cast<u32>(lights.spots.size());
+        }
+        const u64 clusterFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+        const u32 clusterSlot = static_cast<u32>(clusterFrameIndex) % MAX_FRAMES_IN_FLIGHT;
+        const auto clusterNative = m_Lighting.PrepareClusterBindings(clusterFrameIndex,
+            m_CurrentViewResources->clusterBuildDescSet[clusterSlot],
+            m_CurrentViewResources->lightAssignDescSet[clusterSlot], view.camera,
+            m_CurrentViewResources->width, m_CurrentViewResources->height, lightSSBORegion, pointCount, spotCount);
+        const ClusterBindingRef clusterBinding{&clusterNative};
+        GraphBufferRef uploadedLights;
+        if (lightSSBORegion.buffer)
+            uploadedLights = m_Lighting.ImportLightingBuffer(rg, "LightSSBO", lightSSBORegion);
+        const std::array clusterResources{RenderInputBinding::Present(ClusterResources::Bindings, clusterBinding),
+            uploadedLights.handle.IsValid() ? RenderInputBinding::Present(ClusterResources::UploadedLights, uploadedLights)
+                : RenderInputBinding::Absent(ClusterResources::UploadedLights)};
+        FrameRenderInputs clusterFrame;
+        clusterFrame.renderFrameIndex = clusterFrameIndex; clusterFrame.resources = clusterResources;
+        ViewRenderInputs clusterView;
+        clusterView.id = view.id; clusterView.width = m_CurrentViewResources->width;
+        clusterView.height = m_CurrentViewResources->height;
+        GraphBufferRef lightData, clusterGrid, lightIndices;
+        const std::array clusterOutputs{RenderOutputBinding::Capture(RenderResources::LightData, lightData),
+            RenderOutputBinding::Capture(RenderResources::ClusterGrid, clusterGrid),
+            RenderOutputBinding::Capture(RenderResources::LightIndices, lightIndices)};
+        const auto clusterBuild = m_ClusterComposition->Build(rg, clusterFrame, clusterView, s.GetFrameAllocator(), clusterOutputs);
+        if (!clusterBuild.success)
+        {
+            for (const auto& diagnostic : clusterBuild.diagnostics)
+                LH_LOG(Renderer, error, "Clustered lighting composition: {}", diagnostic.message);
+            return false;
+        }
+        const Memory::GPUSubRegion clusterGridRegion = clusterGrid.binding.slice ? *clusterGrid.binding.slice : Memory::GPUSubRegion{};
+        const Memory::GPUSubRegion lightIndexRegion = lightIndices.binding.slice ? *lightIndices.binding.slice : Memory::GPUSubRegion{};
+        m_Lighting.WriteSet3PerView(lightSSBORegion, clusterGridRegion, lightIndexRegion);
         // RT acceleration structures: per-frame skinning + skinned BLAS refit + TLAS build, on AsyncCompute.
-        // Built BEFORE the volumetric chain so the inject-scatter pass's RT fog-shadow rayQuery reads a BUILT TLAS;
+        // Prepared before global descriptor writes; recorded BEFORE the volumetric chain so its rayQuery reads a BUILT TLAS.
         // passes execute in registration order on the shared compute primary; the inline AS barrier gives memory visibility,
         // not execution ordering. Multi-view guard inside RtSubsystem short-circuits the second view (TLAS is scene-global).
-        const bool runRtShadows = (m_Global.GetShadowParams().mode == ShadowingMode::RtShadows)
-                               && m_Global.GetShadowParams().castShadows;
-        // Per-view fog toggle: also gates the volumetric term in needTlas, so a fog-off view doesn't
+        // Per-view fog toggle: also gates its declared RT scene consumer, so a fog-off view doesn't
         // build a TLAS the (then-unregistered) scatter pass would never read.
         const bool volumetricEnabled = view.camera.enableVolumetricFog;
-        // Build the TLAS whenever ANY RT consumer needs it: RT shadows / ReSTIR DI/GI / PathTrace /
-        // reflections / volumetric RT fog shadows. The RT sun-shadow trace below stays runRtShadows-only.
-        const bool needTlas = runRtShadows || m_Restir.IsEnabled() || m_RestirGi.IsEnabled()
-                            || m_PathTrace.IsEnabled() || m_Reflections.IsEnabled()
-                            || (volumetricEnabled && m_Volumetric.IsRtShadowsEnabled());
-        if (needTlas)
-            m_Rt.AddTlasBuildPass(rg);
-
-        // Volumetric chain: gated by per-view editor toggle. When off the inject + integrate + composite passes
-        // skip entirely; sceneColor flows through unchanged. injectOut hoisted to outer scope so the debug viz
-        // pass below can reference the density atlas handle.
-        VolumetricSubsystem::InjectOutputs injectOut{};
-        RG::ResourceHandle volInScatterHandle{};  // post-integrate scratch (viz mode 1 samples this)
-        RG::ResourceHandle volResolvedHandle{};   // post-resolve (composite + viz sample)
-        if (volumetricEnabled && m_CurrentViewResources && !ptEnabled)
+        // Preserve the per-view demand decision frozen before uniform writes. The scene-global
+        // packet is shared, while views with no RT consumers still register no scene-build pass.
+        RaySceneRef rayScene;
+        if (m_RtSceneComposition)
         {
-            const u32 frameAbs = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
-            Memory::GPUSubRegion fogVolumeRegion{};
-            if (auto* lighting = SystemRegistry::GetSystem<LightingSystem>())
-                fogVolumeRegion = m_Volumetric.UploadFogVolumeSSBO(lighting->GetFogVolumes());
-            // Density pass binds FogVolume SSBO; scatter pass binds Light/ClusterGrid/LightIndex.
-            // Resolve/composite/viz b1-or-b2 parity-rewrite to ping-pong HistA/B for temporal
-            // accumulation. Cycled slots keep rewrites disjoint from in-flight prior frame reads.
-            m_Volumetric.WriteInjectDensityPerFrame(fogVolumeRegion);
-            m_Volumetric.WriteInjectScatterPerFrame(lightSSBORegion, clusters.gridRegion, assign.indexRegion);
-            m_Volumetric.WriteResolvePerFrame(*m_CurrentViewResources, frameAbs);
-            m_Volumetric.WriteCompositePerFrame(*m_CurrentViewResources, *view.targets, frameAbs);
-            m_Volumetric.WriteVizPerFrame(*m_CurrentViewResources, frameAbs);
-            // Density pass writes volDensity; scatter pass reads it (via shared ResourceNode so RG inserts the
-            // barrier) and samples it along the sun ray for proper density-aware absorption. Scatter samples
-            // shadow cascades via descriptor binding 5; per-cascade RG Reads emit the DSA -> SHADER_READ_ONLY
-            // transitions. Atlas handles chain through integrate + resolve so RG transitions are coherent end-to-end.
-            injectOut.density   = m_Volumetric.AddInjectDensityPass(rg);
-            injectOut.inScatter = m_Volumetric.AddInjectScatterPass(rg, injectOut.density, shadowHandles);
-            volInScatterHandle  = m_Volumetric.AddIntegratePass(rg, injectOut);
-            volResolvedHandle   = m_Volumetric.AddResolvePass(rg, volInScatterHandle);
+            if (!m_RtScenePlan) return false;
+            const std::array bindings{RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters)};
+            FrameRenderInputs frame;
+            frame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            frame.snapshot = &s.GetActiveSnapshot();
+            frame.resources = bindings;
+            ViewRenderInputs inputs;
+            inputs.id = view.id;
+            inputs.resourceGeneration = m_CurrentViewResources->generation;
+            const std::array exports{RenderOutputBinding::Capture(RtSceneResources::Scene, rayScene)};
+            const auto built = m_RtSceneComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports, m_RtScenePlan.get());
+            m_RtScenePlan.reset();
+            if (!built.success)
+            {
+                for (const auto& diagnostic : built.diagnostics)
+                    LH_LOG(Renderer, error, "RT scene composition: {}", diagnostic.message);
+                return false;
+            }
         }
 
+        // Both native variants freeze paired bindings before recording any fog commands.
+        const u64 fogFrameAbs = Renderer::GetFrameData()->GetRenderFrameIndex();
+        const bool rtFog = m_RtFogComposition && RtFogRequested(m_RtSceneParameters);
+        Memory::GPUSubRegion fogVolumeRegion{};
+        if (volumetricEnabled && !ptEnabled)
+            if (auto* lighting = SystemRegistry::GetSystem<LightingSystem>())
+                fogVolumeRegion = m_Volumetric.UploadFogVolumeSSBO(lighting->GetFogVolumes());
+        const auto fogNative = m_Volumetric.PrepareComputeBindings(*m_CurrentViewResources->fog, fogFrameAbs,
+            view.id, m_CurrentViewResources->generation,
+            view.camera, m_CurrentViewResources->globalDescriptorSet[fogFrameAbs % MAX_FRAMES_IN_FLIGHT],
+            volumetricEnabled && !ptEnabled, rtFog, rtFog ? rayScene.native : nullptr,
+            fogVolumeRegion, lightSSBORegion, clusterGridRegion, lightIndexRegion);
+        GraphBufferRef fogVolumes;
+        if (fogNative.enabled && fogVolumeRegion.buffer)
+            fogVolumes = LightingSubsystem::ImportLightingBuffer(rg, "FogVolumes", fogVolumeRegion);
+        const ShadowCascadeRefs fogShadows = shadowOutputs;
+        bool haveFogShadows = true;
+        for (u32 i = 0; i < k_ShadowCascadeCount; ++i)
+        {
+            haveFogShadows &= shadowHandles[i].IsValid();
+        }
+        const FogComputeBindingRef fogBinding{&fogNative};
+        const std::array fogResources{RenderInputBinding::Present(FogResources::Bindings, fogBinding),
+            fogVolumes.handle.IsValid() ? RenderInputBinding::Present(FogResources::Volumes, fogVolumes) : RenderInputBinding::Absent(FogResources::Volumes),
+            lightData.handle.IsValid() ? RenderInputBinding::Present(RenderResources::LightData, lightData) : RenderInputBinding::Absent(RenderResources::LightData),
+            clusterGrid.handle.IsValid() ? RenderInputBinding::Present(RenderResources::ClusterGrid, clusterGrid) : RenderInputBinding::Absent(RenderResources::ClusterGrid),
+            lightIndices.handle.IsValid() ? RenderInputBinding::Present(RenderResources::LightIndices, lightIndices) : RenderInputBinding::Absent(RenderResources::LightIndices),
+            haveFogShadows ? RenderInputBinding::Present(RenderResources::ShadowCascades, fogShadows) : RenderInputBinding::Absent(RenderResources::ShadowCascades),
+            RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters),
+            rayScene.native ? RenderInputBinding::Present(RtSceneResources::Scene, rayScene) : RenderInputBinding::Absent(RtSceneResources::Scene)};
+        FrameRenderInputs fogFrame; fogFrame.renderFrameIndex = fogFrameAbs;
+        fogFrame.resources = std::span(fogResources).first(rtFog ? fogResources.size() : fogResources.size() - 2);
+        if (rtFog && rayScene.native) fogFrame.capabilities = RtSceneResources::Requests;
+        ViewRenderInputs fogView; fogView.id = view.id; fogView.camera = &view.camera;
+        fogView.resourceGeneration = m_CurrentViewResources->generation;
+        fogView.width = m_CurrentViewResources->width; fogView.height = m_CurrentViewResources->height;
+        GraphTextureRef fogDensity, fogIntegrated, fogResolved;
+        const std::array fogOutputs{RenderOutputBinding::Capture(RenderResources::FogDensity, fogDensity),
+            RenderOutputBinding::Capture(FogResources::IntegratedScatter, fogIntegrated),
+            RenderOutputBinding::Capture(RenderResources::ResolvedFog, fogResolved)};
+        const auto fogBuild = (rtFog ? m_RtFogComposition : m_FogComputeComposition)->Build(
+            rg, fogFrame, fogView, s.GetFrameAllocator(), fogOutputs);
+        if (!fogBuild.success)
+        {
+            for (const auto& diagnostic : fogBuild.diagnostics)
+                LH_LOG(Renderer, error, "Fog compute composition: {}", diagnostic.message);
+            return false;
+        }
+        const RG::ResourceHandle volResolvedHandle = fogResolved.handle;
         // Path-traced reference mode: a megakernel that bypasses the entire raster + ReSTIR chain. When active,
         // its HDR output (ptColor) feeds the post chain in place of the raster sceneColor; every raster/RT-GI
         // pass below produces handles nothing consumes, so the RG dead-pass culls them. AsyncCompute, after the
-        // TLAS build (which the needTlas gate above keeps alive).
+        // TLAS build (requested by the declared scene consumers above).
         const bool usePathTrace = ptEnabled;
         RG::ResourceHandle ptColorHandle{};
         if (usePathTrace)
@@ -406,618 +891,746 @@ namespace Luth
         // RT sun-shadow trace: per-view (each view's depth/camera/mask differ), so this runs on every view's RG.
         // Writes per-view R8 mask, consumed by GeometryPass via Read(handle). AsyncCompute pass overlaps with the
         // GTAO chain below. Gated on RT mode + CastShadows; CSM mode (or CastShadows=false) returns invalid handle
-        // and GeometryPass skips the Read. Threads prepassDepth + slimGB.normal so RG transitions them from
+        // and GeometryPass skips the Read. Threads surfaceDepth.handle + slimGB.normal so RG transitions them from
         // DSA/COLOR_ATTACHMENT to SHADER_READ_ONLY_OPTIMAL ahead of the raygen sample (descriptor declared that layout).
-        RG::ResourceHandle rtShadowMaskHandle{};
-        if (runRtShadows && !ptEnabled)
-            rtShadowMaskHandle = m_Rt.AddRtSunShadowsPass(rg, prepassDepth, slimGB.normal);
+        GraphTextureRef rtShadowMask;
+        if (m_RtSunShadowComposition)
+        {
+            const auto frameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            const auto native = m_Rt.PrepareShadowBindings(*m_CurrentViewResources, *view.targets,
+                frameIndex, view.id, m_CurrentViewResources->generation, rayScene.native);
+            const RtSunShadowBindingRef binding{&native};
+            const std::array resources{RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters),
+                RenderInputBinding::Present(RtSunShadowResources::Bindings, binding),
+                RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
+                RenderInputBinding::Present(RenderResources::Normal, normalOutput),
+                rayScene.native ? RenderInputBinding::Present(RtSceneResources::Scene, rayScene) : RenderInputBinding::Absent(RtSceneResources::Scene)};
+            FrameRenderInputs frame;
+            frame.renderFrameIndex = frameIndex; frame.resources = resources;
+            frame.capabilities = rayScene.native ? std::span<const RenderCapabilityIdentity* const>(RtSceneResources::Requests)
+                : std::span<const RenderCapabilityIdentity* const>{};
+            ViewRenderInputs inputs;
+            inputs.id = view.id; inputs.resourceGeneration = m_CurrentViewResources->generation;
+            inputs.width = m_CurrentViewResources->width; inputs.height = m_CurrentViewResources->height;
+            const std::array exports{RenderOutputBinding::Capture(RtSunShadowResources::Mask, rtShadowMask)};
+            const auto built = m_RtSunShadowComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports);
+            if (!built.success) {
+                for (const auto& diagnostic : built.diagnostics)
+                    LH_LOG(Renderer, error, "RT sun-shadow composition: {}", diagnostic.message);
+                return false;
+            }
+        }
 
         // ReSTIR DI: shadowed direct lighting for point lights via per-pixel reservoir RIS + one
         // visibility ray, then a demodulated-irradiance shade. AsyncCompute; reads prepass depth +
         // slim normal, traces the same TLAS the sun-shadow pass uses. Returns an invalid handle when
         // disabled or before the TLAS exists; GeometryPass then skips the Read and pbr.frag's point
         // loop runs instead (the restirParams.x flag gates the consumption).
-        RtRestirSubsystem::Outputs restirOut = ptEnabled
-            ? RtRestirSubsystem::Outputs{}
-            : m_Restir.AddPasses(rg, prepassDepth, slimGB.normal, slimGB.motion, slimGB.roughness);
-        RG::ResourceHandle restirDIHandle = restirOut.di;
-
-        // Denoise the demodulated DI (SVGF; swappable to NRD/RELAX). Transparent filter: consumes the
-        // ReSTIR DI handle, returns the denoised handle GeometryPass reads + Set 3 b5 binds. Invalid in
-        // (ReSTIR off / pre-TLAS) -> invalid out, and pbr.frag falls back to its own cluster light loop.
-        RG::ResourceHandle denoisedDIHandle = m_Denoise->AddPasses(rg, DenoiseInputs{
-            restirDIHandle, prepassDepth, slimGB.normal, slimGB.motion,
-            slimGB.roughness, slimGB.materialID, {}, {} });
-
-        // Denoise the demodulated ReSTIR-DI specular (4th SVGF instance, DenoiserChannel::DiSpecular). Surface-
-        // motion reproject (direct point-light specular is surface-attached, not a reflection's virtual
-        // image). svgfDiSpecDenoised feeds pbr.frag Set 3 b8; restirParams.z gates + scales the composite.
-        // Gated on the specular toggle: with it off pbr.frag zeroes restirParams.z and never samples b8, so
-        // the whole denoise chain would otherwise run dead (~0.5 ms). Invalid handle -> GeometryPass skips b8.
-        RG::ResourceHandle denoisedDiSpecHandle{};
-        if (m_System.GetRestirSettings().specular)
-            denoisedDiSpecHandle = m_DenoiseDiSpec->AddPasses(rg, DenoiseInputs{
-                restirOut.spec, prepassDepth, slimGB.normal, slimGB.motion,
-                slimGB.roughness, slimGB.materialID, {}, {} });
-        // Half-res DI: AddPasses returns the half svgfDiHalf / svgfDiSpecHalf handles; bilaterally upscale
-        // each into the full svgfDenoised / svgfDiSpecDenoised that GeometryPass / pbr Set 3 b5/b8 consume.
-        if (m_System.GetRestirSettings().halfResolution)
-        {
-            if (denoisedDIHandle.IsValid())
-                denoisedDIHandle = m_Restir.AddUpscalePass(rg, denoisedDIHandle, prepassDepth, slimGB.normal, false);
-            if (denoisedDiSpecHandle.IsValid())
-                denoisedDiSpecHandle = m_Restir.AddUpscalePass(rg, denoisedDiSpecHandle, prepassDepth, slimGB.normal, true);
+        GraphTextureRef denoisedDiffuse, denoisedSpecular;
+        if (m_RestirDiComposition) {
+            const auto frameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            const auto native = m_Restir.PrepareBindings(*m_CurrentViewResources, frameIndex, view.id,
+                m_CurrentViewResources->generation, rayScene.native, s.GetRestirSettings(),
+                Math::Inverse(m_Global.GetCachedViewProj()), lightSSBORegion);
+            const RestirDiBindingRef binding{&native};
+            const auto denoiser = static_cast<SvgfDenoiser*>(m_Denoise.get())->PrepareDiBindings(
+                *m_CurrentViewResources, frameIndex, view.id, m_CurrentViewResources->generation, s.GetSvgfSettings());
+            const DiDenoiserBindingRef denoiserBinding{&denoiser};
+            const auto specularDenoiser = static_cast<SvgfDenoiser*>(m_DenoiseDiSpec.get())->PrepareDiBindings(
+                *m_CurrentViewResources, frameIndex, view.id, m_CurrentViewResources->generation, s.GetSvgfDiSpecSettings());
+            const DiDenoiserBindingRef specularBinding{&specularDenoiser};
+            const auto upscale = m_Restir.PrepareUpscaleBindings(*m_CurrentViewResources, frameIndex, view.id,
+                m_CurrentViewResources->generation, DiDenoiserSignal::Diffuse, s.GetRestirSettings());
+            const auto specularUpscale = m_Restir.PrepareUpscaleBindings(*m_CurrentViewResources, frameIndex, view.id,
+                m_CurrentViewResources->generation, DiDenoiserSignal::Specular, s.GetRestirSettings());
+            const DiUpscaleBindingRef upscaleBinding{&upscale}, specularUpscaleBinding{&specularUpscale};
+            const std::array resources{RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters),
+                RenderInputBinding::Present(RestirDiResources::Bindings, binding),
+                RenderInputBinding::Present(DiDenoiserResources::Bindings, denoiserBinding),
+                RenderInputBinding::Present(DiDenoiserResources::SpecularBindings, specularBinding),
+                RenderInputBinding::Present(DiUpscaleResources::Bindings, upscaleBinding),
+                RenderInputBinding::Present(DiUpscaleResources::SpecularBindings, specularUpscaleBinding),
+                RenderInputBinding::Present(RenderResources::MaterialID, materialOutput),
+                RenderInputBinding::Present(RenderResources::LightData, uploadedLights),
+                RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
+                RenderInputBinding::Present(RenderResources::Normal, normalOutput),
+                RenderInputBinding::Present(RenderResources::MotionVectors, motionVectors),
+                RenderInputBinding::Present(RenderResources::Roughness, roughnessOutput),
+                rayScene.native ? RenderInputBinding::Present(RtSceneResources::Scene, rayScene) : RenderInputBinding::Absent(RtSceneResources::Scene)};
+            FrameRenderInputs frame;
+            frame.renderFrameIndex = frameIndex; frame.resources = resources;
+            if (rayScene.native) frame.capabilities = RtSceneResources::Requests;
+            ViewRenderInputs inputs;
+            inputs.id = view.id; inputs.resourceGeneration = m_CurrentViewResources->generation;
+            inputs.width = m_CurrentViewResources->width; inputs.height = m_CurrentViewResources->height;
+            GraphTextureRef rawDiffuse, filteredDiffuse, filteredSpecular;
+            const std::array exports{RenderOutputBinding::Capture(RestirDiResources::Diffuse, rawDiffuse),
+                RenderOutputBinding::Capture(DiDenoiserResources::Diffuse, filteredDiffuse),
+                RenderOutputBinding::Capture(DiDenoiserResources::Specular, filteredSpecular),
+                RenderOutputBinding::Capture(DiUpscaleResources::Diffuse, denoisedDiffuse),
+                RenderOutputBinding::Capture(DiUpscaleResources::Specular, denoisedSpecular)};
+            const auto built = m_RestirDiComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports);
+            if (!built.success) {
+                for (const auto& diagnostic : built.diagnostics)
+                    LH_LOG(Renderer, error, "ReSTIR DI composition: {}", diagnostic.message);
+                return false;
+            }
+            // These receipts remain provisional until recording and submission succeed.
+            const auto generation = m_CurrentViewResources->generation;
+            if (rawDiffuse.handle.IsValid() && m_CurrentViewResources->restirDi)
+                m_CurrentViewResources->restirDi->history.Record(frameIndex, generation);
+            if (filteredDiffuse.handle.IsValid() && denoiser.ChainReady() && m_CurrentViewResources->diDenoiser)
+                m_CurrentViewResources->diDenoiser->history.Record(frameIndex, generation);
+            if (filteredSpecular.handle.IsValid() && specularDenoiser.ChainReady() && m_CurrentViewResources->diSpecDenoiser)
+                m_CurrentViewResources->diSpecDenoiser->history.Record(frameIndex, generation);
         }
+        RG::ResourceHandle denoisedDIHandle = denoisedDiffuse.handle;
+
+        // The optional raw specular producer gates its denoiser through the typed contract.
+        RG::ResourceHandle denoisedDiSpecHandle = denoisedSpecular.handle;
 
         // ReSTIR GI: 1-bounce indirect diffuse via per-pixel reservoir resampling. Returns the demodulated
         // GI image; restirParams.y gates the remodulation in pbr.frag. Invalid when disabled / no TLAS.
-        RG::ResourceHandle giDIHandle = ptEnabled
-            ? RG::ResourceHandle{}
-            : m_RestirGi.AddPasses(rg, prepassDepth, slimGB.normal, slimGB.motion);
-
-        // Denoise the demodulated GI (second SVGF instance, DenoiserChannel::Gi). Same transparent-filter
-        // contract as DI: consumes the GI handle, returns the denoised handle GeometryPass reads + Set 3 b6
-        // binds. Invalid in -> invalid out (pbr.frag then adds nothing under the .y gate).
-        RG::ResourceHandle denoisedGiHandle = m_DenoiseGi->AddPasses(rg, DenoiseInputs{
-            giDIHandle, prepassDepth, slimGB.normal, slimGB.motion,
-            slimGB.roughness, slimGB.materialID, {}, {} });
-        // Half-res GI: AddPasses returns the half-res svgfGiHalf handle; bilaterally upscale it into the
-        // full-res svgfGiDenoised that GeometryPass / pbr Set 3 b6 consume. Full-res mode is a no-op.
-        if (denoisedGiHandle.IsValid() && m_System.GetRestirGiSettings().halfResolution)
-            denoisedGiHandle = m_RestirGi.AddUpscalePass(rg, denoisedGiHandle, prepassDepth, slimGB.normal);
+        GraphBufferRef giSpatialReservoir;
+        GraphTextureRef rawGi, denoisedGi, filteredGi;
+        if (m_RestirGiComposition) {
+            const auto frameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            const auto native = m_RestirGi.PrepareBindings(*m_CurrentViewResources, frameIndex, view.id,
+                m_CurrentViewResources->generation, rayScene.native, s.GetRestirGiSettings(),
+                Math::Inverse(m_Global.GetCachedViewProj()), lightSSBORegion);
+            const RestirGiBindingRef binding{&native};
+            const auto denoiser = static_cast<SvgfDenoiser&>(*m_DenoiseGi).PrepareGiBindings(*m_CurrentViewResources, frameIndex,
+                view.id, m_CurrentViewResources->generation, s.GetSvgfGiSettings());
+            const GiDenoiserBindingRef denoiserBinding{&denoiser};
+            const auto upscale = m_RestirGi.PrepareUpscaleBindings(*m_CurrentViewResources, frameIndex,
+                view.id, m_CurrentViewResources->generation, s.GetRestirGiSettings());
+            const GiUpscaleBindingRef upscaleBinding{&upscale};
+            const std::array resources{RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters),
+                RenderInputBinding::Present(RestirGiResources::Bindings, binding),
+                RenderInputBinding::Present(GiDenoiserResources::Bindings, denoiserBinding),
+                RenderInputBinding::Present(GiUpscaleResources::Bindings, upscaleBinding),
+                RenderInputBinding::Present(RenderResources::MaterialID, materialOutput),
+                RenderInputBinding::Present(RenderResources::Roughness, roughnessOutput),
+                RenderInputBinding::Present(RenderResources::LightData, uploadedLights),
+                RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
+                RenderInputBinding::Present(RenderResources::Normal, normalOutput),
+                RenderInputBinding::Present(RenderResources::MotionVectors, motionVectors),
+                rayScene.native ? RenderInputBinding::Present(RtSceneResources::Scene, rayScene) : RenderInputBinding::Absent(RtSceneResources::Scene)};
+            FrameRenderInputs frame; frame.renderFrameIndex = frameIndex; frame.resources = resources;
+            if (rayScene.native) frame.capabilities = RtSceneResources::Requests;
+            ViewRenderInputs inputs; inputs.id = view.id; inputs.resourceGeneration = m_CurrentViewResources->generation;
+            inputs.width = m_CurrentViewResources->width; inputs.height = m_CurrentViewResources->height;
+            const std::array exports{RenderOutputBinding::Capture(GiUpscaleResources::Diffuse, filteredGi),
+                RenderOutputBinding::Capture(RestirGiResources::Diffuse, rawGi),
+                RenderOutputBinding::Capture(GiDenoiserResources::Diffuse, denoisedGi),
+                RenderOutputBinding::Capture(GiReservoirVizResources::SpatialReservoir, giSpatialReservoir)};
+            const auto built = m_RestirGiComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports);
+            if (!built.success) {
+                for (const auto& diagnostic : built.diagnostics)
+                    LH_LOG(Renderer, error, "ReSTIR GI composition: {}", diagnostic.message);
+                return false;
+            }
+            const auto generation = m_CurrentViewResources->generation;
+            if (rawGi.handle.IsValid() && m_CurrentViewResources->restirGi)
+                m_CurrentViewResources->restirGi->history.Record(frameIndex, generation);
+            if (denoisedGi.handle.IsValid() && denoiser.ChainReady() && m_CurrentViewResources->giDenoiser)
+                m_CurrentViewResources->giDenoiser->history.Record(frameIndex, generation);
+        }
 
         // RT specular reflections: one GGX-VNDF ray/pixel from the slim G-buffer, then
-        // a dedicated specular SVGF (3rd instance, DenoiserChannel::Reflections). The DenoiseInputs.motion
-        // slot carries slim ROUGHNESS (the spec reproject's b3: it computes the reflection's motion
-        // internally via hit-distance virtual reprojection; hitDist rides reflRadiance's alpha).
-        // denoisedReflHandle feeds GeometryPass (pbr.frag composites it via Set 3 b7). AsyncCompute,
-        // after the TLAS build (needTlas gate includes Reflections).
-        RG::ResourceHandle reflHandle = ptEnabled
-            ? RG::ResourceHandle{}
-            : m_Reflections.AddPasses(rg, prepassDepth, slimGB.normal, slimGB.roughness);
-        RG::ResourceHandle denoisedReflHandle = m_DenoiseRefl->AddPasses(rg, DenoiseInputs{
-            reflHandle, prepassDepth, slimGB.normal, slimGB.roughness,
-            slimGB.roughness, slimGB.materialID, {}, {} });
-        // Half-res reflections: AddPasses returns the half svgfSpecHalf handle; bilaterally upscale it into
-        // the full-res svgfSpecDenoised that pbr.frag Set 3 b7 consumes. Full-res mode is a no-op.
-        if (denoisedReflHandle.IsValid() && m_System.GetReflectionsSettings().halfResolution)
-            denoisedReflHandle = m_Reflections.AddUpscalePass(rg, denoisedReflHandle, prepassDepth, slimGB.normal);
+        // a dedicated specular SVGF with explicit roughness and radiance/hit-distance contracts.
+        // The spec reproject computes virtual motion internally from the raw signal's hit distance.
+        // The full-resolution typed signal feeds GeometryPass (pbr.frag composites it via Set 3 b7). AsyncCompute,
+        // after the TLAS build (Reflections declares scene demand).
+        GraphTextureRef reflectionOutput, denoisedReflection, filteredReflection;
+        if (m_ReflectionComposition) {
+            const auto frameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            const auto native = m_Reflections.PrepareBindings(*m_CurrentViewResources, frameIndex, view.id,
+                m_CurrentViewResources->generation, rayScene.native, s.GetReflectionsSettings(),
+                Math::Inverse(m_Global.GetCachedViewProj()), lightSSBORegion, m_Lighting.IsIBLReady());
+            const ReflectionBindingRef binding{&native};
+            const auto denoiser = static_cast<SvgfDenoiser&>(*m_DenoiseRefl).PrepareReflectionBindings(
+                *m_CurrentViewResources, frameIndex, view.id, m_CurrentViewResources->generation, s.GetSvgfSpecSettings());
+            const ReflectionDenoiserBindingRef denoiserBinding{&denoiser};
+            const auto upscale = m_Reflections.PrepareUpscaleBindings(*m_CurrentViewResources, frameIndex,
+                view.id, m_CurrentViewResources->generation, s.GetSvgfSpecSettings());
+            const ReflectionUpscaleBindingRef upscaleBinding{&upscale};
+            const std::array resources{
+                RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters),
+                RenderInputBinding::Present(ReflectionResources::Bindings, binding),
+                RenderInputBinding::Present(ReflectionDenoiserResources::Bindings, denoiserBinding),
+                RenderInputBinding::Present(ReflectionUpscaleResources::Bindings, upscaleBinding),
+                RenderInputBinding::Present(RenderResources::MaterialID, materialOutput),
+                RenderInputBinding::Present(RenderResources::LightData, uploadedLights),
+                RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
+                RenderInputBinding::Present(RenderResources::Normal, normalOutput),
+                RenderInputBinding::Present(RenderResources::Roughness, roughnessOutput),
+                rayScene.native ? RenderInputBinding::Present(RtSceneResources::Scene, rayScene) : RenderInputBinding::Absent(RtSceneResources::Scene)};
+            FrameRenderInputs frame; frame.renderFrameIndex = frameIndex; frame.resources = resources;
+            if (rayScene.native) frame.capabilities = RtSceneResources::Requests;
+            ViewRenderInputs inputs; inputs.id = view.id; inputs.resourceGeneration = m_CurrentViewResources->generation;
+            inputs.width = m_CurrentViewResources->width; inputs.height = m_CurrentViewResources->height;
+            const std::array exports{RenderOutputBinding::Capture(ReflectionResources::Radiance, reflectionOutput),
+                RenderOutputBinding::Capture(ReflectionDenoiserResources::Radiance, denoisedReflection),
+                RenderOutputBinding::Capture(ReflectionUpscaleResources::Radiance, filteredReflection)};
+            const auto built = m_ReflectionComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports);
+            if (!built.success) {
+                for (const auto& diagnostic : built.diagnostics)
+                    LH_LOG(Renderer, error, "Reflection composition: {}", diagnostic.message);
+                return false;
+            }
+            const auto generation = m_CurrentViewResources->generation;
+            if (reflectionOutput.handle.IsValid() && m_CurrentViewResources->reflection)
+                m_CurrentViewResources->reflection->history.Record(frameIndex, generation);
+            if (denoisedReflection.handle.IsValid() && denoiser.ChainReady() && m_CurrentViewResources->reflectionDenoiser)
+                m_CurrentViewResources->reflectionDenoiser->history.Record(frameIndex, generation);
+        }
 
-        // GTAO chain: skipped in PT (pbr.frag doesn't run) and when disabled. When skipped, gtaoFinal keeps
-        // its VKTexture-ctor SHADER_READ_ONLY layout, so pbr's Set 0 b4 sampler binding stays valid; the
-        // gtao.enabled UBO flag zeroes the modulation, so the stale content is ignored. ~0.3-1 ms at 1080p.
-        RG::ResourceHandle gtaoFinalAO{};
-        if (!ptEnabled && m_System.GetPostProcessSettings().gtao.enabled)
+        // Legacy depth/geometry bridge shares graph-local references with the compiled
+        // feature. Disabled/PT frames publish absent AO and register no GTAO passes.
+
+        const auto* preparedGtao = GetGtaoViewState(view.id);
+        const GtaoFrameParameters gtaoParams{
+            preparedGtao && preparedGtao->uniformEnabled, !ptEnabled,
+            static_cast<u32>(Renderer::GetFrameData()->GetFrameIndex())};
+        const std::array gtaoBindings{
+            RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
+            RenderInputBinding::Present(GtaoResources::Parameters, gtaoParams)};
+        FrameRenderInputs featureFrame;
+        featureFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+        ViewRenderInputs featureView;
+        featureView.id = view.id;
+        featureView.resourceGeneration = m_CurrentViewResources->generation;
+        featureView.width = m_CurrentViewResources->width;
+        featureView.height = m_CurrentViewResources->height;
+        featureView.camera = &view.camera;
+        featureView.resources = gtaoBindings;
+        GraphTextureRef aoOutput;
+        const std::array gtaoOutputs{RenderOutputBinding::Capture(RenderResources::AmbientOcclusion, aoOutput)};
+        const auto gtaoBuild = m_GtaoPipeline->Build(rg, featureFrame, featureView,
+            m_System.GetFrameAllocator(), gtaoOutputs);
+        if (!gtaoBuild.success)
         {
-            RG::ResourceHandle gtaoLinearDepth = m_GTAO.AddPrefilterPass(rg, prepassDepth);
-            RG::ResourceHandle gtaoRawAO       = m_GTAO.AddMainPass(rg, gtaoLinearDepth);
-            gtaoFinalAO                        = m_GTAO.AddDenoisePass(rg, gtaoRawAO, gtaoLinearDepth);
+            for (const auto& diagnostic : gtaoBuild.diagnostics)
+                LH_LOG(Renderer, error, "GTAO composition: {}", diagnostic.message);
+            return false; // Never compile/record a graph with invalid contracts.
         }
 
         // Real-time lit chain (geometry -> skybox -> fog composite -> transparent -> TAA). Skipped in PT; the
-        // megakernel output drives the post chain via hdrForPost below. geoOutput/maskOutput/taaColor hoisted
+        // megakernel output drives the post chain via hdrForPost below. geoOutput/selection outputs/resolvedHdr hoisted
         // for the overlays + post chain; default-invalid in PT (the overlays that read them are !ptActive too).
         GeometryOutput      geoOutput{};
-        SelectionMaskOutput maskOutput{};
-        RG::ResourceHandle  taaColor{};
+        GraphTextureRef selectionMask, selectionDepth;
+        GraphTextureRef resolvedHdr;
         if (!ptEnabled)
         {
-            geoOutput  = m_Geometry.AddGeometryPass(rg, shadowHandles, hIndirectBuf, prepassDepth, gtaoFinalAO, rtShadowMaskHandle, denoisedDIHandle, denoisedGiHandle, denoisedReflHandle, denoisedDiSpecHandle);
-            maskOutput = view.drawSelectionOutline
-                         ? m_EditorOverlays.AddSelectionMaskPass(rg)
-                         : SelectionMaskOutput{};
-            RG::ResourceHandle skyboxColor = m_Lighting.AddSkyboxPass(rg, geoOutput.color, geoOutput.depth);
+            const u32 forwardSlot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
+            const std::array<VkDescriptorSet, 6> forwardSets{m_CurrentViewResources->globalDescriptorSet[forwardSlot],
+                VulkanContext::Get().GetBindlessSet().GetSet(), MaterialSystem::GetDescriptorSet(forwardSlot),
+                m_CurrentViewResources->lightDescSet[forwardSlot], BoneMatrixBuffer::GetDescriptorSet(forwardSlot),
+                m_Geometry.GetObjectSSBODescSet(forwardSlot)};
+            const auto forwardNative = m_Geometry.PrepareForwardOpaqueBindings(forwardSets,
+                s.GetShadeMode() == ShadeMode::Wireframe, s.GetShadeMode() == ShadeMode::WireframeShaded,
+                view.captureRequested && s.GetFrameDebugger().state == DebuggerState::CaptureRequested,
+                cameraVisible, s.GetDrawList(), s.GetActiveSnapshot());
+            const ForwardOpaqueBindingRef forwardBinding{&forwardNative};
+            const auto colorTarget = m_Geometry.ImportForwardTarget(rg, *view.targets->GetSceneColor(),
+                "SceneColor", RG::TextureFormat::RGBA16_Float, RG::ResourceState::ShaderResource);
+            const auto pickingTarget = m_Geometry.ImportForwardTarget(rg, *view.targets->GetEntityIDBuffer(),
+                "EntityID", RG::TextureFormat::R32_Uint, RG::ResourceState::Undefined);
+            // Transitional RT references are barrier reads; existing native Set 3 owns their descriptors.
+            const GraphTextureRef sunSignal = rtShadowMask;
+            const GraphTextureRef diSignal{denoisedDIHandle, {}},
+                giSignal = filteredGi, reflectionSignal = filteredReflection, specularSignal{denoisedDiSpecHandle, {}};
+            const auto optionalImage = [](auto key, const GraphTextureRef& value) {
+                return value.handle.IsValid() ? RenderInputBinding::Present(key, value) : RenderInputBinding::Absent(key);
+            };
+            const auto optionalBuffer = [](auto key, const GraphBufferRef& value) {
+                return value.handle.IsValid() ? RenderInputBinding::Present(key, value) : RenderInputBinding::Absent(key);
+            };
+            const std::array forwardResources{RenderInputBinding::Present(ForwardOpaqueResources::Bindings, forwardBinding),
+                RenderInputBinding::Present(ForwardOpaqueResources::ColorTarget, colorTarget),
+                RenderInputBinding::Present(ForwardOpaqueResources::PickingTarget, pickingTarget),
+                RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
+                RenderInputBinding::Present(RenderResources::CameraVisibleDraws, cameraVisible),
+                shadowOutputs.cascades[0].handle.IsValid() ? RenderInputBinding::Present(RenderResources::ShadowCascades, shadowOutputs)
+                    : RenderInputBinding::Absent(RenderResources::ShadowCascades),
+                optionalImage(RenderResources::AmbientOcclusion, aoOutput),
+                optionalBuffer(RenderResources::LightData, lightData), optionalBuffer(RenderResources::ClusterGrid, clusterGrid),
+                optionalBuffer(RenderResources::LightIndices, lightIndices),
+                optionalImage(ForwardCompatibilityResources::SunShadowMask, sunSignal),
+                optionalImage(ForwardCompatibilityResources::DenoisedDiffuseDI, diSignal),
+                optionalImage(ForwardCompatibilityResources::DenoisedDiffuseGI, giSignal),
+                optionalImage(ForwardCompatibilityResources::DenoisedReflectionRadiance, reflectionSignal),
+                optionalImage(ForwardCompatibilityResources::DenoisedSpecularDI, specularSignal)};
+            const std::array forwardCapabilities{&DeformationResources::DeformedGeometry};
+            FrameRenderInputs forwardFrame;
+            forwardFrame.resources = forwardResources; forwardFrame.capabilities = forwardCapabilities;
+            ViewRenderInputs forwardView;
+            forwardView.id = view.id; forwardView.width = m_CurrentViewResources->width; forwardView.height = m_CurrentViewResources->height;
+            GraphTextureRef opaqueOutput, litOutput, pickingOutput;
+            const std::array forwardExports{RenderOutputBinding::Capture(RenderResources::OpaqueHDR, opaqueOutput),
+                RenderOutputBinding::Capture(RenderResources::LitDepth, litOutput),
+                RenderOutputBinding::Capture(RenderResources::OpaquePickingIDs, pickingOutput)};
+            const auto forwardBuild = m_ForwardComposition->Build(rg, forwardFrame, forwardView, s.GetFrameAllocator(), forwardExports);
+            if (!forwardBuild.success)
+            {
+                for (const auto& diagnostic : forwardBuild.diagnostics)
+                    LH_LOG(Renderer, error, "Forward opaque composition: {}", diagnostic.message);
+                return false;
+            }
+            geoOutput = {opaqueOutput.handle, litOutput.handle, pickingOutput.handle};
+            const std::array<VkDescriptorSet, 5> selectionSets{forwardSets[0], forwardSets[1], forwardSets[2],
+                forwardSets[3], forwardSets[4]};
+            const auto selectionNative = m_EditorOverlays.PrepareSelectionMaskBindings(m_CurrentViewResources->overlays,
+                selectionSets, view.camera, m_CurrentViewResources->currentJitter,
+                s.GetDrawList(), s.GetActiveSnapshot(), view.drawSelectionOutline);
+            const SelectionMaskBindingRef selectionBinding{&selectionNative};
+            const std::array selectionResources{RenderInputBinding::Present(SelectionMaskResources::Bindings, selectionBinding)};
+            FrameRenderInputs selectionFrame; selectionFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            selectionFrame.resources = selectionResources;
+            ViewRenderInputs selectionView; selectionView.id = view.id;
+            selectionView.width = view.targets->GetSceneColor()->GetWidth(); selectionView.height = view.targets->GetSceneColor()->GetHeight();
+
+            const std::array selectionExports{RenderOutputBinding::Capture(RenderResources::SelectionMask, selectionMask),
+                RenderOutputBinding::Capture(RenderResources::SelectionDepth, selectionDepth)};
+            const auto selectionBuild = m_SelectionMaskComposition->Build(rg, selectionFrame, selectionView,
+                s.GetFrameAllocator(), selectionExports);
+            if (!selectionBuild.success)
+            {
+                for (const auto& diagnostic : selectionBuild.diagnostics)
+                    LH_LOG(Renderer, error, "SelectionMask composition: {}", diagnostic.message);
+                return false;
+            }
+
+            const u32 skySlot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
+            const std::array<VkDescriptorSet, 5> skySets{m_CurrentViewResources->globalDescriptorSet[skySlot],
+                VulkanContext::Get().GetBindlessSet().GetSet(), MaterialSystem::GetDescriptorSet(skySlot),
+                m_CurrentViewResources->lightDescSet[skySlot], BoneMatrixBuffer::GetDescriptorSet(skySlot)};
+            const auto skyNative = m_Lighting.PrepareSkyBindings(skySets);
+            const SkyBindingRef skyBinding{&skyNative};
+            const GraphTextureRef opaqueHdr = opaqueOutput;
+            const GraphTextureRef litDepth = litOutput;
+            const std::array skyResources{RenderInputBinding::Present(RenderResources::OpaqueHDR, opaqueHdr),
+                RenderInputBinding::Present(RenderResources::LitDepth, litDepth),
+                RenderInputBinding::Present(SkyResources::Bindings, skyBinding)};
+            FrameRenderInputs skyFrame;
+            skyFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex(); skyFrame.resources = skyResources;
+            ViewRenderInputs skyView;
+            skyView.id = view.id; skyView.width = m_CurrentViewResources->width; skyView.height = m_CurrentViewResources->height;
+            GraphTextureRef skyOutput;
+            const std::array skyExports{RenderOutputBinding::Capture(RenderResources::SkyHDR, skyOutput)};
+            const auto skyBuild = m_SkyComposition->Build(rg, skyFrame, skyView, s.GetFrameAllocator(), skyExports);
+            if (!skyBuild.success)
+            {
+                for (const auto& diagnostic : skyBuild.diagnostics)
+                    LH_LOG(Renderer, error, "Sky composition: {}", diagnostic.message);
+                return false;
+            }
             // Volumetric composite: blends fog into sceneColor (alpha-blend) BEFORE bloom so bright
             // in-scattered fog can bloom + the grid overlays unfogged lines. Off -> uses skyboxColor unchanged.
-            RG::ResourceHandle fogColor = (volumetricEnabled && m_CurrentViewResources)
-                                          ? m_Volumetric.AddCompositePass(rg, skyboxColor, prepassDepth, volResolvedHandle)
-                                          : skyboxColor;
+            const auto fogCompositeNative = m_Volumetric.PrepareCompositeBindings(*m_CurrentViewResources->fog,
+                fogFrameAbs, view.camera, m_CurrentViewResources->globalDescriptorSet[skySlot], volResolvedHandle.IsValid());
+            const FogCompositeBindingRef fogCompositeBinding{&fogCompositeNative};
+            const std::array fogCompositeResources{RenderInputBinding::Present(RenderResources::SkyHDR, skyOutput),
+                RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
+                RenderInputBinding::Present(FogCompositeResources::Bindings, fogCompositeBinding),
+                fogResolved.handle.IsValid() ? RenderInputBinding::Present(RenderResources::ResolvedFog, fogResolved)
+                    : RenderInputBinding::Absent(RenderResources::ResolvedFog)};
+            FrameRenderInputs fogCompositeFrame;
+            fogCompositeFrame.renderFrameIndex = skyFrame.renderFrameIndex; fogCompositeFrame.resources = fogCompositeResources;
+            GraphTextureRef foggedOutput;
+            const std::array fogCompositeExports{RenderOutputBinding::Capture(RenderResources::FoggedHDR, foggedOutput)};
+            const auto fogCompositeBuild = m_FogCompositeComposition->Build(rg, fogCompositeFrame, skyView,
+                s.GetFrameAllocator(), fogCompositeExports);
+            if (!fogCompositeBuild.success)
+            {
+                for (const auto& diagnostic : fogCompositeBuild.diagnostics)
+                    LH_LOG(Renderer, error, "Fog composite composition: {}", diagnostic.message);
+                return false;
+            }
+            const RG::ResourceHandle fogColor = foggedOutput.handle;
             // Snapshot the pre-transparent scene (opaque + fog) into the per-view refraction backdrop so glass
             // can sample the refracted background. RG orders the copy after the composite (reads fogColor as
             // TransferSrc) and before the transparent pass's Set 6 b3 sample (declared Read there). Skipped
-            // when the transparent bucket is empty (matches AddPasses' own early-out).
-            RG::ResourceHandle backdropHandle{};
-            if (m_CurrentViewResources && m_CurrentViewResources->refractionBackdrop &&
-                !m_System.GetDrawList().transparent.empty())
+            // when the transparent bucket is empty (matches transparency preparation).
+            const auto backdropNative = m_Transparency.PrepareBackdropBindings(m_CurrentViewResources->transparency->refractionBackdrop,
+                !m_System.GetDrawList().transparent.empty());
+            const RefractionBackdropBindingRef backdropBinding{&backdropNative};
+            const std::array backdropResources{RenderInputBinding::Present(RenderResources::FoggedHDR, foggedOutput),
+                RenderInputBinding::Present(RefractionResources::Bindings, backdropBinding)};
+            FrameRenderInputs backdropFrame;
+            backdropFrame.renderFrameIndex = skyFrame.renderFrameIndex; backdropFrame.resources = backdropResources;
+            GraphTextureRef backdropOutput;
+            const std::array backdropExports{RenderOutputBinding::Capture(RenderResources::RefractionBackdrop, backdropOutput)};
+            const auto backdropBuild = m_RefractionComposition->Build(rg, backdropFrame, skyView,
+                s.GetFrameAllocator(), backdropExports);
+            if (!backdropBuild.success)
             {
-                auto vkBackdrop = std::static_pointer_cast<VKTexture>(m_CurrentViewResources->refractionBackdrop);
-                RG::TextureDesc bdDesc;
-                bdDesc.name   = "RefractionBackdrop";
-                bdDesc.width  = vkBackdrop->GetWidth();
-                bdDesc.height = vkBackdrop->GetHeight();
-                bdDesc.format = RG::TextureFormat::RGBA16_Float;
-                RG::ResourceHandle bdImport = rg.ImportResource(bdDesc, (void*)vkBackdrop->GetImage(),
-                    (void*)vkBackdrop->GetImageView(), RG::ResourceState::ShaderResource);
-                struct BackdropCopyData { RG::ResourceHandle src, dst; };
-                rg.AddComputePass<BackdropCopyData>("RefractionBackdropCopy",
-                    [&](BackdropCopyData& data, RG::RenderPassBuilder& builder)
-                    {
-                        data.src = builder.ReadTransfer(fogColor);
-                        data.dst = builder.WriteTransfer(bdImport);
-                        backdropHandle = data.dst;
-                    },
-                    [](BackdropCopyData& data, RG::RenderPassContext& ctx)
-                    {
-                        auto* src = (RG::RenderGraph::ResourceNode*)ctx.GetResource(data.src);
-                        auto* dst = (RG::RenderGraph::ResourceNode*)ctx.GetResource(data.dst);
-                        VkImageCopy region{};
-                        region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-                        region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-                        region.extent = { src->desc.width, src->desc.height, 1 };
-                        vkCmdCopyImage(ctx.commandBuffer,
-                            src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                            dst->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-                    });
+                for (const auto& diagnostic : backdropBuild.diagnostics)
+                    LH_LOG(Renderer, error, "Refraction backdrop composition: {}", diagnostic.message);
+                return false;
             }
+            const RG::ResourceHandle backdropHandle = backdropOutput.handle;
             // Transparent tier: after the fog composite so glass blends over the fogged background (its own
             // fog is per-fragment at the glass depth, sampled from the resolved atlas inside pbr_transparent.frag).
-            RG::ResourceHandle transparentColor = fogColor;
+            GraphTextureRef transparentStage = foggedOutput;
             if (m_CurrentViewResources)
             {
                 const u32 frameAbsT = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
-                m_Transparency.WritePerFrame(*m_CurrentViewResources, frameAbsT);
-                transparentColor = m_Transparency.AddPasses(rg, fogColor, geoOutput.entityID, geoOutput.depth,
-                    volumetricEnabled ? volResolvedHandle : RG::ResourceHandle{}, backdropHandle, hIndirectBuf);
+                m_Transparency.WritePerFrame(*m_CurrentViewResources->transparency, m_CurrentViewResources->fog,
+                    m_Volumetric.GetSampler(), frameAbsT);
+                {
+                    std::array<VkDescriptorSet, 7> transparencySets;
+                    std::copy(forwardSets.begin(), forwardSets.end(), transparencySets.begin());
+                    transparencySets[6] = m_CurrentViewResources->transparency->transparentDescSet[frameAbsT % MAX_FRAMES_IN_FLIGHT];
+                    const auto transparencyNative = m_Transparency.PrepareTransparencyBindings(m_Geometry, transparencySets,
+                        s.GetShadeMode() == ShadeMode::Wireframe,
+                        view.captureRequested && s.GetFrameDebugger().state == DebuggerState::CaptureRequested,
+                        view.camera.view, cameraVisible, s.GetDrawList(), s.GetActiveSnapshot(),
+                        fogResolved.binding, backdropOutput.binding, &m_Rt,
+                        s.GetTransparencySettings().mode == TransparencyMode::OIT,
+                        *m_CurrentViewResources->transparency, s.GetTransparencySettings().maxResolveK);
+                    const TransparencyBindingRef transparencyBinding{&transparencyNative};
+                    const auto optionalImage = [](auto key, const GraphTextureRef& value) {
+                        return value.handle.IsValid() ? RenderInputBinding::Present(key, value) : RenderInputBinding::Absent(key);
+                    };
+                    const std::array transparencyResources{RenderInputBinding::Present(TransparencyResources::Bindings, transparencyBinding),
+                        RenderInputBinding::Present(RenderResources::FoggedHDR, foggedOutput),
+                        RenderInputBinding::Present(RenderResources::LitDepth, litOutput),
+                        RenderInputBinding::Present(RenderResources::OpaquePickingIDs, pickingOutput),
+                        RenderInputBinding::Present(RenderResources::CameraVisibleDraws, cameraVisible),
+                        optionalImage(RenderResources::ResolvedFog, fogResolved), optionalImage(RenderResources::RefractionBackdrop, backdropOutput),
+                        optionalBuffer(RenderResources::LightData, lightData), optionalBuffer(RenderResources::ClusterGrid, clusterGrid),
+                        optionalBuffer(RenderResources::LightIndices, lightIndices)};
+                    FrameRenderInputs transparencyFrame; transparencyFrame.renderFrameIndex = skyFrame.renderFrameIndex;
+                    transparencyFrame.resources = transparencyResources; transparencyFrame.capabilities = forwardCapabilities;
+                    GraphTextureRef transparentOutput, finalPicking, transparentDepth;
+                    const std::array transparencyExports{RenderOutputBinding::Capture(RenderResources::TransparentHDR, transparentOutput),
+                        RenderOutputBinding::Capture(RenderResources::FinalPickingIDs, finalPicking),
+                        RenderOutputBinding::Capture(TransparencyResources::Depth, transparentDepth)};
+                    const auto transparencyBuild = m_TransparencyComposition->Build(rg, transparencyFrame, skyView,
+                        s.GetFrameAllocator(), transparencyExports);
+                    if (!transparencyBuild.success)
+                    {
+                        for (const auto& diagnostic : transparencyBuild.diagnostics)
+                            LH_LOG(Renderer, error, "Transparency composition: {}", diagnostic.message);
+                        return false;
+                    }
+                    transparentStage = transparentOutput;
+                    geoOutput.entityID = finalPicking.handle; geoOutput.depth = transparentDepth.handle;
+                }
             }
-            // TAA Resolve: Karis14 YCoCg-clip, HDR-domain, after the fog composite + before bloom/grid.
-            // WriteTaaResolvePerFrame rebinds the parity-picked history-prev; the resolve writes history-curr.
-            const PostProcessSettings& pps = m_System.GetPostProcessSettings();
-            const bool taaEnabled = pps.taaEnabled && m_CurrentViewResources;
-            if (taaEnabled)
-                m_PostProcess.WriteTaaResolvePerFrame(*m_CurrentViewResources,
-                    static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()));
-            taaColor = taaEnabled
-                       ? m_PostProcess.AddTaaResolvePass(rg, transparentColor, slimGB.motion, prepassDepth)
-                       : transparentColor;
+            const auto& pps = s.GetPostProcessSettings();
+            const auto taaNative = m_PostProcess.PrepareTaaBindings(m_CurrentViewResources->taa,
+                skyFrame.renderFrameIndex, m_CurrentViewResources->generation,
+                m_Global.GetCachedSkyReproj(), pps.taaTemporalAlpha, pps.taaEnabled);
+            const TaaBindingRef taaBinding{&taaNative};
+            const GraphTextureRef taaDepth{geoOutput.depth, surfaceDepth.binding};
+            const std::array taaResources{RenderInputBinding::Present(RenderResources::TransparentHDR, transparentStage),
+                RenderInputBinding::Present(RenderResources::MotionVectors, motionVectors),
+                RenderInputBinding::Present(RenderResources::LitDepth, taaDepth),
+                RenderInputBinding::Present(TaaResources::Bindings, taaBinding)};
+            FrameRenderInputs taaFrame; taaFrame.renderFrameIndex = skyFrame.renderFrameIndex;
+            taaFrame.resources = taaResources;
+            const std::array taaExports{RenderOutputBinding::Capture(RenderResources::ResolvedHDR, resolvedHdr)};
+            const auto taaBuild = m_TaaComposition->Build(rg, taaFrame, skyView, s.GetFrameAllocator(), taaExports);
+            if (!taaBuild.success)
+            {
+                for (const auto& diagnostic : taaBuild.diagnostics)
+                    LH_LOG(Renderer, error, "TAA composition: {}", diagnostic.message);
+                return false;
+            }
         }
-        // Bloom/composite source rebind runs in BOTH paths: PT -> the ptColor display image; else the TAA
-        // chain output (taaHistoryCurr) when TAA is on, else SceneColor. Without it the bindings statically reference SceneColor.
-        if (m_CurrentViewResources)
-            m_PostProcess.UpdateBloomCompositeInput(*m_CurrentViewResources, *view.targets,
-                static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()));
+        // Native downstream descriptors follow the actual selected stage, including cold TAA pass-through.
+        const TextureBindingRef postSource = ptActive ? TextureBindingRef{m_CurrentViewResources->ptColor.get()}
+            : resolvedHdr.binding;
         // HDR source for the post chain: the PT megakernel output replaces the raster sceneColor when PT
-        // is active (the raster chain above is then dead-pass-culled). Grid is editor-overlay-only -> off in PT.
-        RG::ResourceHandle hdrForPost  = ptActive ? ptColorHandle : taaColor;
+        // is active (the realtime chain is not registered). Grid is editor-overlay-only -> off in PT.
+        RG::ResourceHandle hdrForPost  = ptActive ? ptColorHandle : resolvedHdr.handle;
         // Resolve the active shade mode once (PT forces Lit). Hoisted here so the bloom gate and the slim-viz dispatch below share it.
         const ShadeMode shadeMode = ptActive ? ShadeMode::Lit : m_System.GetShadeMode();
-        // Bloom is skipped at strength 0 (composite adds bloom x strength; AddCompositePass guards an
-        // invalid handle) and for every non-Lit mode: bloom is a radiance effect that smears over data
-        // views and clutters radiance debug. Reads PRE-grid color so grid lines don't bloom.
-        RG::ResourceHandle bloomResult = (m_System.GetPostProcessSettings().bloomStrength > 0.0f
-                                          && shadeMode == ShadeMode::Lit)
-                                         ? m_PostProcess.AddBloomPasses(rg, hdrForPost)
-                                         : RG::ResourceHandle{};
-        RG::ResourceHandle gridColor   = (view.drawGrid && !ptActive)
-                                         ? m_EditorOverlays.AddGridPass(rg, hdrForPost, geoOutput.depth)
-                                         : hdrForPost;
-        RG::ResourceHandle ldrOutput = m_PostProcess.AddCompositePass(rg, gridColor, bloomResult);
+        // Bloom consumes the selected pre-grid HDR stage; disabled contributions publish absence.
+        const auto& bloomSettings = m_System.GetPostProcessSettings();
+        const auto bloomNative = m_PostProcess.PrepareBloomBindings(m_CurrentViewResources->bloom, postSource,
+            Renderer::GetFrameData()->GetRenderFrameIndex(), bloomSettings.bloomThreshold, bloomSettings.bloomRadius,
+            bloomSettings.bloomStrength > 0.0f && shadeMode == ShadeMode::Lit);
+        const BloomBindingRef bloomBinding{&bloomNative};
+        const GraphTextureRef bloomSource{hdrForPost, postSource};
+        const std::array bloomResources{RenderInputBinding::Present(RenderResources::ResolvedHDR, bloomSource),
+            RenderInputBinding::Present(BloomResources::Bindings, bloomBinding)};
+        FrameRenderInputs bloomFrame; bloomFrame.renderFrameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+        bloomFrame.resources = bloomResources;
+        ViewRenderInputs bloomView; bloomView.id = view.id;
+        bloomView.width = view.targets->GetSceneColor()->GetWidth(); bloomView.height = view.targets->GetSceneColor()->GetHeight();
+        GraphTextureRef bloomOutput;
+        const std::array bloomExports{RenderOutputBinding::Capture(RenderResources::BloomOutput, bloomOutput)};
+        const auto bloomBuild = m_BloomComposition->Build(rg, bloomFrame, bloomView, s.GetFrameAllocator(), bloomExports);
+        if (!bloomBuild.success)
+        {
+            for (const auto& diagnostic : bloomBuild.diagnostics)
+                LH_LOG(Renderer, error, "Bloom composition: {}", diagnostic.message);
+            return false;
+        }
+
+        const auto gridNative = m_EditorOverlays.PrepareGridBindings(m_CurrentViewResources->overlays,
+            s.GetCameraParams(), m_CurrentViewResources->currentJitter, bloomFrame.renderFrameIndex, view.drawGrid && !ptActive);
+        const GridBindingRef gridBinding{&gridNative};
+        const GraphTextureRef gridDepth{geoOutput.depth, surfaceDepth.binding};
+        const std::array gridResources{RenderInputBinding::Present(RenderResources::ResolvedHDR, bloomSource),
+            RenderInputBinding::Present(GridResources::Bindings, gridBinding),
+            !ptActive ? RenderInputBinding::Present(RenderResources::LitDepth, gridDepth)
+                : RenderInputBinding::Absent(RenderResources::LitDepth),
+            bloomOutput.handle.IsValid() ? RenderInputBinding::Present(RenderResources::BloomOutput, bloomOutput)
+                : RenderInputBinding::Absent(RenderResources::BloomOutput)};
+        FrameRenderInputs gridFrame; gridFrame.renderFrameIndex = bloomFrame.renderFrameIndex; gridFrame.resources = gridResources;
+        GraphTextureRef gridStage;
+        const std::array gridExports{RenderOutputBinding::Capture(RenderResources::GridHDR, gridStage)};
+        const auto gridBuild = m_GridComposition->Build(rg, gridFrame, bloomView, s.GetFrameAllocator(), gridExports);
+        if (!gridBuild.success)
+        {
+            for (const auto& diagnostic : gridBuild.diagnostics)
+                LH_LOG(Renderer, error, "Grid composition: {}", diagnostic.message);
+            return false;
+        }
+        const auto compositeParameters = MakeCompositeUniforms(bloomSettings,
+            IsDataDebugMode(s.GetRenderMode() == RenderMode::PathTrace ? ShadeMode::Lit : shadeMode),
+            bloomOutput.handle.IsValid(), Time::GetTime());
+        const auto compositeNative = m_PostProcess.PrepareCompositeBindings(m_CurrentViewResources->composite,
+            postSource, bloomOutput.binding, view.targets->GetLDROutput(), bloomFrame.renderFrameIndex, compositeParameters);
+        const CompositeBindingRef compositeBinding{&compositeNative};
+
+        const std::array compositeResources{RenderInputBinding::Present(RenderResources::GridHDR, gridStage),
+            bloomOutput.handle.IsValid() ? RenderInputBinding::Present(RenderResources::BloomOutput, bloomOutput)
+                : RenderInputBinding::Absent(RenderResources::BloomOutput),
+            RenderInputBinding::Present(CompositeResources::Bindings, compositeBinding)};
+        FrameRenderInputs compositeFrame; compositeFrame.renderFrameIndex = bloomFrame.renderFrameIndex;
+        compositeFrame.resources = compositeResources;
+        GraphTextureRef tonemappedLdr;
+        const std::array compositeExports{RenderOutputBinding::Capture(RenderResources::TonemappedLDR, tonemappedLdr)};
+        const auto compositeBuild = m_CompositeComposition->Build(rg, compositeFrame, bloomView,
+            s.GetFrameAllocator(), compositeExports);
+        if (!compositeBuild.success)
+        {
+            for (const auto& diagnostic : compositeBuild.diagnostics)
+                LH_LOG(Renderer, error, "Composite composition: {}", diagnostic.message);
+            return false;
+        }
+        RG::ResourceHandle ldrOutput = tonemappedLdr.handle;
 
         // Slim G-buffer ShadeMode toggles overwrite LDROutput with a decoded attachment. Mode index = enum offset
         // from ShadeMode::SlimNormal (0..3). Motion scale hardcoded: the frame-debugger panel exposes a slider for
         // per-capture tuning; live viz uses a sensible default matching the existing thumbnail UX. PT mode forces
         // Lit (the debug-viz blits read the culled G-buffer / cluster / reservoir state, meaningless over the PT
         // image). shadeMode was resolved above (hoisted for the bloom gate).
-        if (shadeMode >= ShadeMode::SlimNormal && shadeMode <= ShadeMode::SlimMaterialID)
+        const bool slimVizEnabled = !ptEnabled && shadeMode >= ShadeMode::SlimNormal && shadeMode <= ShadeMode::SlimMaterialID;
+        const u32 slimMode = slimVizEnabled ? static_cast<u32>(shadeMode) - static_cast<u32>(ShadeMode::SlimNormal) : 0;
+        const auto slimVizNative = m_PostProcess.PrepareSlimVizBindings(m_CurrentViewResources->slimViz, slimMode, 20.0f, slimVizEnabled);
+        const SlimVizBindingRef slimVizBinding{&slimVizNative};
+        const auto clusterVizNative = m_Lighting.PrepareClusterVizBindings(m_CurrentViewResources->clusterViz,
+            m_CurrentViewResources->lightDescSet[bloomFrame.renderFrameIndex % MAX_FRAMES_IN_FLIGHT],
+            clusterGridRegion, bloomView.width, bloomView.height, view.camera.nearZ, view.camera.farZ,
+            !ptEnabled && shadeMode == ShadeMode::ClustersDensity);
+        const ClusterVizBindingRef clusterVizBinding{&clusterVizNative};
+        const bool fogVizEnabled = !ptEnabled && (shadeMode == ShadeMode::VolumetricDensity || shadeMode == ShadeMode::VolumetricInScatter);
+        const u32 fogVizMode = shadeMode == ShadeMode::VolumetricInScatter ? 1u : 0u;
+        const auto& fogVizSettings = s.GetVolumetricSettings();
+        const auto fogVizNative = m_Volumetric.PrepareVizBindings(m_CurrentViewResources->fog, bloomFrame.renderFrameIndex,
+            m_CurrentViewResources->globalDescriptorSet[bloomFrame.renderFrameIndex % MAX_FRAMES_IN_FLIGHT], fogVizMode,
+            fogVizMode ? fogVizSettings.vizScaleInScatter : fogVizSettings.vizScaleDensity, fogVizSettings.vizOpacity,
+            fogVizEnabled && fogResolved.handle.IsValid());
+        const FogVizBindingRef fogVizBinding{&fogVizNative};
+        const auto& giVizSettings = s.GetRestirGiSettings();
+        const auto& giState = m_CurrentViewResources->restirGi;
+        const auto giVizTexture = giState ? giState->restirGiDI : nullptr;
+        const auto giVizNative = m_RestirGi.PrepareReservoirVizBindings(giState ? giState->giReservoirVizDescSet : VK_NULL_HANDLE,
+            view.targets->GetSceneDepth(), giState ? giState->restirGiSpatial : Memory::GPUSubRegion{}, bloomView.width, bloomView.height,
+            giVizTexture ? giVizTexture->GetWidth() : bloomView.width, giVizTexture ? giVizTexture->GetHeight() : bloomView.height,
+            giVizSettings.temporalMCap, giVizSettings.spatialNeighbours, giVizSettings.maxReservoirAge,
+            !ptEnabled && shadeMode == ShadeMode::RestirGiReservoir && giVizSettings.enabled && giSpatialReservoir.handle.IsValid());
+        const GiReservoirVizBindingRef giVizBinding{&giVizNative};
+        const auto optionalSlimInput = [](auto key, const GraphTextureRef& ref) {
+            return ref.handle.IsValid() ? RenderInputBinding::Present(key, ref) : RenderInputBinding::Absent(key);
+        };
+        const std::array visualizationResources{RenderInputBinding::Present(RenderResources::TonemappedLDR, tonemappedLdr),
+            RenderInputBinding::Present(SlimVizResources::Bindings, slimVizBinding),
+            RenderInputBinding::Present(ClusterVizResources::Bindings, clusterVizBinding),
+            RenderInputBinding::Present(FogVizResources::Bindings, fogVizBinding),
+            RenderInputBinding::Present(GiReservoirVizResources::Bindings, giVizBinding),
+            giSpatialReservoir.handle.IsValid() ? RenderInputBinding::Present(GiReservoirVizResources::SpatialReservoir, giSpatialReservoir)
+                : RenderInputBinding::Absent(GiReservoirVizResources::SpatialReservoir),
+            optionalSlimInput(RenderResources::FogDensity, fogDensity), optionalSlimInput(RenderResources::ResolvedFog, fogResolved),
+            optionalSlimInput(RenderResources::SurfaceDepth, surfaceDepth),
+            clusterGrid.handle.IsValid() ? RenderInputBinding::Present(RenderResources::ClusterGrid, clusterGrid)
+                : RenderInputBinding::Absent(RenderResources::ClusterGrid),
+            optionalSlimInput(RenderResources::Normal, normalOutput), optionalSlimInput(RenderResources::Roughness, roughnessOutput),
+            optionalSlimInput(RenderResources::MotionVectors, motionVectors), optionalSlimInput(RenderResources::MaterialID, materialOutput)};
+        FrameRenderInputs visualizationFrame; visualizationFrame.renderFrameIndex = bloomFrame.renderFrameIndex; visualizationFrame.resources = visualizationResources;
+        GraphTextureRef visualizedStageLdr;
+        const std::array visualizationExports{RenderOutputBinding::Capture(RenderResources::VisualizedLDR, visualizedStageLdr)};
+        const auto visualizationBuild = m_VisualizationComposition->Build(rg, visualizationFrame, bloomView, s.GetFrameAllocator(), visualizationExports);
+        if (!visualizationBuild.success)
         {
-            const u32 slimMode = static_cast<u32>(shadeMode) - static_cast<u32>(ShadeMode::SlimNormal);
-            ldrOutput = m_PostProcess.AddSlimVizPass(rg, ldrOutput, slimGB, slimMode, /*motionScale*/20.0f);
+            for (const auto& diagnostic : visualizationBuild.diagnostics)
+                LH_LOG(Renderer, error, "Visualization composition: {}", diagnostic.message);
+            return false;
         }
-        else if (shadeMode == ShadeMode::ClustersDensity)
-        {
-            ldrOutput = m_Lighting.AddClusterVizPass(rg, ldrOutput, prepassDepth);
-        }
-        else if ((shadeMode == ShadeMode::VolumetricDensity ||
-                  shadeMode == ShadeMode::VolumetricInScatter) &&
-                 volumetricEnabled && m_CurrentViewResources)
-        {
-            const u32 vizMode = (shadeMode == ShadeMode::VolumetricDensity) ? 0u : 1u;
-            ldrOutput = m_Volumetric.AddVizPass(rg, ldrOutput, injectOut.density, volResolvedHandle, prepassDepth, vizMode);
-        }
-        else if (shadeMode == ShadeMode::RestirGiReservoir && m_RestirGi.IsEnabled() && m_CurrentViewResources)
-        {
-            ldrOutput = m_RestirGi.AddReservoirVizPass(rg, ldrOutput, prepassDepth);
-        }
-
+        ldrOutput = visualizedStageLdr.handle;
         // Selection outline + debug shapes need the raster G-buffer (entityID mask + scene depth), which
         // PT culls, so both are off in PT mode (the reference is an offline-accumulation view, not interactive).
-        RG::ResourceHandle finalOutput = (view.drawSelectionOutline && !ptActive)
-                                         ? m_EditorOverlays.AddOutlinePass(rg, ldrOutput, maskOutput, geoOutput.depth)
-                                         : ldrOutput;
-        if (view.drawDebugShapes && !ptActive)
-            finalOutput = m_DebugDraw.AddDebugDrawPass(rg, finalOutput);
-        if (view.emitImGuiPass)
-            AddImGuiPass(rg, finalOutput);
+        const auto outlineNative = m_EditorOverlays.PrepareOutlineBindings(m_CurrentViewResources->overlays,
+            view.camera, bloomView.width, bloomView.height, view.drawSelectionOutline && !ptActive);
+        const OutlineBindingRef outlineBinding{&outlineNative};
+        const GraphTextureRef visualizedLdr{ldrOutput, tonemappedLdr.binding};
+        const GraphTextureRef outlineDepth{geoOutput.depth, surfaceDepth.binding};
+        const auto optionalOutlineInput = [](auto key, const GraphTextureRef& ref) {
+            return ref.handle.IsValid() ? RenderInputBinding::Present(key, ref) : RenderInputBinding::Absent(key);
+        };
+        const std::array outlineResources{RenderInputBinding::Present(RenderResources::VisualizedLDR, visualizedLdr),
+            RenderInputBinding::Present(OutlineResources::Bindings, outlineBinding),
+            optionalOutlineInput(RenderResources::SelectionMask, selectionMask),
+            optionalOutlineInput(RenderResources::SelectionDepth, selectionDepth),
+            !ptActive ? RenderInputBinding::Present(RenderResources::LitDepth, outlineDepth)
+                : RenderInputBinding::Absent(RenderResources::LitDepth)};
+        FrameRenderInputs outlineFrame; outlineFrame.renderFrameIndex = bloomFrame.renderFrameIndex;
+        outlineFrame.resources = outlineResources;
+        GraphTextureRef outlinedLdr;
+        const std::array outlineExports{RenderOutputBinding::Capture(RenderResources::OutlinedLDR, outlinedLdr)};
+        const auto outlineBuild = m_OutlineComposition->Build(rg, outlineFrame, bloomView, s.GetFrameAllocator(), outlineExports);
+        if (!outlineBuild.success)
+        {
+            for (const auto& diagnostic : outlineBuild.diagnostics)
+                LH_LOG(Renderer, error, "Outline composition: {}", diagnostic.message);
+            return false;
+        }
+        const auto debugDrawNative = m_DebugDraw.PrepareBindings(DebugDraw::GetForRender(bloomFrame.renderFrameIndex),
+            m_Global.GetCachedViewProj(), bloomFrame.renderFrameIndex, view.drawDebugShapes && !ptActive);
+        const DebugDrawBindingRef debugDrawBinding{&debugDrawNative};
+        const std::array debugDrawInputs{RenderInputBinding::Present(RenderResources::OutlinedLDR, outlinedLdr),
+            RenderInputBinding::Present(DebugDrawResources::Bindings, debugDrawBinding)};
+        FrameRenderInputs debugDrawFrame; debugDrawFrame.renderFrameIndex = bloomFrame.renderFrameIndex; debugDrawFrame.resources = debugDrawInputs;
+        GraphTextureRef finalViewLdr;
+        const std::array debugDrawExports{RenderOutputBinding::Capture(RenderResources::FinalViewLDR, finalViewLdr)};
+        const auto debugDrawBuild = m_DebugDrawComposition->Build(rg, debugDrawFrame, bloomView, s.GetFrameAllocator(), debugDrawExports);
+        if (!debugDrawBuild.success)
+        {
+            for (const auto& diagnostic : debugDrawBuild.diagnostics)
+                LH_LOG(Renderer, error, "DebugDraw composition: {}", diagnostic.message);
+            return false;
+        }
+        m_System.AppendViewPresentation(rg, finalViewLdr.handle, view.emitImGuiPass);
 
         rg.Compile();
 
         // Capture render graph snapshot for Frame Debugger panel
-        m_GraphSnapshot = CaptureSnapshot(rg);
+        m_System.RefreshViewDebugOutputs(view.id, *view.targets);
+        auto& graphSnapshot = m_System.CaptureGraphSnapshot(rg, view.id, m_CurrentViewResources->generation);
+        auto* timers = m_System.PrepareViewProfiling(view.id, m_CurrentViewResources->generation,
+            Renderer::GetFrameData()->GetRenderFrameIndex(), rg, graphSnapshot, !view.captureRequested);
 
-        // Read GPU timing + pipeline stats from completed frames and fill snapshot. ReadStats must run
-        // BEFORE ReadResults; they share the frame counter that ReadResults advances.
-        std::vector<float> gpuTimes;
-        std::vector<RG::GpuPipelineStats> gpuStats;
-        u32 nonCulledCount = 0;
-        for (auto& p : m_GraphSnapshot.passes)
-            if (!p.culled) nonCulledCount++;
+        m_System.BeginViewCapture(view);
 
-        m_GPUTimers.ReadStats(nonCulledCount, gpuStats);
-        m_GPUTimers.ReadResults(nonCulledCount, gpuTimes);
-        float totalMs = 0.0f;
-        RG::GpuPipelineStats total{};
-        u32 timerIdx = 0;
-        for (auto& p : m_GraphSnapshot.passes)
+        bool hasComputeWork = false;
+        CaptureSource recordedSource = m_System.GetFrameDebugger().requestedSource;
         {
-            if (p.culled) continue;
-            if (timerIdx < (u32)gpuTimes.size())
-            {
-                p.gpuTimeMs = gpuTimes[timerIdx];
-                if (gpuTimes[timerIdx] > 0.0f) totalMs += gpuTimes[timerIdx];
-            }
-            if (timerIdx < (u32)gpuStats.size() && gpuStats[timerIdx].valid)
-            {
-                p.stats = gpuStats[timerIdx];
-                total.inputVertices   += p.stats.inputVertices;
-                total.inputPrimitives += p.stats.inputPrimitives;
-                total.vsInvocations   += p.stats.vsInvocations;
-                total.clipInvocations += p.stats.clipInvocations;
-                total.clipPrimitives  += p.stats.clipPrimitives;
-                total.fsInvocations   += p.stats.fsInvocations;
-                total.valid = true;
-            }
-            timerIdx++;
+            CaptureRecordingSession recording(m_System.GetFrameDebugger(), rg, view.id,
+                m_CurrentViewResources ? m_CurrentViewResources->generation : 0, view.captureRequested);
+            recordedSource = recording.Source();
+            hasComputeWork = Renderer::RecordGraph(recorders, rg, timers);
+            m_CurrentViewResources->graphRecorded = true;
         }
-        m_GraphSnapshot.totalGpuTimeMs = totalMs;
-        m_GraphSnapshot.totalStats = total;
-
-        // Wire the archive sink for this capture. The sink copies each tracked RT after the pass that writes it.
-        // Gate on the per-view captureRequested flag (set by the view's owner: RenderingSystem for the scene view,
-        // GamePanel for the game view) so the chosen capture source's RG installs the sink, not the editor's by default.
-        if (view.captureRequested && m_System.GetFrameDebugger().state == DebuggerState::CaptureRequested)
-        {
-            // Create the debug sampler for ImGui archive previews. Idempotent; returns immediately once blitPipeline is already set.
-            m_Debugger->InitDebugBlitResources();
-
-            // Invalidate per-draw and depth preview caches. Cache keys are (passIdx, drawIdx) / (archiveIdx,
-            // layer+1), which can collide across captures even though the underlying scene state has changed
-            // (camera moved -> recapture -> same indices, new content). Without this reset, re-clicking the
-            // same draw or cascade slice after recapture would hit stale cached previews.
-            m_Debugger->ResetPreviewCacheKeys();
-
-            m_System.GetFrameDebugger().BeginCapture(VulkanContext::Get().GetDevice(),
-                                            VulkanContext::Get().GetAllocator());
-            m_System.GetFrameDebugger().RegisterTrackedRT("SceneColor");
-            m_System.GetFrameDebugger().RegisterTrackedRT("SceneDepth");
-            // ShadowPass imports per-cascade resources named "ShadowMap.C<i>" (one per cascade, each a
-            // single-layer view onto the shared 4-layer array). Track each variant so the sink archives them;
-            // without this, cascade nodes have no primary output and the panel shows "no output preview".
-            for (u32 ci = 0; ci < k_ShadowCascadeCount; ++ci)
-                m_System.GetFrameDebugger().RegisterTrackedRT("ShadowMap.C" + std::to_string(ci));
-            m_System.GetFrameDebugger().RegisterTrackedRT("LDROutput");
-            m_System.GetFrameDebugger().RegisterTrackedRT("EntityID");
-            m_System.GetFrameDebugger().RegisterTrackedRT("BloomAFinal");
-            m_System.GetFrameDebugger().RegisterTrackedRT("GTAOLinearDepth");
-            m_System.GetFrameDebugger().RegisterTrackedRT("GTAORawAO");
-            m_System.GetFrameDebugger().RegisterTrackedRT("GTAOFinal");
-            // Slim G-buffer attachments. Archive sink copies all 4 after the pass.
-            m_System.GetFrameDebugger().RegisterTrackedRT("SlimNormal");
-            m_System.GetFrameDebugger().RegisterTrackedRT("SlimRoughness");
-            m_System.GetFrameDebugger().RegisterTrackedRT("SlimMotion");
-            m_System.GetFrameDebugger().RegisterTrackedRT("SlimMaterialID");
-            rg.SetArchiveSink(&m_System.GetFrameDebugger());
-        }
-
-        // Only the capturing view needs serial Phase-1 dispatch: its lambdas push into shared FrameDebugger
-        // metadata vectors. Non-capturing views' pushes are suppressed below, so they record in parallel
-        // exactly as in non-capture frames.
-        if (view.captureRequested && m_System.GetFrameDebugger().state == DebuggerState::CaptureRequested)
-            rg.SetSerialize(true);
-
-        // Mask state to Inactive around non-capturing views' RG execute so their lambdas' BeginCapturePass /
-        // CaptureXX early-return: no pushes, no race, no need for SetSerialize.
-        const DebuggerState savedDbgState = m_System.GetFrameDebugger().state;
-        const bool suppressDebuggerMetadata = !view.captureRequested
-                                              && savedDbgState == DebuggerState::CaptureRequested;
-        if (suppressDebuggerMetadata)
-            m_System.GetFrameDebugger().state = DebuggerState::Inactive;
-
-        const bool hasComputeWork = Renderer::RecordGraph(recorders, rg, &m_GPUTimers);
-
-        if (suppressDebuggerMetadata)
-            m_System.GetFrameDebugger().state = savedDbgState;
-
-        // Non-primary views: transition LDR -> SHADER_READ so the scene view's ImGui pass can sample it (scene
-        // view's RG already does this via ImGuiPass's builder.Read(sceneColor)).
-        // Recorded into recorders.gB because the LDR is written by PBR / post-process in the gB segment; gA runs
-        // first on the GPU timeline, so recording the transition there would precede the write and the next-frame
-        // PBR would see the image in SHADER_READ_ONLY_OPTIMAL instead of the expected COLOR_ATTACHMENT_OPTIMAL.
-        if (!view.emitImGuiPass && view.targets && view.targets->GetLDROutput())
-        {
-            auto vkLdr = std::static_pointer_cast<VKTexture>(view.targets->GetLDROutput());
-            VkImageMemoryBarrier barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            barrier.oldLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            barrier.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.image = vkLdr->GetImage();
-            barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-
-            vkCmdPipelineBarrier(recorders.gB,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                0, 0, nullptr, 0, nullptr, 1, &barrier);
-        }
-
         // Finalize capture (only the source view; matches the sink gate above).
         if (view.captureRequested && m_System.GetFrameDebugger().state == DebuggerState::CaptureRequested)
         {
-            // Per-draw replay re-derives inputs from CapturedDrawCall + frozen indirect/object SSBOs.
-
-            m_System.GetFrameDebugger().capturedFrame.resources      = m_GraphSnapshot.resources;
-            m_System.GetFrameDebugger().capturedFrame.totalGpuTimeMs = m_GraphSnapshot.totalGpuTimeMs;
-
-            // Copy per-pass GPU times into captured passes
-            {
-                u32 capturedIdx = 0;
-                for (auto& ps : m_GraphSnapshot.passes)
-                {
-                    if (ps.culled) continue;
-                    if (capturedIdx < m_System.GetFrameDebugger().capturedFrame.passes.size())
-                        m_System.GetFrameDebugger().capturedFrame.passes[capturedIdx].gpuTimeMs = ps.gpuTimeMs;
-                    capturedIdx++;
-                }
-            }
-
-            // Snapshot capture-time camera viewProj for the Frozen-state auto-recapture comparison (see top of Update).
-            m_System.GetFrameDebugger().FinalizeCapture(m_Global.GetCachedViewProj());
-
-            // Stamp CSM state into the captured frame so the cascade detail panel always shows GPU-true values
-            // from the moment of capture, even if the user later twiddles light settings on the live editor side.
-            auto& cf = m_System.GetFrameDebugger().capturedFrame;
-            cf.cascadeSplitsViewZ = m_Global.GetCascades().splitsViewZ;
-            cf.shadowBias         = m_Global.GetShadowParams().shadowBias;
-            cf.shadowNormalBias   = m_Global.GetShadowParams().shadowNormalBias;
-            cf.cascadeTexelSize   = m_Global.GetCascades().texelSize;
-            for (u32 i = 0; i < k_ShadowCascadeCount; ++i)
-                cf.lightSpaceMatrix[i] = m_Global.GetCascades().lightSpaceMatrix[i];
-
+            CaptureFinalizationInputs capture;
+            capture.source = recordedSource;
+            capture.viewProj = m_Global.GetCachedViewProj();
+            capture.cascades = m_Global.GetCascades();
+            capture.shadowParams = m_Global.GetShadowParams();
             // Snapshot captured-view metadata + Set 0 binding sources for replay.
             // invariant: replay reads these instead of m_CurrentViewResources / live IBL
             // textures, since the live state reflects whichever view ran last and IBL
             // can change mid-Freeze.
-            cf.capturedView.targets         = view.targets;
-            cf.capturedView.viewResourcesId = m_CurrentViewResources ? m_CurrentViewResources->id : 0;
-            cf.capturedView.viewIndex       = view.viewIndex;
+            capture.view.targets         = view.targets;
+            capture.view.id = view.id;
+            capture.view.resourceGeneration = m_CurrentViewResources ? m_CurrentViewResources->generation : 0;
+            capture.view.viewIndex       = view.viewIndex;
             if (view.targets && view.targets->GetSceneColor())
             {
-                cf.capturedView.width  = view.targets->GetSceneColor()->GetWidth();
-                cf.capturedView.height = view.targets->GetSceneColor()->GetHeight();
+                capture.view.width  = view.targets->GetSceneColor()->GetWidth();
+                capture.view.height = view.targets->GetSceneColor()->GetHeight();
             }
-            m_Global.GetLastUboBytes(cf.capturedGlobalUboBytes);
-            cf.capturedIrradiance     = m_Lighting.GetIrradianceMap();
-            cf.capturedPrefiltered    = m_Lighting.GetPrefilteredMap();
-            cf.capturedBRDF           = m_Lighting.GetBRDFLut();
-            cf.capturedGTAOFinal      = m_CurrentViewResources ? m_CurrentViewResources->gtaoFinal : nullptr;
-            cf.capturedIblIntensity   = view.camera.iblIntensity;
-            cf.capturedSkyboxIntensity = view.camera.skyboxIntensity;
+            const u32 replaySlot = m_System.GetFrameDebugger().capturedFrame.capturedRenderFrameIndex % MAX_FRAMES_IN_FLIGHT;
+            capture.replayBindings.sets = {m_CurrentViewResources->globalDescriptorSet[replaySlot],
+                VulkanContext::Get().GetBindlessSet().GetSet(), MaterialSystem::GetDescriptorSet(replaySlot),
+                m_Lighting.GetLightDescSet(replaySlot), BoneMatrixBuffer::GetDescriptorSet(replaySlot),
+                m_Geometry.GetObjectSSBODescSet(replaySlot)};
+            const auto indirect = m_Geometry.GetIndirectRegion();
+            capture.replayBindings.indirectBuffer = indirect.buffer;
+            capture.replayBindings.indirectOffset = indirect.offset;
+            capture.replayBindings.indirectSize = indirect.size;
+            capture.replayBindings.regionsPerView = k_IndirectRegionsPerView;
+            capture.replayBindings.regionStride = k_IndirectRegionStride;
+            m_Global.GetLastUboBytes(capture.globalUboBytes);
+            capture.irradiance     = m_Lighting.GetIrradianceMap();
+            capture.prefiltered    = m_Lighting.GetPrefilteredMap();
+            capture.brdf           = m_Lighting.GetBRDFLut();
+            const auto* gtaoState = GetGtaoViewState(view.id);
+            capture.gtaoFinal      = gtaoState ? gtaoState->finalAO : nullptr;
+            capture.iblIntensity   = view.camera.iblIntensity;
+            capture.skyboxIntensity = view.camera.skyboxIntensity;
             // Resolve descendants once at capture; replay reads this without touching m_CurrentView (stack-allocated, dangles in Frozen).
             {
                 std::unordered_set<entt::entity> resolved;
                 m_EditorOverlays.CollectSelectedHandles(view.camera.selectedEntities, resolved);
-                cf.capturedSelectionHandles.assign(resolved.begin(), resolved.end());
+                capture.selectionHandles.assign(resolved.begin(), resolved.end());
             }
 
-            cf.valid = true;
-            // Snapshot which source produced this capture so viewport overlays survive the user toggling requestedSource between captures.
-            m_System.GetFrameDebugger().capturedSource = m_System.GetFrameDebugger().requestedSource;
-            m_System.GetFrameDebugger().state          = DebuggerState::Frozen;
+            m_System.FinalizeViewCapture(capture, graphSnapshot);
         }
 
         return hasComputeWork;
     }
 
-    RG::RenderGraphSnapshot RenderPipeline::CaptureSnapshot(const RG::RenderGraph& rg)
-    {
-        LH_PROFILE_FUNCTION();
-        auto& s = m_System;
-
-        RG::RenderGraphSnapshot snapshot;
-
-        // Snapshot resources
-        auto& resources = const_cast<RG::RenderGraph&>(rg).GetResources();
-        snapshot.resources.reserve(resources.size());
-        for (auto& res : resources)
-        {
-            RG::ResourceSnapshot rs;
-            rs.name        = res.desc.name;
-            rs.width       = res.desc.width;
-            rs.height      = res.desc.height;
-            rs.format      = res.desc.format;
-            rs.isExternal  = res.external;
-            rs.isTransient = res.isTransient;
-            snapshot.resources.push_back(std::move(rs));
-        }
-
-        // Snapshot passes
-        auto& passes = rg.GetPasses();
-        snapshot.passes.reserve(passes.size());
-        for (auto& pass : passes)
-        {
-            RG::PassSnapshot ps;
-            ps.name                = pass.name;
-            ps.culled              = pass.culled;
-            ps.numColorAttachments = (u32)pass.colorAttachments.size();
-            ps.hasDepth            = pass.hasDepth;
-
-            for (auto& r : pass.reads)
-            {
-                RG::PassSnapshotResource sr;
-                sr.index = r.index;
-                sr.name  = (r.index > 0 && r.index <= resources.size()) ? resources[r.index - 1].desc.name : "?";
-                ps.reads.push_back(std::move(sr));
-            }
-
-            for (auto& w : pass.writes)
-            {
-                RG::PassSnapshotResource sw;
-                sw.index = w.index;
-                sw.name  = (w.index > 0 && w.index <= resources.size()) ? resources[w.index - 1].desc.name : "?";
-                ps.writes.push_back(std::move(sw));
-            }
-
-            // Compute primaryOutputIndex from first color write, or depth if depth-only pass
-            if (!pass.colorAttachments.empty())
-            {
-                u32 idx = pass.colorAttachments[0].handle.index;
-                if (idx > 0 && idx <= resources.size())
-                    ps.primaryOutputIndex = (int)(idx - 1);
-            }
-            else if (pass.hasDepth)
-            {
-                u32 idx = pass.depthAttachment.handle.index;
-                if (idx > 0 && idx <= resources.size())
-                    ps.primaryOutputIndex = (int)(idx - 1);
-            }
-
-            snapshot.passes.push_back(std::move(ps));
-        }
-
-        // Barrier inspector: fill from the solved graph when capture is on (off by default).
-        if (RG::RenderGraph::BarrierCapture())
-            rg.CaptureBarrierRecords(snapshot);
-
-        // Compute geometry stats from the current DrawList (built before pass dispatch)
-        u32 totalDraws = (u32)(m_System.GetDrawList().opaque.size() + m_System.GetDrawList().cutout.size() + m_System.GetDrawList().transparent.size());
-        u32 totalIndices = 0;
-        auto sumIndices = [&](const std::vector<DrawCommand>& draws) {
-            for (auto& dc : draws)
-            {
-                if (!dc.model) continue;
-                auto mesh = dc.model->GetMesh(dc.meshIndex);
-                if (mesh && mesh->GetIndexBuffer())
-                    totalIndices += mesh->GetIndexBuffer()->GetCount();
-            }
-        };
-        sumIndices(m_System.GetDrawList().opaque);
-        sumIndices(m_System.GetDrawList().cutout);
-        sumIndices(m_System.GetDrawList().transparent);
-
-        // Enrich per-pass pipeline state (known at RenderingSystem level, not RenderGraph)
-        for (auto& ps : snapshot.passes)
-        {
-            if (ps.culled) continue;
-
-            if (ps.name == "ShadowPass")
-            {
-                ps.depthTest = true; ps.depthWrite = true;
-                ps.blendEnabled = false;
-                ps.cullMode = VK_CULL_MODE_FRONT_BIT;
-                ps.shaderName = "shadowDepth";
-                ps.drawCalls = totalDraws;
-                ps.indices = totalIndices;
-            }
-            else if (ps.name == "GeometryPass")
-            {
-                ps.depthTest = true; ps.depthWrite = true;
-                ps.blendEnabled = false;
-                ps.cullMode = VK_CULL_MODE_BACK_BIT;
-                ps.shaderName = "pbr";
-                ps.drawCalls = totalDraws;
-                ps.indices = totalIndices;
-            }
-            else if (ps.name == "SkyboxPass")
-            {
-                ps.depthTest = true; ps.depthWrite = false;
-                ps.blendEnabled = false;
-                ps.cullMode = VK_CULL_MODE_BACK_BIT;
-                ps.shaderName = "skybox";
-                ps.drawCalls = 1; ps.indices = 0;
-            }
-            else if (ps.name == "PostProcess")
-            {
-                ps.depthTest = false; ps.depthWrite = false;
-                ps.blendEnabled = false;
-                ps.cullMode = VK_CULL_MODE_NONE;
-                ps.shaderName = "postprocess";
-                ps.drawCalls = 1; ps.indices = 0;
-            }
-            else if (ps.name == "ImGuiPass")
-            {
-                ps.depthTest = false; ps.depthWrite = false;
-                ps.blendEnabled = true;
-                ps.cullMode = VK_CULL_MODE_NONE;
-                ps.shaderName = "imgui";
-                ps.drawCalls = 0; ps.indices = 0; // ImGui manages its own draws
-            }
-        }
-
-        return snapshot;
-    }
-    void RenderPipeline::RegisterNamedTextures()
-    {
-        m_NamedTextures.clear();
-        if (m_Lighting.GetShadowMap())                     m_NamedTextures["ShadowMap"]    = m_Lighting.GetShadowMap();
-        if (m_System.GetSceneTargets().GetSceneColor())    m_NamedTextures["SceneColor"]   = m_System.GetSceneTargets().GetSceneColor();
-        if (m_System.GetSceneTargets().GetSceneDepth())    m_NamedTextures["SceneDepth"]   = m_System.GetSceneTargets().GetSceneDepth();
-        if (m_System.GetSceneTargets().GetLDROutput())     m_NamedTextures["LDROutput"]    = m_System.GetSceneTargets().GetLDROutput();
-        if (m_System.GetSceneTargets().GetEntityIDBuffer())m_NamedTextures["EntityID"]     = m_System.GetSceneTargets().GetEntityIDBuffer();
-        // Scene-view bloom textures; Frame Debugger is scene-view-only.
-        if (auto it = m_ViewResources.find(&m_System.GetSceneTargets()); it != m_ViewResources.end()) {
-            for (u32 i = 0; i < ViewResources::kBloomMipCount; ++i)
-                if (it->second.bloomMip[i]) m_NamedTextures["BloomMip" + std::to_string(i)] = it->second.bloomMip[i];
-            if (it->second.volDensity)          m_NamedTextures["VolDensity"]           = it->second.volDensity;
-            if (it->second.volInScatter)        m_NamedTextures["VolInScatter"]         = it->second.volInScatter;
-            if (it->second.volInScatterHistA)   m_NamedTextures["VolInScatterHistA"]   = it->second.volInScatterHistA;
-            if (it->second.volInScatterHistB)   m_NamedTextures["VolInScatterHistB"]   = it->second.volInScatterHistB;
-            if (it->second.reflRadiance)        m_NamedTextures["Reflections"]         = it->second.reflRadiance;
-        }
-        if (m_Lighting.GetIrradianceMap())  m_NamedTextures["IrradianceMap"]  = m_Lighting.GetIrradianceMap();
-        if (m_Lighting.GetPrefilteredMap()) m_NamedTextures["PrefilteredMap"] = m_Lighting.GetPrefilteredMap();
-        if (m_Lighting.GetBRDFLut())        m_NamedTextures["BRDF_LUT"]       = m_Lighting.GetBRDFLut();
-        // Slim G-buffer attachments. Empty until SlimGBufferPass writes them.
-        if (m_System.GetSceneTargets().GetSlimNormal())     m_NamedTextures["SlimNormal"]     = m_System.GetSceneTargets().GetSlimNormal();
-        if (m_System.GetSceneTargets().GetSlimRoughness())  m_NamedTextures["SlimRoughness"]  = m_System.GetSceneTargets().GetSlimRoughness();
-        if (m_System.GetSceneTargets().GetSlimMotion())     m_NamedTextures["SlimMotion"]     = m_System.GetSceneTargets().GetSlimMotion();
-        if (m_System.GetSceneTargets().GetSlimMaterialID()) m_NamedTextures["SlimMaterialID"] = m_System.GetSceneTargets().GetSlimMaterialID();
-    }
-
     std::shared_ptr<Texture> RenderPipeline::GetNamedTexture(const std::string& name) const
     {
-        auto it = m_NamedTextures.find(name);
-        return (it != m_NamedTextures.end()) ? it->second : nullptr;
+        return m_System.GetNamedTexture(name);
     }
 
-    // ---- Frame debugger: forwarders into FrameDebuggerContext ----
+    // ---- Compatibility frame-debugger forwarders into RenderingSystem ----
 
-    VkImageView RenderPipeline::GetPerDrawPreviewView()  const { return m_Debugger->GetPerDrawPreviewView(); }
-    u64         RenderPipeline::GetPerDrawPreviewKey()   const { return m_Debugger->GetPerDrawPreviewKey(); }
-    u32         RenderPipeline::GetPerDrawPreviewWidth() const { return m_Debugger->GetPerDrawPreviewWidth(); }
-    u32         RenderPipeline::GetPerDrawPreviewHeight()const { return m_Debugger->GetPerDrawPreviewHeight(); }
-    VkImageView RenderPipeline::GetDepthPreviewView()    const { return m_Debugger->GetDepthPreviewView(); }
-    u32         RenderPipeline::GetDepthPreviewWidth()   const { return m_Debugger->GetDepthPreviewWidth(); }
-    u32         RenderPipeline::GetDepthPreviewHeight()  const { return m_Debugger->GetDepthPreviewHeight(); }
-    void        RenderPipeline::ResetPreviewCacheKeys() { m_Debugger->ResetPreviewCacheKeys(); }
+    const RG::RenderGraphSnapshot& RenderPipeline::GetGraphSnapshot() const
+    {
+        return m_System.GetGraphSnapshot();
+    }
+
+    VkImageView RenderPipeline::GetPerDrawPreviewView()  const { return m_System.GetPerDrawPreviewView(); }
+    u64         RenderPipeline::GetPerDrawPreviewKey()   const { return m_System.GetPerDrawPreviewKey(); }
+    u32         RenderPipeline::GetPerDrawPreviewWidth() const { return m_System.GetPerDrawPreviewWidth(); }
+    u32         RenderPipeline::GetPerDrawPreviewHeight()const { return m_System.GetPerDrawPreviewHeight(); }
+    VkImageView RenderPipeline::GetDepthPreviewView()    const { return m_System.GetDepthPreviewView(); }
+    u32         RenderPipeline::GetDepthPreviewWidth()   const { return m_System.GetDepthPreviewWidth(); }
+    u32         RenderPipeline::GetDepthPreviewHeight()  const { return m_System.GetDepthPreviewHeight(); }
+    void        RenderPipeline::ResetPreviewCacheKeys() { m_System.ResetPreviewCacheKeys(); }
 
     void RenderPipeline::ReplayPassUpToDraw(u32 passIdx, u32 localDrawIdx)
     {
-        m_Debugger->ReplayPassUpToDraw(passIdx, localDrawIdx);
+        m_System.ReplayPassUpToDraw(passIdx, localDrawIdx);
     }
 
     void RenderPipeline::BlitArchivedDepthToPreview(u32 archiveIdx, int layer, float nearZ, float farZ)
     {
-        m_Debugger->BlitArchivedDepthToPreview(archiveIdx, layer, nearZ, farZ);
+        m_System.BlitArchivedDepthToPreview(archiveIdx, layer, nearZ, farZ);
     }
 
     void RenderPipeline::BlitArchivedSlimToPreview(u32 archiveIdx, u32 mode, float scale)
     {
-        m_Debugger->BlitArchivedSlimToPreview(archiveIdx, mode, scale);
+        m_System.BlitArchivedSlimToPreview(archiveIdx, mode, scale);
     }
 
-    VkImageView RenderPipeline::GetSlimPreviewView()   const { return m_Debugger->GetSlimPreviewView(); }
-    u32         RenderPipeline::GetSlimPreviewWidth()  const { return m_Debugger->GetSlimPreviewWidth(); }
-    u32         RenderPipeline::GetSlimPreviewHeight() const { return m_Debugger->GetSlimPreviewHeight(); }
+    VkImageView RenderPipeline::GetSlimPreviewView()   const { return m_System.GetSlimPreviewView(); }
+    u32         RenderPipeline::GetSlimPreviewWidth()  const { return m_System.GetSlimPreviewWidth(); }
+    u32         RenderPipeline::GetSlimPreviewHeight() const { return m_System.GetSlimPreviewHeight(); }
 
     // ---- Public-API forwarders into subsystems (preserve caller compat) ----
 
@@ -1038,8 +1651,16 @@ namespace Luth
         return m_Geometry.EnsureMaterialRegistered(material);
     }
 
-    void RenderPipeline::UpdatePostProcessUBO() { m_PostProcess.UpdateUBO(); }
-    void RenderPipeline::UpdateGTAOUBO()        { m_GTAO.UpdateUBO(); }
+    void RenderPipeline::UpdateGTAOUBO()
+    {
+        if (!m_CurrentViewResources) return;
+        auto* state = m_GtaoStates.Find({m_CurrentViewResources->id});
+        if (!state) return;
+        auto settings = m_System.GetPostProcessSettings().gtao;
+        settings.enabled = settings.enabled && m_GTAO.IsReady();
+        m_GTAO.UpdateUBO(**state, m_CurrentViewResources->globalDescriptorSet, settings,
+            Renderer::GetFrameData()->GetRenderFrameIndex());
+    }
 
     void RenderPipeline::ReloadSkybox(const fs::path& hdrPath)
     {
@@ -1066,9 +1687,8 @@ namespace Luth
         }
         for (auto& [targets, vr] : m_ViewResources)
         {
-            ctx.gtaoFinalView = vr.gtaoFinal
-                ? std::static_pointer_cast<VKTexture>(vr.gtaoFinal)->GetImageView()
-                : VK_NULL_HANDLE;
+            const auto* gtao = GetGtaoViewState({vr.id});
+            ctx.gtaoFinalView = gtao ? gtao->finalBinding.view : VK_NULL_HANDLE;
             m_Global.WriteView(vr, ctx);
         }
     }

@@ -94,8 +94,8 @@ namespace Luth
 
         struct ResolvedMesh
         {
-            const Mesh*                      mesh = nullptr;
-            const VKAccelerationStructure*   blas = nullptr;
+            std::shared_ptr<Mesh>             mesh;
+            std::shared_ptr<VKAccelerationStructure> blas;
         };
 
         ResolvedMesh Resolve(const MeshDrawSnapshot& inst)
@@ -105,16 +105,17 @@ namespace Luth
             if (!model) return r;
             auto mesh = model->GetMesh(inst.meshIndex);
             if (!mesh) return r;
-            r.mesh = mesh.get();
-            r.blas = mesh->GetBlas().get();
+            r.mesh = mesh;
+            r.blas = mesh->GetBlas();
             return r;
         }
     }
 
-    u32 TlasBuilder::RefitSkinnedBLASes(VkCommandBuffer cmd,
+    PreparedBlasBuild TlasBuilder::PrepareSkinnedBLASes(
                                         std::span<const MeshDrawSnapshot> instances,
                                         u32 frameAbs)
     {
+        if (instances.empty()) return {};
         auto& ctx = VulkanContext::Get();
         const auto& rt = ctx.GetRtFn();
 
@@ -125,8 +126,8 @@ namespace Luth
 
         struct RefitEntry
         {
-            VKAccelerationStructure* blas;   // non-const: a first build marks it recorded
-            const Mesh*              mesh;
+            std::shared_ptr<VKAccelerationStructure> blas;
+            std::shared_ptr<Mesh>     mesh;
             u64                      scratchOffset;
             u64                      scratchSize;
             bool                     firstBuild;
@@ -154,10 +155,10 @@ namespace Luth
 
             const u64 sz = AlignUp(firstBuild ? r.blas->GetBuildScratchSize()
                                               : r.blas->GetUpdateScratchSize(), scratchAlign);
-            entries.push_back({ const_cast<VKAccelerationStructure*>(r.blas), r.mesh, totalScratch, sz, firstBuild });
+            entries.push_back({ r.blas, r.mesh, totalScratch, sz, firstBuild });
             totalScratch += sz;
         }
-        if (entries.empty()) return 0;
+        if (entries.empty()) return {};
 
         // AS-build scratch must be DEVICE_LOCAL: the tagged heap is HOST_VISIBLE (the CPU->GPU data
         // path) and NVIDIA's RT accelerator TDRs on it; PushDeletion retires it N+2. see arch/memory.md
@@ -169,7 +170,7 @@ namespace Luth
         VkBuffer scratchBuf = VK_NULL_HANDLE;
         VmaAllocation scratchAlloc = VulkanAllocator::AllocateBuffer(
             scratchCi, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, scratchBuf);
-        if (!scratchBuf) return 0;
+        if (!scratchBuf) return {};
         VkBufferDeviceAddressInfo addrInfo{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
         addrInfo.buffer = scratchBuf;
         const VkDeviceAddress scratchBase = vkGetBufferDeviceAddress(ctx.GetDevice(), &addrInfo);
@@ -177,16 +178,9 @@ namespace Luth
             VulkanAllocator::FreeBuffer(scratchBuf, scratchAlloc);
         });
 
-        // invariant: vkCmdBuildAccelerationStructuresKHR retains pointers into these structs until the
-        // GPU executes the build, so heap-allocate them to outlive this stack frame; free via PushDeletion.
-        struct RefitCtx
-        {
-            std::vector<VkAccelerationStructureBuildGeometryInfoKHR> infos;
-            std::vector<VkAccelerationStructureGeometryKHR>          geoms;
-            std::vector<VkAccelerationStructureBuildRangeInfoKHR>    ranges;
-            std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> rangePtrs;
-        };
-        auto* refitCtx = new RefitCtx;
+        auto refitCtx = std::make_shared<BlasBuildCommand>();
+        refitCtx->record = rt.vkCmdBuildAccelerationStructuresKHR;
+        refitCtx->frameAbs = frameAbs;
         refitCtx->infos.resize(entries.size());
         refitCtx->geoms.resize(entries.size());
         refitCtx->ranges.resize(entries.size());
@@ -195,6 +189,9 @@ namespace Luth
         for (size_t i = 0; i < entries.size(); ++i)
         {
             const auto& e = entries[i];
+            refitCtx->targets.push_back(e.blas);
+            refitCtx->meshes.push_back(e.mesh);
+            refitCtx->firstBuilds.push_back(e.firstBuild);
             auto ib = std::dynamic_pointer_cast<VKIndexBuffer>(e.mesh->GetIndexBuffer());
             const u32 vertCount  = e.blas->GetVertexCount();
             const u32 primCount  = (ib ? ib->GetCount() : 0) / 3;
@@ -228,28 +225,26 @@ namespace Luth
             refitCtx->rangePtrs[i] = &refitCtx->ranges[i];
         }
 
-        rt.vkCmdBuildAccelerationStructuresKHR(cmd,
-                                               static_cast<u32>(refitCtx->infos.size()),
-                                               refitCtx->infos.data(),
-                                               refitCtx->rangePtrs.data());
-
-        VulkanContext::Get().PushDeletion([refitCtx]() { delete refitCtx; });
-
-        // Mark first-builds recorded so the TLAS gather includes them this frame (post-barrier) and next
-        // frame refits them as MODE_UPDATE. The count drives the TLAS ready-generation (H1).
-        u32 firstBuilt = 0;
-        for (const auto& e : entries)
-            if (e.firstBuild) { e.blas->MarkBuildRecorded(frameAbs); ++firstBuilt; }
-        return firstBuilt;
+        VulkanContext::Get().PushDeletion([refitCtx]() {});
+        return {{std::move(refitCtx)}};
     }
 
-    TlasBuildResult TlasBuilder::BuildTlas(VkCommandBuffer cmd,
+    u32 TlasBuilder::RefitSkinnedBLASes(VkCommandBuffer cmd,
+        std::span<const MeshDrawSnapshot> instances, u32 frameAbs)
+    {
+        const auto prepared = PrepareSkinnedBLASes(instances, frameAbs);
+        prepared.Record(cmd);
+        return prepared.FirstBuildCount();
+    }
+
+    PreparedTlasBuild TlasBuilder::PrepareTlas(
                                            std::span<const MeshDrawSnapshot> instances,
                                            u32 frameAbs,
                                            const TlasBuildResult& prev,
                                            const std::unordered_map<UUID, u32, UUIDHash>& materialSlotMap,
                                            u64 blasReadyGen,
-                                           bool markEmitters)
+                                           bool markEmitters,
+                                           std::span<const PreparedBlasBuild> scheduled)
     {
         const u64 hash = HashInstances(instances, markEmitters);
         // A newly first-built BLAS changes the ready-generation but not the instance hash; force one rebuild
@@ -258,12 +253,8 @@ namespace Luth
         {
             TlasBuildResult r = prev;
             r.reused = true;
-            return r;
+            return {r, {}};
         }
-
-        auto& ctx = VulkanContext::Get();
-        const auto& rt = ctx.GetRtFn();
-        VkDevice device = ctx.GetDevice();
 
         // Pack instance buffer + the parallel geometry table in ONE loop so instanceCustomIndex (the
         // packed index) indexes the table 1:1. One VkAccelerationStructureInstanceKHR per resolved mesh
@@ -278,10 +269,9 @@ namespace Luth
         for (const auto& inst : instances)
         {
             ResolvedMesh r = Resolve(inst);
-            // Skip a BLAS whose build hasn't been recorded yet (deferred static build still pending, or
-            // upload not retired): its storage is uninitialized and the TLAS builder would TDR on it. The
-            // device address is valid pre-build, so IsBuildRecorded (not address) is the readiness test.
-            if (!r.blas || !r.blas->IsBuildRecorded()) continue;
+            // A valid address alone is insufficient. Include recorded builds or matching-frame
+            // scheduled batches that the scene provider will record before this TLAS.
+            if (!IsBlasReadyForTlas(r.blas.get(), scheduled, frameAbs)) continue;
 
             // Resolve the material once: slot (geom table) + render mode -> visibility mask + opaque flag.
             // Transparent/Fade pack with the GLASS mask only: shadow-class rays cull to SOLID (glass
@@ -352,8 +342,12 @@ namespace Luth
         if (packed.empty())
         {
             // Empty TLAS: return null handle; Set 0 binding 6 will bind VK_NULL_HANDLE this frame.
-            return result;
+            return {result, {}};
         }
+
+        auto& ctx = VulkanContext::Get();
+        const auto& rt = ctx.GetRtFn();
+        VkDevice device = ctx.GetDevice();
 
         // Per-frame instance buffer (mapped-sequential write; small data, no benefit from staging).
         const VkDeviceSize instanceBytes = packed.size() * sizeof(VkAccelerationStructureInstanceKHR);
@@ -395,7 +389,7 @@ namespace Luth
             // with a null table BDA would let a committed hit deref a null buffer_reference in
             // restir_gi_initial.comp (device lost). Nothing to free: only the instance buffer was
             // allocated this call, and it is already PushDeletion-queued above.
-            return TlasBuildResult{};
+            return {};
         }
         std::memcpy(geomMapped, geomEntries.data(), geomBytes);
         VulkanAllocator::FlushSlice(result.geomTableAlloc, 0, geomBytes);
@@ -408,16 +402,8 @@ namespace Luth
         // range structs until the command executes on the GPU; stack-local versions would die after
         // BuildTlas returns and subsequent passes' stack frames could clobber the bytes. The block
         // is freed via PushDeletion (N+2 frames out, same lifetime as the storage buffer).
-        struct BuildCtx
-        {
-            VkAccelerationStructureBuildGeometryInfoKHR buildInfo{
-                VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
-            VkAccelerationStructureGeometryKHR          geom{
-                VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
-            VkAccelerationStructureBuildRangeInfoKHR    range{};
-            const VkAccelerationStructureBuildRangeInfoKHR* pRange = nullptr;
-        };
-        auto* ctx_ = new BuildCtx;
+        auto ctx_ = std::make_shared<TlasBuildCommand>();
+        ctx_->record = rt.vkCmdBuildAccelerationStructuresKHR;
 
         // Geometry desc for the TLAS: INSTANCES type points at the packed instance buffer.
         ctx_->geom.geometryType                          = VK_GEOMETRY_TYPE_INSTANCES_KHR;
@@ -475,7 +461,7 @@ namespace Luth
             // them here and return empty (GetTlas() falls back to the persistent empty TLAS).
             if (result.geomTableBuffer) VulkanAllocator::FreeBuffer(result.geomTableBuffer, result.geomTableAlloc);
             if (result.storageBuffer)   VulkanAllocator::FreeBuffer(result.storageBuffer, result.storageAlloc);
-            return TlasBuildResult{};
+            return {};
         }
         VkBufferDeviceAddressInfo scratchAddr{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
         scratchAddr.buffer = scratchBuf;
@@ -497,12 +483,20 @@ namespace Luth
         ctx_->buildInfo.scratchData.deviceAddress = scratchBda;
 
         ctx_->range.primitiveCount = primitiveCount;
-        ctx_->pRange = &ctx_->range;
-        rt.vkCmdBuildAccelerationStructuresKHR(cmd, 1, &ctx_->buildInfo, &ctx_->pRange);
+        // Retain command inputs until backend retirement, even after the packet is released.
+        VulkanContext::Get().PushDeletion([ctx_]() {});
 
-        // Heap context retires N+2 frames out; by then the GPU has long finished the build.
-        VulkanContext::Get().PushDeletion([ctx_]() { delete ctx_; });
+        return {result, std::move(ctx_)};
+    }
 
-        return result;
+    TlasBuildResult TlasBuilder::BuildTlas(VkCommandBuffer cmd,
+        std::span<const MeshDrawSnapshot> instances, u32 frameAbs, const TlasBuildResult& prev,
+        const std::unordered_map<UUID, u32, UUIDHash>& materialSlotMap,
+        u64 blasReadyGen, bool markEmitters)
+    {
+        // Compatibility bridge until the BLAS batches and scene host prepare before recording.
+        const auto prepared = PrepareTlas(instances, frameAbs, prev, materialSlotMap, blasReadyGen, markEmitters);
+        prepared.Record(cmd);
+        return prepared.result;
     }
 }

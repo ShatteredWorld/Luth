@@ -1,6 +1,9 @@
 #include "luthpch.h"
+#include <atomic>
 #include "VulkanBackend.h"
+#include "VulkanFrameRetirement.h"
 #include "VulkanContext.h"
+#include "VulkanBarrierCapabilities.h"
 #include "PipelineCache.h"
 #include "luth/core/diagnostics/Log.h"
 #include "luth/jobs/JobSystem.h"
@@ -76,19 +79,24 @@ namespace Luth
         // Per-view 3-submit means m_FrameTimeline is signaled twice per view (gA + gB) and m_ComputeTimeline once
         // per view-with-compute; both no longer equal frameIndex+1. The per-frame ring caches the LAST value
         // of each timeline at end of the previous frame N-2; AcquireImage waits on exactly those.
-        if (frameIndex >= MAX_FRAMES_IN_FLIGHT)
+        if (const auto retiringSlot = DescriptorRetirementSlot(frameIndex, MAX_FRAMES_IN_FLIGHT))
         {
             // +1: per-frame UAB descriptor slots are read at renderFrameIndex%N, one frame ahead of the
             // cmd-buffer slot (gameFrameIndex%N) the cmd-buffer reset gates. Wait the slot's prior DESCRIPTOR
             // reader (frame N-3), not just its cmd-buffer prior user (N-4), so a game-stage slot rewrite can't
             // race an older in-flight reader under GPU-behind load (skinned-pose ghost). Monotone, so it still
             // covers cmd-buffer reset. see arch/multi-queue.md
-            const u32 retiringSlot = (u32)((frameIndex - MAX_FRAMES_IN_FLIGHT + 1) % MAX_FRAMES_IN_FLIGHT);
-            const u64 gfxWait     = m_LastGraphicsValuePerFrame[retiringSlot];
-            const u64 computeWait = m_LastComputeValuePerFrame [retiringSlot];
+            // Bootstrap also renders frame 1 at submission label 2; retire label 1
+            // before updating those non-UAB descriptor sets a second time.
+            const u64 gfxWait     = m_LastGraphicsValuePerFrame[*retiringSlot];
+            const u64 computeWait = m_LastComputeValuePerFrame [*retiringSlot];
 
             m_FrameTimeline.Wait(gfxWait);
             if (computeWait > 0) m_ComputeTimeline.Wait(computeWait);
+        }
+
+        if (frameIndex >= MAX_FRAMES_IN_FLIGHT)
+        {
 
             // Direct ND reclaim (HasFrameCompleted): the submit labeled L consumed all data tagged L-1, so
             // free tag (label-1) for each consuming frame `label` that is GPU-complete. Bound at frameIndex-1
@@ -137,12 +145,12 @@ namespace Luth
         return true;
     }
 
-    void VulkanBackend::SubmitView(u64 frameIndex, u32 viewSlot, QueueRecorders recorders,
+    SubmissionCompletionToken VulkanBackend::SubmitView(u64 frameIndex, u32 viewSlot, QueueRecorders recorders,
                                    bool hasComputeWork, bool isLastView)
     {
         LH_PROFILE_FUNCTION();
 
-        if (m_AcquiredImageIndex == UINT32_MAX) return;
+        if (m_AcquiredImageIndex == UINT32_MAX) return {};
         LH_CORE_ASSERT(viewSlot < MAX_VIEWS_PER_FRAME, "viewSlot exceeds MAX_VIEWS_PER_FRAME");
 
         const bool firstView = (viewSlot == 0);
@@ -191,13 +199,15 @@ namespace Luth
         gaInfo.pCommandBufferInfos      = &gaCmdInfo;
         gaInfo.signalSemaphoreInfoCount = 1;
         gaInfo.pSignalSemaphoreInfos    = &gaSignal;
-        if (!VulkanContext::Get().SubmitGraphics2(gaInfo, VK_NULL_HANDLE))
+        const bool graphicsAOk = VulkanContext::Get().SubmitGraphics2(gaInfo, VK_NULL_HANDLE);
+        if (!graphicsAOk)
             LH_LOG(Renderer, error, "VulkanBackend::SubmitView - graphics-A submit failed (frame {}, view {}).", frameIndex, viewSlot);
 
         // ---- async-compute submit ----
         // Only fires when the view's RG routed any pass to AsyncCompute. Compute waits the gA value at ALL_COMMANDS
         // (not COMPUTE_SHADER): gates the reader's TOP_OF_PIPE-src cross-queue layout transition of gA outputs. see arch/multi-queue.md
         u64 computeSignalValue = 0;
+        bool computeOk = true;
         if (hasComputeWork)
         {
             // First view also waits the PREVIOUS frame's last compute: frame K's in-place BLAS refit must
@@ -220,8 +230,8 @@ namespace Luth
                     cWaits[cWaitCount].sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
                     cWaits[cWaitCount].semaphore = m_ComputeTimeline.GetHandle();
                     cWaits[cWaitCount].value     = prevValue;
-                    cWaits[cWaitCount].stageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                                                 | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+                    cWaits[cWaitCount].stageMask = VulkanBarrierCapabilities::ForEnabledRtPackage(
+                        VulkanContext::Get().SupportsRayTracing()).ComputeHistoryWaitStages();
                     ++cWaitCount;
                 }
             }
@@ -242,7 +252,8 @@ namespace Luth
             cInfo.pCommandBufferInfos      = &cCmdInfo;
             cInfo.signalSemaphoreInfoCount = 1;
             cInfo.pSignalSemaphoreInfos    = &cSignal;
-            if (!VulkanContext::Get().SubmitCompute2(cInfo, VK_NULL_HANDLE))
+            computeOk = VulkanContext::Get().SubmitCompute2(cInfo, VK_NULL_HANDLE);
+            if (!computeOk)
                 LH_LOG(Renderer, error, "VulkanBackend::SubmitView - compute submit failed (frame {}, view {}).", frameIndex, viewSlot);
             m_CurrentFrameLastComputeValue = computeSignalValue;
         }
@@ -306,7 +317,8 @@ namespace Luth
         gbInfo.pCommandBufferInfos      = &gbCmdInfo;
         gbInfo.signalSemaphoreInfoCount = gbSignalCount;
         gbInfo.pSignalSemaphoreInfos    = gbSignals;
-        if (!VulkanContext::Get().SubmitGraphics2(gbInfo, VK_NULL_HANDLE))
+        const bool graphicsBOk = VulkanContext::Get().SubmitGraphics2(gbInfo, VK_NULL_HANDLE);
+        if (!graphicsBOk)
             LH_LOG(Renderer, error, "VulkanBackend::SubmitView - graphics-B submit failed (frame {}, view {}).", frameIndex, viewSlot);
 
         // Cache per-frame final timeline values + present on the last view. AcquireImage reads these caches when
@@ -318,6 +330,17 @@ namespace Luth
             m_LastComputeValuePerFrame [frameSlot] = m_CurrentFrameLastComputeValue;  // 0 sentinel = no compute that frame
             m_Swapchain->Present(m_RenderFinishedSemaphores[m_AcquiredImageIndex]);
         }
+        return {m_SubmissionGeneration, gbSignalValue, computeSignalValue, frameIndex, viewSlot,
+            m_SubmissionGeneration != 0 && graphicsAOk && computeOk && graphicsBOk};
+    }
+
+    bool VulkanBackend::IsSubmissionComplete(const SubmissionCompletionToken& token) const
+    {
+        if (!token.valid || !m_SubmissionGeneration || token.generation != m_SubmissionGeneration)
+            return false;
+        const SubmissionCompletionProgress progress{m_SubmissionGeneration,
+            m_FrameTimeline.GetValue(), token.computeValue ? m_ComputeTimeline.GetValue() : 0};
+        return progress.Contains(token);
     }
 
     void VulkanBackend::OnResize(u32 width, u32 height)
@@ -361,6 +384,9 @@ namespace Luth
 
         m_FrameTimeline.Init(0);
         m_ComputeTimeline.Init(0);
+        static std::atomic<u64> nextGeneration{1};
+        m_SubmissionGeneration = m_FrameTimeline.GetHandle() && m_ComputeTimeline.GetHandle()
+            ? nextGeneration.fetch_add(1, std::memory_order_relaxed) : 0;
         m_NextAcquireSemIndex = 0;
 
         // Timelines just reset to 0 (resize rebuild); clear the per-frame value caches + submit counters so
@@ -384,6 +410,7 @@ namespace Luth
 
     void VulkanBackend::DestroySyncObjects()
     {
+        m_SubmissionGeneration = 0;
         LH_PROFILE_FUNCTION();
 
         VkDevice device = VulkanContext::Get().GetDevice();

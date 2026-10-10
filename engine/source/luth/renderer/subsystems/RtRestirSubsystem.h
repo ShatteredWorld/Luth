@@ -3,6 +3,9 @@
 #include "luth/core/types/LuthTypes.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
+#include "luth/renderer/features/rt/RestirDiViewState.h"
+#include "luth/renderer/features/rt/RestirDiBindings.h"
+#include "luth/renderer/features/rt/DiUpscaleViewState.h"
 
 #include <memory>
 #include <string>
@@ -13,11 +16,12 @@ namespace Luth
     class FrameTargets;
     class RenderPipeline;
     struct ViewResources;
+    struct PreparedRtScene;
 
     // ReSTIR DI (Bitterli 2020): spatiotemporal reservoir resampling for the point lights.
     // Owns 4 compute pipelines (initial RIS+visibility, temporal reuse, spatial reuse + final
     // visibility, demodulated shade) + the pass-local descriptor layout. Single scratch reservoir +
-    // spatial/history buffer + DI image are per-view (allocated in ViewResources); temporal history
+    // spatial/history buffer + DI images are owned by the DI view-state store; temporal history
     // is the previous frame's SPATIAL output. rayQuery-in-compute (initial + spatial) reads the TLAS
     // via Set 0 binding 6. see arch/rendering-pipeline.md
     class RtRestirSubsystem
@@ -30,30 +34,40 @@ namespace Luth
 
         // Stable per-view Set 2 writes: b0 depth, b1 slimNormal, b2 scratch reservoir, b3 DI image,
         // b4 history (= the spatial buffer), b5 motion, b6 spatial output (same buffer as b4).
-        void WriteView(ViewResources& vr, FrameTargets& targets);
+        std::shared_ptr<RestirDiViewState> EnsureView(RenderViewId, const FrameTargets&, bool half);
+        void ReleaseView(RenderViewId);
+        void WriteView(RestirDiViewState&, const FrameTargets&);
 
         // Initial RIS + visibility, temporal reuse, spatial reuse, then demodulated shade. Returns the
         // demodulated diffuse (di) + specular (spec) DI image handles consumed by GeometryPass +
         // the SVGF denoisers. No-op handles when disabled / no TLAS. slimMotion feeds temporal
         // reprojection; slimRoughness feeds the combined diffuse+spec RIS target + the specular shade.
         struct Outputs { RG::ResourceHandle di; RG::ResourceHandle spec; };
-        Outputs AddPasses(RG::RenderGraph& rg, RG::ResourceHandle sceneDepth, RG::ResourceHandle slimNormal,
-                          RG::ResourceHandle slimMotion, RG::ResourceHandle slimRoughness);
+        RestirDiBindings PrepareBindings(const ViewResources&, u64 frameIndex, RenderViewId, u64 generation,
+            const PreparedRtScene*, const RestirSettings&, const Mat4& inverseViewProjection, const Memory::GPUSubRegion& lights) const;
+        static Outputs AddPasses(RG::RenderGraph& rg, RG::ResourceHandle sceneDepth, RG::ResourceHandle slimNormal,
+                          RG::ResourceHandle slimMotion, RG::ResourceHandle slimRoughness, const RestirDiBindings&, RG::BufferHandle lights = {});
 
         // Half-res DI bilateral upscale (shared bilateral_upscale.slang). Reads the half-res denoised DI
         // (svgfDiHalf / svgfDiSpecHalf) + full-res depth/normal, writes the full svgfDenoised /
         // svgfDiSpecDenoised. specular picks the channel. Only wired when RestirSettings::halfResolution.
         VkDescriptorSetLayout GetUpscaleLayout() const { return m_UpscaleSetLayout; }
-        void WriteUpscaleView(ViewResources& vr, FrameTargets& targets);
-        RG::ResourceHandle AddUpscalePass(RG::RenderGraph& rg, RG::ResourceHandle half,
-                                          RG::ResourceHandle sceneDepth, RG::ResourceHandle slimNormal, bool specular);
+        std::shared_ptr<DiUpscaleViewState> EnsureUpscaleView(RenderViewId, const FrameTargets&,
+            const std::shared_ptr<DiDenoiserViewState>&, const std::shared_ptr<DiDenoiserViewState>&);
+        DiUpscaleBindings PrepareUpscaleBindings(const ViewResources&, u64 frameIndex, RenderViewId,
+            u64 generation, DiDenoiserSignal, const RestirSettings&) const;
+        static RG::ResourceHandle AddUpscalePass(RG::RenderGraph&, const std::array<RG::ResourceHandle, 3>&,
+            const DiUpscaleBindings&);
 
         VkSampler             GetSampler()   const { return m_Sampler; }
         VkDescriptorSetLayout GetSetLayout() const { return m_SetLayout; }
 
         // Per-view persistent reservoir buffer tag: Garlic large-tagged, freed only on resize.
         // Reserved high range, disjoint from the per-frame FreeTag(N-2) sweep.
-        u32 NextReservoirTag() { return m_NextTag++; }
+        u32 NextReservoirTag() {
+            if (m_NextTag >= 0xFFFF8000u) throw std::overflow_error("ReSTIR DI reservoir tags exhausted");
+            return m_NextTag++;
+        }
 
         // Backed by RestirSettings::enabled on the RenderingSystem (the editor toggles the setting).
         // GlobalSubsystem reads IsEnabled() to gate restirParams.x; keep it pointing at the setting
@@ -82,5 +96,9 @@ namespace Luth
         std::vector<u32> m_UpscaleSpv;
 
         u32  m_NextTag = 0xFFFF0000u;  // reserved range for persistent reservoir allocations
+        RestirDiViewStates m_Views;
+        DiUpscaleViewStates m_UpscaleViews;
+        u64 m_NextUpscaleGeneration = 1;
+        u64 m_NextSourceGeneration = 1;
     };
 }

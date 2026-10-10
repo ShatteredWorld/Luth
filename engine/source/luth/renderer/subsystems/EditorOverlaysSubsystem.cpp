@@ -1,33 +1,17 @@
 #include "luthpch.h"
 #include "luth/renderer/subsystems/EditorOverlaysSubsystem.h"
-#include "luth/renderer/subsystems/LightingSubsystem.h"
-#include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/Renderer.h"
-#include "luth/renderer/FrameTargets.h"
-#include "luth/scene/systems/RenderingSystem.h"
 #include "luth/scene/Entity.h"
 #include "luth/renderer/material/Material.h"
-#include "luth/renderer/material/MaterialSystem.h"
-#include "luth/renderer/resources/BoneMatrixBuffer.h"
 #include "luth/renderer/resources/Buffer.h"
-#include "luth/renderer/resources/Model.h"
 #include "luth/renderer/draw/DrawCommand.h"
 #include "luth/renderer/shader/ShaderLibrary.h"
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
 #include "luth/renderer/backend/vulkan/VulkanTexture.h"
-#include "luth/renderer/backend/vulkan/VulkanBuffer.h"
 
 namespace Luth
 {
     namespace {
-        // GPU push block for the selection-mask pipelines: ObjectPushConstants plus the per-view TAA
-        // jitter the vertex shader subtracts to draw the mask un-jittered. Pass-local so the engine-wide
-        // ObjectPushConstants contract stays frozen. 80 + 8 = 88 B, within the 128 B push floor.
-        struct MaskPushConstants {
-            ObjectPushConstants base;
-            Vec2                jitter;
-        };
-
         BufferLayout MakeSkinnedVertexLayout() {
             return BufferLayout{
                 { ShaderDataType::Float3, "a_Position"    },
@@ -50,10 +34,9 @@ namespace Luth
         }
     }
 
-    void EditorOverlaysSubsystem::Init(RenderPipeline& pipeline)
+    void EditorOverlaysSubsystem::Init()
     {
         LH_PROFILE_FUNCTION();
-        m_Pipeline = &pipeline;
 
         auto loadSpv = [](const char* relPath) -> std::vector<u32> {
             auto sh = ShaderLibrary::LoadEngine(relPath);
@@ -166,7 +149,7 @@ namespace Luth
         VkPushConstantRange pcRange{};
         pcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         pcRange.offset = 0;
-        pcRange.size = sizeof(MaskPushConstants);
+        pcRange.size = sizeof(SelectionMaskPushConstants);
 
         auto [posBindings, posAttribs] = MakePositionOnlyWithFullStride();
 
@@ -257,6 +240,7 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         VkDevice device = VulkanContext::Get().GetDevice();
+        m_ViewStates.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_GridPipeline.reset();
         m_OutlinePipeline.reset();
         m_SelectionMaskSkinnedPipeline.reset();
@@ -300,16 +284,19 @@ namespace Luth
         return true;
     }
 
-    void EditorOverlaysSubsystem::WriteOutlineView(ViewResources& vr, FrameTargets& targets)
+    void EditorOverlaysSubsystem::WriteOutlineView(EditorOverlayViewState& state)
     {
         LH_PROFILE_FUNCTION();
-        if (vr.outlineDescSet == VK_NULL_HANDLE || m_OutlineSampler == VK_NULL_HANDLE) return;
 
+
+        for (const auto& source : state.sources)
+            if (!source) throw std::invalid_argument("Editor overlays: missing stable source");
+        if (state.outlineSet == VK_NULL_HANDLE || m_OutlineSampler == VK_NULL_HANDLE) return;
         VkDevice device = VulkanContext::Get().GetDevice();
 
-        auto vkMask     = std::static_pointer_cast<VKTexture>(targets.GetSelectionMask());
-        auto vkSelDepth = std::static_pointer_cast<VKTexture>(targets.GetSelectionDepth());
-        auto vkScnDepth = std::static_pointer_cast<VKTexture>(targets.GetSceneDepth());
+        auto vkMask     = std::static_pointer_cast<VKTexture>(state.sources[0]);
+        auto vkSelDepth = std::static_pointer_cast<VKTexture>(state.sources[1]);
+        auto vkScnDepth = std::static_pointer_cast<VKTexture>(state.sources[2]);
 
         VkDescriptorImageInfo maskInfo{};
         maskInfo.sampler     = m_OutlineSampler;
@@ -328,7 +315,7 @@ namespace Luth
 
         VkWriteDescriptorSet writes[3] = {};
         writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[0].dstSet          = vr.outlineDescSet;
+        writes[0].dstSet          = state.outlineSet;
         writes[0].dstBinding      = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -343,16 +330,19 @@ namespace Luth
         vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
     }
 
-    void EditorOverlaysSubsystem::WriteGridView(ViewResources& vr, FrameTargets& targets)
+    void EditorOverlaysSubsystem::WriteGridView(EditorOverlayViewState& state)
     {
         LH_PROFILE_FUNCTION();
-        if (vr.gridDescSet[0] == VK_NULL_HANDLE || m_GridDepthSampler == VK_NULL_HANDLE) return;
 
+
+        for (const auto& source : state.sources)
+            if (!source) throw std::invalid_argument("Editor overlays: missing stable source");
+        if (state.gridSets[0] == VK_NULL_HANDLE || m_GridDepthSampler == VK_NULL_HANDLE) return;
         VkDevice device = VulkanContext::Get().GetDevice();
 
         // Binding 0 (per-view GlobalUBO) rewritten per render-stage by GlobalSubsystem::UpdateUBO.
         // Stable depth-sampler binding propagated to every cycled slot.
-        auto vkScnDepth = std::static_pointer_cast<VKTexture>(targets.GetSceneDepth());
+        auto vkScnDepth = std::static_pointer_cast<VKTexture>(state.sources[2]);
         VkDescriptorImageInfo depthInfo{};
         depthInfo.sampler     = m_GridDepthSampler;
         depthInfo.imageView   = vkScnDepth->GetImageView();
@@ -362,7 +352,7 @@ namespace Luth
         for (u32 s = 0; s < MAX_FRAMES_IN_FLIGHT; ++s)
         {
             samplerWrites[s] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            samplerWrites[s].dstSet          = vr.gridDescSet[s];
+            samplerWrites[s].dstSet          = state.gridSets[s];
             samplerWrites[s].dstBinding      = 1;
             samplerWrites[s].descriptorCount = 1;
             samplerWrites[s].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -388,318 +378,4 @@ namespace Luth
         }
     }
 
-    SelectionMaskOutput EditorOverlaysSubsystem::AddSelectionMaskPass(RG::RenderGraph& rg)
-    {
-        LH_PROFILE_FUNCTION();
-        struct SelectionMaskPassData {
-            RG::ResourceHandle maskTex;
-            RG::ResourceHandle depthTex;
-        };
-        SelectionMaskOutput output;
-
-        rg.AddPass<SelectionMaskPassData>("SelectionMaskPass",
-            [&](SelectionMaskPassData& data, RG::RenderPassBuilder& builder)
-            {
-                const auto* view = m_Pipeline->GetCurrentView();
-                auto vkMask = std::static_pointer_cast<VKTexture>(view->targets->GetSelectionMask());
-                RG::TextureDesc maskDesc;
-                maskDesc.name   = "SelectionMask";
-                maskDesc.width  = view->targets->GetSelectionMask()->GetWidth();
-                maskDesc.height = view->targets->GetSelectionMask()->GetHeight();
-                maskDesc.format = RG::TextureFormat::RGBA8_Unorm;
-
-                data.maskTex = rg.ImportResource(maskDesc,
-                    (void*)vkMask->GetImage(), (void*)vkMask->GetImageView(),
-                    RG::ResourceState::Undefined);
-
-                VkClearValue colorClear{};
-                colorClear.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
-                data.maskTex = builder.Write(data.maskTex,
-                    VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, colorClear);
-
-                auto vkDepth = std::static_pointer_cast<VKTexture>(view->targets->GetSelectionDepth());
-                RG::TextureDesc depthDesc;
-                depthDesc.name   = "SelectionDepth";
-                depthDesc.width  = view->targets->GetSelectionDepth()->GetWidth();
-                depthDesc.height = view->targets->GetSelectionDepth()->GetHeight();
-                depthDesc.format = RG::TextureFormat::D32_Float;
-
-                data.depthTex = rg.ImportResource(depthDesc,
-                    (void*)vkDepth->GetImage(), (void*)vkDepth->GetImageView(),
-                    RG::ResourceState::Undefined);
-
-                VkClearValue depthClear{};
-                depthClear.depthStencil = { 1.0f, 0 };
-                data.depthTex = builder.WriteDepth(data.depthTex,
-                    VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, depthClear);
-
-                output.mask  = data.maskTex;
-                output.depth = data.depthTex;
-            },
-            [this](SelectionMaskPassData& data, RG::RenderPassContext& ctx)
-            {
-                auto& sys = m_Pipeline->GetSystem();
-                const auto* view = m_Pipeline->GetCurrentView();
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "SelectionMaskPass", "SelectionMask", false,
-                    { "selectionMask", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, true, true, false });
-
-                if (!m_SelectionMaskPipeline) { sys.GetFrameDebugger().EndCapturePass(); return; }
-
-                std::unordered_set<entt::entity> selectedSet;
-                CollectSelectedHandles(view->camera.selectedEntities, selectedSet);
-                if (selectedSet.empty()) return;
-
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                VkDescriptorSet bindlessSet = VulkanContext::Get().GetBindlessSet().GetSet();
-                VkDescriptorSet sets[] = {
-                    vr->globalDescriptorSet[slot],
-                    bindlessSet,
-                    MaterialSystem::GetDescriptorSet(slot),
-                    m_Pipeline->GetLighting().GetLightDescSet(slot),
-                    BoneMatrixBuffer::GetDescriptorSet(slot)
-                };
-
-                m_SelectionMaskPipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_SelectionMaskPipeline->GetLayout(), 0, 5, sets, 0, nullptr);
-
-                u32 w = view->targets->GetSelectionMask()->GetWidth();
-                u32 h = view->targets->GetSelectionMask()->GetHeight();
-                VkViewport vp{}; vp.width = (float)w; vp.height = (float)h; vp.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &vp);
-                VkRect2D sc{}; sc.extent = { w, h };
-                vkCmdSetScissor(cmd, 0, 1, &sc);
-
-                bool currentSkinned = false;
-                auto DrawBatch = [&](const std::vector<DrawCommand>& draws)
-                {
-                    for (const auto& dc : draws)
-                    {
-                        if (selectedSet.find(dc.entity) == selectedSet.end()) continue;
-
-                        auto mesh = dc.model->GetMesh(dc.meshIndex);
-                        auto vb = std::static_pointer_cast<VKVertexBuffer>(mesh->GetVertexBuffer());
-                        auto ib = std::static_pointer_cast<VKIndexBuffer>(mesh->GetIndexBuffer());
-                        if (!vb || !ib) continue;
-
-                        if (dc.isSkinned != currentSkinned)
-                        {
-                            currentSkinned = dc.isSkinned;
-                            if (currentSkinned && m_SelectionMaskSkinnedPipeline)
-                            {
-                                m_SelectionMaskSkinnedPipeline->Bind(cmd);
-                                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    m_SelectionMaskSkinnedPipeline->GetLayout(), 0, 5, sets, 0, nullptr);
-                            }
-                            else
-                            {
-                                m_SelectionMaskPipeline->Bind(cmd);
-                                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    m_SelectionMaskPipeline->GetLayout(), 0, 5, sets, 0, nullptr);
-                            }
-                        }
-
-                        VkPipelineLayout activeLayout = (currentSkinned && m_SelectionMaskSkinnedPipeline)
-                            ? m_SelectionMaskSkinnedPipeline->GetLayout()
-                            : m_SelectionMaskPipeline->GetLayout();
-
-                        ObjectPushConstants pc{};
-                        pc.modelMatrix   = dc.modelMatrix;
-                        pc.materialIndex = 0;
-                        pc.boneOffset    = dc.boneOffset;
-
-                        // Push the un-jittered-projection jitter alongside; the vertex shader subtracts it
-                        // so the mask silhouette (hence the outline) stays put under TAA.
-                        MaskPushConstants mpc{ pc, vr->currentJitter };
-                        vkCmdPushConstants(cmd, activeLayout,
-                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                            0, sizeof(MaskPushConstants), &mpc);
-
-                        VkBuffer vbuf[] = { vb->GetVulkanBuffer() };
-                        VkDeviceSize offsets[] = { 0 };
-                        vkCmdBindVertexBuffers(cmd, 0, 1, vbuf, offsets);
-                        vkCmdBindIndexBuffer(cmd, ib->GetVulkanBuffer(), 0, VK_INDEX_TYPE_UINT32);
-                        vkCmdDrawIndexed(cmd, ib->GetCount(), 1, 0, 0, 0);
-
-                        if (sys.GetFrameDebugger().state == DebuggerState::CaptureRequested)
-                        {
-                            std::string entName = "Entity";
-                            const auto& tags = sys.GetActiveSnapshot().tagsByEntity;
-                            u32 idx = entt::to_entity(dc.entity);
-                            if (idx < tags.size() && tags[idx])
-                                entName = tags[idx];
-                            sys.GetFrameDebugger().CaptureDrawCall("SelectionMaskPass",
-                                dc.model->GetName() + "[" + std::to_string(dc.meshIndex) + "]",
-                                entName, dc.entityIndex, ib->GetCount(), pc,
-                                { "selectionMask", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL,
-                                  currentSkinned, true, true, false });
-                        }
-                    }
-                };
-
-                DrawBatch(sys.GetDrawList().opaque);
-                DrawBatch(sys.GetDrawList().cutout);
-                DrawBatch(sys.GetDrawList().transparent);
-
-                sys.GetFrameDebugger().EndCapturePass();
-            }
-        );
-
-        return output;
-    }
-
-    RG::ResourceHandle EditorOverlaysSubsystem::AddOutlinePass(
-        RG::RenderGraph& rg, RG::ResourceHandle ldrOutput, SelectionMaskOutput maskOutput, RG::ResourceHandle sceneDepth)
-    {
-        LH_PROFILE_FUNCTION();
-        const auto* view = m_Pipeline->GetCurrentView();
-        if (!m_OutlinePipeline || !view->targets->GetLDROutput()) return ldrOutput;
-
-        struct OutlinePassData {
-            RG::ResourceHandle output;
-            RG::ResourceHandle maskInput;
-            RG::ResourceHandle selDepthInput;
-            RG::ResourceHandle scnDepthInput;
-        };
-        RG::ResourceHandle outputHandle;
-
-        rg.AddPass<OutlinePassData>("OutlinePass",
-            [&, ldrOutput, maskOutput, sceneDepth](OutlinePassData& data, RG::RenderPassBuilder& builder)
-            {
-                data.output = builder.Write(ldrOutput,
-                    VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
-                data.maskInput     = builder.Read(maskOutput.mask);
-                data.selDepthInput = builder.Read(maskOutput.depth);
-                data.scnDepthInput = builder.Read(sceneDepth);
-                outputHandle = data.output;
-            },
-            [this](OutlinePassData& data, RG::RenderPassContext& ctx)
-            {
-                auto& sys = m_Pipeline->GetSystem();
-                const auto* view = m_Pipeline->GetCurrentView();
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "OutlinePass", "LDROutput", false,
-                    { "outline", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, true });
-
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                m_OutlinePipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_OutlinePipeline->GetLayout(), 0, 1, &vr->outlineDescSet, 0, nullptr);
-
-                u32 w = view->targets->GetLDROutput()->GetWidth();
-                u32 h = view->targets->GetLDROutput()->GetHeight();
-                VkViewport vp{}; vp.width = (float)w; vp.height = (float)h; vp.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &vp);
-                VkRect2D sc{}; sc.extent = { w, h };
-                vkCmdSetScissor(cmd, 0, 1, &sc);
-
-                // Push constants flow EditorSettings -> EditorViewportState -> CameraParams (App.cpp).
-                const auto& cp = sys.GetCameraParams();
-                struct OutlinePushConstants {
-                    float outlineWidth;
-                    float texelSizeX, texelSizeY;
-                    float outlineColorR, outlineColorG, outlineColorB, outlineColorA;
-                    float occludedAlpha;
-                } pc;
-                pc.outlineWidth     = cp.outlineWidth;
-                pc.texelSizeX       = 1.0f / (float)w;
-                pc.texelSizeY       = 1.0f / (float)h;
-                pc.outlineColorR    = cp.outlineColor.r;
-                pc.outlineColorG    = cp.outlineColor.g;
-                pc.outlineColorB    = cp.outlineColor.b;
-                pc.outlineColorA    = cp.outlineColor.a;
-                pc.occludedAlpha    = cp.outlineOccludedAlpha;
-                vkCmdPushConstants(cmd, m_OutlinePipeline->GetLayout(),
-                    VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
-
-                vkCmdDraw(cmd, 3, 1, 0, 0);
-
-                ObjectPushConstants dummyPC{};
-                sys.GetFrameDebugger().CaptureDrawCall("OutlinePass", "FullscreenTriangle", "OutlinePass", 0, 0, dummyPC,
-                    { "outline", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, true });
-                sys.GetFrameDebugger().EndCapturePass();
-            }
-        );
-        return outputHandle;
-    }
-
-    RG::ResourceHandle EditorOverlaysSubsystem::AddGridPass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor, RG::ResourceHandle sceneDepth)
-    {
-        LH_PROFILE_FUNCTION();
-        if (!m_GridPipeline) return sceneColor;
-
-        struct GridPassData {
-            RG::ResourceHandle colorTex;
-            RG::ResourceHandle depthInput;
-        };
-        RG::ResourceHandle outputHandle;
-
-        rg.AddPass<GridPassData>("GridPass",
-            [&, sceneColor, sceneDepth](GridPassData& data, RG::RenderPassBuilder& builder)
-            {
-                data.colorTex   = builder.Write(sceneColor,
-                    VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
-                data.depthInput = builder.Read(sceneDepth);
-                outputHandle = data.colorTex;
-            },
-            [this](GridPassData& data, RG::RenderPassContext& ctx)
-            {
-                auto& sys = m_Pipeline->GetSystem();
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "GridPass", "SceneColor", false,
-                    { "grid", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, true });
-
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                m_GridPipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_GridPipeline->GetLayout(), 0, 1, &vr->gridDescSet[slot], 0, nullptr);
-
-                RG::RenderGraph::ResourceNode* res = (RG::RenderGraph::ResourceNode*)ctx.GetResource(data.colorTex);
-                VkViewport vp{};
-                vp.width  = (float)res->desc.width;
-                vp.height = (float)res->desc.height;
-                vp.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &vp);
-                VkRect2D sc{}; sc.extent = { res->desc.width, res->desc.height };
-                vkCmdSetScissor(cmd, 0, 1, &sc);
-
-                const auto& cp = sys.GetCameraParams();
-                struct GridPushConstants {
-                    float axisXColor[4];
-                    float axisZColor[4];
-                    float gridColor[4];
-                    float majorScale;
-                    float fadeStart;
-                    float fadeEnd;
-                    float lineThickness;
-                    float jitter[2];   // per-view TAA jitter; frag subtracts it to un-jitter the grid VP
-                } gpc{};
-                gpc.axisXColor[0] = cp.gridAxisXColor.r; gpc.axisXColor[1] = cp.gridAxisXColor.g; gpc.axisXColor[2] = cp.gridAxisXColor.b; gpc.axisXColor[3] = cp.gridAxisXColor.a;
-                gpc.axisZColor[0] = cp.gridAxisZColor.r; gpc.axisZColor[1] = cp.gridAxisZColor.g; gpc.axisZColor[2] = cp.gridAxisZColor.b; gpc.axisZColor[3] = cp.gridAxisZColor.a;
-                gpc.gridColor[0]  = cp.gridColor.r;      gpc.gridColor[1]  = cp.gridColor.g;      gpc.gridColor[2]  = cp.gridColor.b;      gpc.gridColor[3]  = cp.gridColor.a;
-                gpc.majorScale    = cp.gridMajorScale;
-                gpc.fadeStart     = cp.gridFadeStart;
-                gpc.fadeEnd       = cp.gridFadeEnd;
-                gpc.lineThickness = cp.gridLineThickness;
-                gpc.jitter[0]     = vr->currentJitter.x;
-                gpc.jitter[1]     = vr->currentJitter.y;
-                vkCmdPushConstants(cmd, m_GridPipeline->GetLayout(),
-                    VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(gpc), &gpc);
-
-                vkCmdDraw(cmd, 3, 1, 0, 0);
-
-                ObjectPushConstants dummyPC{};
-                sys.GetFrameDebugger().CaptureDrawCall("GridPass", "FullscreenTriangle", "GridPass", 0, 0, dummyPC,
-                    { "grid", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, true });
-                sys.GetFrameDebugger().EndCapturePass();
-            }
-        );
-        return outputHandle;
-    }
 }

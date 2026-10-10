@@ -1,4 +1,6 @@
 #pragma once
+#include "luth/renderer/features/RenderResource.h"
+#include "luth/renderer/features/ClusterVizBindings.h"
 
 #include "luth/core/types/LuthTypes.h"
 #include "luth/core/FrameData.h"
@@ -20,7 +22,54 @@
 namespace Luth
 {
     class RenderPipeline;
+    struct DrawList;
+    struct RenderSnapshot;
+    struct FrameDebugger;
+    struct CsmBindings
+    {
+        VkPipeline rigid = VK_NULL_HANDLE, deformed = VK_NULL_HANDLE;
+        VkPipelineLayout rigidLayout = VK_NULL_HANDLE, deformedLayout = VK_NULL_HANDLE;
+        std::array<VkDescriptorSet, 6> sets{};
+        const Texture* texture = nullptr;
+        VkImage image = VK_NULL_HANDLE;
+        std::array<VkImageView, k_ShadowCascadeCount> layers{};
+        bool captureDraws = false;
+    };
     namespace fs = std::filesystem;
+
+    struct SkyBindings
+    {
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkPipelineLayout layout = VK_NULL_HANDLE;
+        VkBuffer vertex = VK_NULL_HANDLE;
+        std::shared_ptr<VKVertexBuffer> retainedVertex;
+        std::array<VkDescriptorSet, 5> sets{};
+    };
+
+    struct ClusterBuildConstants
+    {
+        Mat4 invProjection;
+        Vec2 viewportSize;
+        Vec2 pad{};
+        float nearZ = 0, farZ = 0;
+        u32 tilesX = k_ClusterTilesX, tilesY = k_ClusterTilesY;
+    };
+    struct LightAssignConstants
+    {
+        Mat4 view;
+        u32 pointLightCount = 0, spotLightCount = 0;
+        u32 maxLightsPerCluster = k_MaxLightsPerCluster, pad = 0;
+    };
+    struct ClusterBindings
+    {
+        VkPipeline build = VK_NULL_HANDLE, assign = VK_NULL_HANDLE;
+        VkPipelineLayout buildLayout = VK_NULL_HANDLE, assignLayout = VK_NULL_HANDLE;
+        VkDescriptorSet buildSet = VK_NULL_HANDLE, assignSet = VK_NULL_HANDLE;
+        Memory::GPUSubRegion lights{}, aabb{}, grid{}, indices{}, counter{};
+        ClusterBuildConstants buildConstants{};
+        LightAssignConstants assignConstants{};
+        bool ready = false;
+    };
 
     // Owns Set 3, shadow map, IBL maps, skybox VB + shadow/skybox pipelines.
     // invariant: Init() must precede BuildPipelines(geoLayouts); the latter needs Set 5.
@@ -40,31 +89,27 @@ namespace Luth
                               const std::vector<VkDescriptorSetLayout>& geoLayouts);
 
         // Render-graph contributions.
-        RG::ResourceHandle AddShadowPass(RG::RenderGraph& rg, RG::BufferHandle indirectBufferHandle, u32 cascadeIndex);
-        RG::ResourceHandle AddSkyboxPass(RG::RenderGraph& rg, RG::ResourceHandle sceneColor, RG::ResourceHandle sceneDepth);
+        CsmBindings PrepareCsmBindings(const std::array<VkDescriptorSet, 6>& sets, bool captureDraws) const;
+        static GraphTextureRef ImportShadowTarget(RG::RenderGraph&, const CsmBindings&, u32 cascadeIndex);
+        static RG::ResourceHandle AddShadowPass(RG::RenderGraph&, RG::ResourceHandle target,
+            const VisibleDrawRange&, const CsmBindings&, u32 cascadeIndex,
+            const DrawList&, const RenderSnapshot&, FrameDebugger*);
+        SkyBindings PrepareSkyBindings(const std::array<VkDescriptorSet, 5>& sets) const;
+        static RG::ResourceHandle AddSkyboxPass(RG::RenderGraph&, RG::ResourceHandle sceneColor,
+            RG::ResourceHandle sceneDepth, u32 width, u32 height, const SkyBindings&, FrameDebugger*);
 
-        // Forward+ cluster build. Returns BufferHandles + the underlying SubRegions so consumers can
-        // bind the right (buffer, offset, size) triple: BufferHandle stores only the backing VkBuffer
-        // pointer; the offset within that backing is in the SubRegion.
-        struct ClusterBuildOutputs {
-            RG::BufferHandle     aabb;
-            RG::BufferHandle     grid;
-            Memory::GPUSubRegion aabbRegion;
-            Memory::GPUSubRegion gridRegion;
-        };
-        ClusterBuildOutputs AddClusterBuildPass(RG::RenderGraph& rg);
-
-        // Forward+ light-to-cluster assignment. Reads LightSSBO + Cluster AABB; writes Cluster Grid
-        // (atomic offset+count) + LightIndex flat array. Returns the LightIndex handle + SubRegion
-        // so UploadLightingResources can bind b2 of the per-view Set 3.
-        struct LightAssignOutputs {
-            RG::BufferHandle     index;
-            Memory::GPUSubRegion indexRegion;
-        };
-        LightAssignOutputs AddLightAssignPass(RG::RenderGraph& rg, ClusterBuildOutputs cb);
-
+        // Native cluster preparation freezes per-view bindings before graph recording.
+        ClusterBindings PrepareClusterBindings(u64 renderFrameIndex, VkDescriptorSet buildSet,
+            VkDescriptorSet assignSet, const CameraParams&, u32 width, u32 height,
+            const Memory::GPUSubRegion& lights, u32 pointCount, u32 spotCount) const;
+        static GraphBufferRef ImportLightingBuffer(RG::RenderGraph&, const char* name, const Memory::GPUSubRegion&);
+        static std::array<RG::BufferHandle, 2> AddClusterBuildPass(RG::RenderGraph&,
+            RG::BufferHandle aabb, RG::BufferHandle grid, const ClusterBindings&, FrameDebugger*);
+        static std::array<RG::BufferHandle, 2> AddLightAssignPass(RG::RenderGraph&,
+            RG::BufferHandle lights, RG::BufferHandle aabb, RG::BufferHandle grid,
+            RG::BufferHandle indices, RG::BufferHandle counter, const ClusterBindings&, FrameDebugger*);
         // Per-frame LightSSBO upload. Allocates from tagged heap, copies the gathered header +
-        // point-light array, caches m_LastLightSSBORegion so AddLightAssignPass can bind the
+        // point-light array. The caller passes its physical slice explicitly to bind the
         // same backing for its b0 read. Returns the region for WriteSet3PerView's b0 write.
         Memory::GPUSubRegion UploadLightSSBO(const GatheredLights& lights);
 
@@ -81,16 +126,20 @@ namespace Luth
         // Cluster debug viz, gated by ShadeMode::ClustersDensity in BuildGraph. Samples SceneDepth
         // to derive the per-fragment Olsson slice, then reads the per-view cluster grid and heat-maps
         // the lights-per-cluster count over LDR.
+        ClusterVizBindings PrepareClusterVizBindings(std::shared_ptr<ClusterVizViewState> state, VkDescriptorSet lightingSet,
+            const Memory::GPUSubRegion& grid,
+            u32 width, u32 height, float nearZ, float farZ, bool enabled) const;
         RG::ResourceHandle AddClusterVizPass(RG::RenderGraph& rg, RG::ResourceHandle ldrInput,
-                                              RG::ResourceHandle sceneDepth);
-
-        // Per-view depth-sampler write for the ClusterViz pipeline. Stable across frames; called
-        // once at AllocateViewResources time + on resize via FrameTargets re-allocation.
-        void WriteClusterVizView(struct ViewResources& vr, class FrameTargets& targets);
+            RG::ResourceHandle sceneDepth, RG::BufferHandle grid,
+            const ClusterVizBindings& packet, FrameDebugger* debugger);
+        // Domain-owned depth-sampler state. Stable across frames; source replacement uses a safe point.
+        // The shared cycled lighting set remains an explicit native compatibility dependency.
+        std::shared_ptr<ClusterVizViewState> EnsureClusterVizView(RenderViewId, class FrameTargets&);
+        void ReleaseClusterVizView(RenderViewId);
+        void WriteClusterVizView(ClusterVizViewState&);
 
         VkDescriptorSetLayout GetClusterBuildLayout() const { return m_ClusterBuildSetLayout; }
         VkDescriptorSetLayout GetLightAssignLayout()  const { return m_LightAssignSetLayout; }
-        VkDescriptorSetLayout GetClusterVizLayout()   const { return m_ClusterVizDescSetLayout; }
 
         // ---- Accessors ----
         VkDescriptorSetLayout GetSetLayout() const          { return m_LightSetLayout; }
@@ -126,6 +175,7 @@ namespace Luth
         VkImageView              m_ShadowLayerViews[k_ShadowCascadeCount] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
         VkSampler                m_ShadowSampler        = VK_NULL_HANDLE;
         VkSampler                m_SunShadowMaskSampler = VK_NULL_HANDLE;  // Set 3 binding 4: RT sun shadow mask (linear, clamp-to-edge, no compare)
+        bool m_HybridSignalsEnabled = false;
         VkDescriptorSetLayout    m_LightSetLayout = VK_NULL_HANDLE;
 
         // Shadow pipelines + SPV.
@@ -159,14 +209,14 @@ namespace Luth
 
         // Cluster debug viz. Two-set pipeline: set 0 owns the depth sampler (stable per-view, written
         // by WriteClusterVizView); set 1 reuses the Set 3 lightDescSet for its cluster grid read.
+        ClusterVizViewStateStore m_ClusterVizStates;
         std::unique_ptr<VKPipeline> m_ClusterVizPipeline;
         VkDescriptorSetLayout       m_ClusterVizDescSetLayout = VK_NULL_HANDLE;
         VkSampler                   m_ClusterVizDepthSampler  = VK_NULL_HANDLE;
         std::vector<u32>            m_FullscreenVertSpv;
         std::vector<u32>            m_ClusterVizFragSpv;
 
-        // Latest per-frame LightSSBO region from UploadLightingResources. AddLightAssignPass binds
-        // the same VkBuffer to binding 0 of the LightAssign compute set.
-        Memory::GPUSubRegion m_LastLightSSBORegion{};
+
+
     };
 }

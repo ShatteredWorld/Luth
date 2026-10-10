@@ -3,21 +3,14 @@
 #include "luth/renderer/subsystems/DebugDrawSubsystem.h"
 
 #include "luth/core/DebugDraw.h"
-#include "luth/jobs/JobSystem.h"
-#include "luth/memory/GPUTaggedPageAllocator.h"
-#include "luth/renderer/RenderPipeline.h"
-#include "luth/renderer/Renderer.h"
 #include "luth/renderer/shader/ShaderLibrary.h"
-#include "luth/renderer/subsystems/GlobalSubsystem.h"
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
-#include "luth/scene/systems/RenderingSystem.h"
 
 namespace Luth
 {
-    void DebugDrawSubsystem::Init(RenderPipeline& pipeline)
+    void DebugDrawSubsystem::Init()
     {
         LH_PROFILE_FUNCTION();
-        m_Pipeline = &pipeline;
 
         auto loadSpv = [](const char* relPath) -> std::vector<u32> {
             auto sh = ShaderLibrary::LoadEngine(relPath);
@@ -103,74 +96,4 @@ namespace Luth
         return true;
     }
 
-    RG::ResourceHandle DebugDrawSubsystem::AddDebugDrawPass(RG::RenderGraph& rg, RG::ResourceHandle ldrOutput)
-    {
-        LH_PROFILE_FUNCTION();
-        if (!m_LinePipeline) return ldrOutput;
-
-        // Read the lines for the frame the render stage is consuming. Span is valid until
-        // BeginGameFrame is called for the same modulo-2 slot; at least two frames out.
-        const u64 renderFrameIdx = Renderer::GetFrameData()->GetRenderFrameIndex();
-        const auto lines = DebugDraw::GetForRender(renderFrameIdx);
-        if (lines.empty()) return ldrOutput;
-
-        struct DebugDrawPassData { RG::ResourceHandle output; };
-        RG::ResourceHandle outputHandle;
-
-        rg.AddPass<DebugDrawPassData>("DebugDrawPass",
-            [&, ldrOutput](DebugDrawPassData& data, RG::RenderPassBuilder& builder)
-            {
-                data.output  = builder.Write(ldrOutput, VK_ATTACHMENT_LOAD_OP_LOAD,
-                                             VK_ATTACHMENT_STORE_OP_STORE);
-                outputHandle = data.output;
-            },
-            [this, lines](DebugDrawPassData& /*data*/, RG::RenderPassContext& ctx)
-            {
-                auto& sys = m_Pipeline->GetSystem();
-                const auto* view = m_Pipeline->GetCurrentView();
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "DebugDrawPass", "LDROutput", false,
-                    { "debugDraw", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, true });
-
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                m_LinePipeline->Bind(cmd);
-
-                u32 w = view->targets->GetLDROutput()->GetWidth();
-                u32 h = view->targets->GetLDROutput()->GetHeight();
-                VkViewport vp{}; vp.width = (float)w; vp.height = (float)h; vp.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &vp);
-                VkRect2D sc{}; sc.extent = { w, h };
-                vkCmdSetScissor(cmd, 0, 1, &sc);
-
-                // Allocate a transient VB from the GPU heap. Tag-released two frames out by the
-                // VulkanBackend's GPU-N-2 wait, so the buffer outlives this command buffer's GPU
-                // execution. CurrentTag must be set per-frame: VulkanBackend retires by absolute
-                // render-frame index, so a stale/zero tag here means the page is never freed.
-                auto* jctx = Luth::JobSystem::GetCurrentJobContext();
-                auto& cache = jctx->GpuCache;
-                cache.CurrentTag = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
-                const u64 vbBytes = lines.size_bytes();
-                auto region = Memory::GPUTaggedPageAllocator::Get().Allocate(cache, vbBytes, /*alignment*/16);
-                std::memcpy(region.mappedPtr, lines.data(), vbBytes);
-                Memory::GPUTaggedPageAllocator::Get().FlushRegion(region);
-
-                const Mat4 viewProj = m_Pipeline->GetGlobal().GetCachedViewProj();
-                vkCmdPushConstants(cmd, m_LinePipeline->GetLayout(),
-                                   VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Mat4), &viewProj);
-
-                VkBuffer     vbuf[]    = { region.buffer };
-                VkDeviceSize offsets[] = { region.offset };
-                vkCmdBindVertexBuffers(cmd, 0, 1, vbuf, offsets);
-                vkCmdDraw(cmd, static_cast<u32>(lines.size()), 1, 0, 0);
-
-                ObjectPushConstants dummyPC{};
-                sys.GetFrameDebugger().CaptureDrawCall("DebugDrawPass", "Lines", "DebugDrawPass",
-                    0, static_cast<u32>(lines.size()), dummyPC,
-                    { "debugDraw", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, true });
-                sys.GetFrameDebugger().EndCapturePass();
-            }
-        );
-
-        return outputHandle;
-    }
 }

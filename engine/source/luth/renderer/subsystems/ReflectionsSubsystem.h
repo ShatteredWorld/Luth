@@ -1,6 +1,9 @@
 #pragma once
 
 #include "luth/core/types/LuthTypes.h"
+#include "luth/renderer/features/rt/ReflectionViewState.h"
+#include "luth/renderer/features/rt/ReflectionBindings.h"
+#include "luth/renderer/features/rt/ReflectionUpscaleViewState.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 
@@ -13,6 +16,8 @@ namespace Luth
     class RenderPipeline;
     class FrameTargets;
     struct ViewResources;
+    struct PreparedRtScene;
+    struct SvgfSettings;
 
     // RT specular reflections. A rayQuery-in-compute pass that casts one GGX-VNDF
     // reflection ray per opaque pixel from the slim G-buffer (oct normal + roughness + depth), shades the
@@ -22,8 +27,8 @@ namespace Luth
     //
     // Mirrors PathTraceSubsystem's compute-RT shape (5-set bind, inline AS barrier dst=COMPUTE, geom-table
     // BDA push constant) + RtRestirGiSubsystem's slim-G-buffer input + half-res bilateral upscale. The trace
-    // output is consumed by the specular denoiser (DenoiserChannel::Reflections), so the RG keeps it alive in
-    // normal mode and dead-pass-culls it when unconsumed (PathTrace). see arch/rendering-pipeline.md
+    // output is consumed by the specular denoiser (DenoiserChannel::Reflections). The host skips trace
+    // registration in PathTrace mode. see arch/rendering-pipeline.md
     class ReflectionsSubsystem
     {
     public:
@@ -34,31 +39,40 @@ namespace Luth
 
         // Stable per-view Set 2 writes: b0 reflection output (GENERAL storage), b1 depth, b2 slim normal,
         // b3 slim roughness (SHADER_READ_ONLY samplers). Written once at view alloc / resize.
-        void WriteView(ViewResources& vr, FrameTargets& targets);
+        std::shared_ptr<ReflectionViewState> EnsureView(RenderViewId, const FrameTargets&, bool half);
+        void ReleaseView(RenderViewId);
+        void WriteView(ReflectionViewState& state);
 
         // Reflection trace dispatch -> writes the demodulated reflection image. Returns its handle
         // (invalid when disabled / no view). AsyncCompute, after the TLAS build. Reads the slim G-buffer
         // (handles threaded for RG barrier ordering).
-        RG::ResourceHandle AddPasses(RG::RenderGraph& rg,
+        ReflectionBindings PrepareBindings(const ViewResources&, u64 frameIndex, RenderViewId,
+            u64 generation, const PreparedRtScene*, const ReflectionsSettings&,
+            const Mat4& inverseViewProjection, const Memory::GPUSubRegion& lights, bool environmentReady) const;
+        static RG::ResourceHandle AddPasses(RG::RenderGraph& rg,
                                      RG::ResourceHandle sceneDepth,
                                      RG::ResourceHandle slimNormal,
-                                     RG::ResourceHandle slimRoughness);
+                                     RG::ResourceHandle slimRoughness, const ReflectionBindings&, RG::BufferHandle lights);
 
         VkDescriptorSetLayout GetSetLayout() const { return m_SetLayout; }
 
-        // Half-res reflections bilateral upscale (shared bilateral_upscale.slang): resolves the half-res
-        // svgfSpecHalf into the full-res svgfSpecDenoised, depth/normal-guided. Only wired when
-        // ReflectionsSettings::halfResolution. Mirrors RtRestirGiSubsystem's upscale.
-        VkDescriptorSetLayout GetUpscaleLayout() const { return m_UpscaleSetLayout; }
-        void WriteUpscaleView(ViewResources& vr, FrameTargets& targets);
-        RG::ResourceHandle AddUpscalePass(RG::RenderGraph& rg, RG::ResourceHandle reflHalf,
-                                          RG::ResourceHandle sceneDepth, RG::ResourceHandle slimNormal);
+        // Immutable per-view bilateral-upscale bindings borrow the denoiser and guides.
+        std::shared_ptr<ReflectionUpscaleViewState> EnsureUpscaleView(RenderViewId, const FrameTargets&,
+            const std::shared_ptr<ReflectionDenoiserViewState>&);
+        ReflectionUpscaleBindings PrepareUpscaleBindings(const ViewResources&, u64 frameIndex,
+            RenderViewId, u64 generation, const SvgfSettings&) const;
+        static RG::ResourceHandle AddUpscalePass(RG::RenderGraph&,
+            const std::array<RG::ResourceHandle, 3>&, const ReflectionUpscaleBindings&);
 
         // ReflectionsSettings::enabled is the gate. Out-of-line: needs the RenderingSystem definition,
         // which can't be pulled into this header (RenderPipeline include cycle).
         bool IsEnabled() const;
 
     private:
+        ReflectionViewStates m_Views;
+        ReflectionUpscaleViewStates m_UpscaleViews;
+        u64 m_NextUpscaleGeneration = 1;
+        u64 m_NextSourceGeneration = 1;
         RenderPipeline* m_Pipeline = nullptr;
 
         std::unique_ptr<VKComputePipeline> m_ReflPipeline;

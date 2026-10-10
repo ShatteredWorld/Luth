@@ -1,9 +1,8 @@
 #include "luthpch.h"
 #include "luth/renderer/subsystems/GTAOSubsystem.h"
-#include "luth/renderer/RenderPipeline.h"
+#include "luth/renderer/FrameDebugger.h"
+#include "luth/renderer/CameraParams.h"
 #include "luth/renderer/Renderer.h"
-#include "luth/renderer/FrameTargets.h"
-#include "luth/scene/systems/RenderingSystem.h"
 #include "luth/renderer/shader/ShaderLibrary.h"
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
 #include "luth/renderer/backend/vulkan/VulkanTexture.h"
@@ -17,10 +16,9 @@
 
 namespace Luth
 {
-    void GTAOSubsystem::Init(RenderPipeline& pipeline)
+    void GTAOSubsystem::Init()
     {
         LH_PROFILE_FUNCTION();
-        m_Pipeline = &pipeline;
         VkDevice device = VulkanContext::Get().GetDevice();
 
         VkSamplerCreateInfo sampCI{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
@@ -205,13 +203,12 @@ namespace Luth
         return false;
     }
 
-    void GTAOSubsystem::UpdateUBO()
+    void GTAOSubsystem::UpdateUBO(GtaoViewState& vr,
+        const std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT>& globalSets,
+        const GTAOSettings& s, u64 renderFrameIndex)
     {
         LH_PROFILE_FUNCTION();
-        ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-        if (!vr || vr->globalDescriptorSet[0] == VK_NULL_HANDLE) return;
-
-        const auto& s = m_Pipeline->GetSystem().GetPostProcessSettings().gtao;
+        if (globalSets[0] == VK_NULL_HANDLE) return;
         GTAOUBO ubo{};
         ubo.intensity      = s.intensity;
         ubo.radius         = s.radius;
@@ -220,10 +217,11 @@ namespace Luth
         ubo.sliceCount     = s.sliceCount;
         ubo.stepsPerSlice  = s.stepsPerSlice;
         ubo.enabled        = s.enabled  ? 1 : 0;
+        vr.uniformEnabled = s.enabled;
         ubo.visualize      = s.visualize ? 1 : 0;
 
         // Derive full-res from the view's half-res GTAO textures.
-        const auto& lin = vr->gtaoLinearDepth;
+        const auto& lin = vr.linearDepth;
         const u32 halfW = lin ? lin->GetWidth()  : 1u;
         const u32 halfH = lin ? lin->GetHeight() : 1u;
         const u32 fullW = halfW * 2;
@@ -239,7 +237,7 @@ namespace Luth
         // previous frame's binding still references.
         auto* jobCtx = JobSystem::GetCurrentJobContext();
         if (!jobCtx) return;
-        const u32 frameAbs = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
+        const u32 frameAbs = static_cast<u32>(renderFrameIndex);
         const u32 slot     = frameAbs % MAX_FRAMES_IN_FLIGHT;
         jobCtx->GpuCache.CurrentTag = frameAbs;
 
@@ -258,17 +256,17 @@ namespace Luth
 
         VkWriteDescriptorSet writes[2] = {};
         writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[0].dstSet          = vr->globalDescriptorSet[slot];
+        writes[0].dstSet          = globalSets[slot];
         writes[0].dstBinding      = 5;
         writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         writes[0].descriptorCount = 1;
         writes[0].pBufferInfo     = &bi;
 
         u32 n = 1;
-        if (vr->gtaoMainDescSet[0] != VK_NULL_HANDLE)
+        if (vr.mainSets[0] != VK_NULL_HANDLE)
         {
             writes[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            writes[1].dstSet          = vr->gtaoMainDescSet[slot];
+            writes[1].dstSet          = vr.mainSets[slot];
             writes[1].dstBinding      = 2;
             writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             writes[1].descriptorCount = 1;
@@ -279,17 +277,85 @@ namespace Luth
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), n, writes, 0, nullptr);
     }
 
-    void GTAOSubsystem::WriteView(ViewResources& vr, FrameTargets& targets)
+    void GTAOSubsystem::EnsureView(GtaoViewStateStore& states, RenderViewId id,
+        u32 width, u32 height, const Texture& depth)
     {
         LH_PROFILE_FUNCTION();
-        if (vr.gtaoPrefilterDescSet == VK_NULL_HANDLE) return;
+        if (!width || !height || depth.GetWidth() != width || depth.GetHeight() != height)
+            throw std::invalid_argument("GTAO: depth extent does not match the view");
+        auto& owned = states.Ensure(id, {width, height}, [&](const ViewStateConfig&) {
+            auto state = std::make_shared<GtaoViewState>();
+            state->width = width; state->height = height;
+            state->halfWidth = std::max(width / 2, 1u);
+            state->halfHeight = std::max(height / 2, 1u);
+            auto makeImage = [&](TextureFormat format) {
+                return std::make_shared<VKTexture>(state->halfWidth, state->halfHeight,
+                    format, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
+            };
+            state->linearDepth = makeImage(TextureFormat::R32_Float);
+            state->rawAO = makeImage(TextureFormat::R8);
+            state->edges = makeImage(TextureFormat::R8); // Preserve the legacy allocation set.
+            state->finalAO = makeImage(TextureFormat::R8);
+            auto binding = [](const std::shared_ptr<Texture>& texture) {
+                const auto* native = static_cast<const VKTexture*>(texture.get());
+                return GtaoImageBinding{native->GetImage(), native->GetImageView(), {texture.get()}};
+            };
+            state->linearBinding = binding(state->linearDepth);
+            state->rawBinding = binding(state->rawAO);
+            state->finalBinding = binding(state->finalAO);
+            state->device = VulkanContext::Get().GetDevice();
+            VkDescriptorPoolSize sizes[] = {
+                {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, MAX_FRAMES_IN_FLIGHT},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, MAX_FRAMES_IN_FLIGHT + 2},
+                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_FRAMES_IN_FLIGHT + 3}
+            };
+            VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+            pool.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+            pool.maxSets = MAX_FRAMES_IN_FLIGHT + 2;
+            pool.poolSizeCount = 3; pool.pPoolSizes = sizes;
+            if (vkCreateDescriptorPool(state->device, &pool, nullptr, &state->pool) != VK_SUCCESS)
+                throw std::runtime_error("GTAO: descriptor pool allocation failed");
+            auto allocate = [&](VkDescriptorSetLayout layout, VkDescriptorSet* sets, u32 count, const char* tag) {
+                if (!layout) return;
+                std::array<VkDescriptorSetLayout, MAX_FRAMES_IN_FLIGHT> layouts;
+                layouts.fill(layout);
+                VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+                alloc.descriptorPool = state->pool;
+                alloc.descriptorSetCount = count; alloc.pSetLayouts = layouts.data();
+                if (vkAllocateDescriptorSets(state->device, &alloc, sets) != VK_SUCCESS)
+                    throw std::runtime_error("GTAO: descriptor set allocation failed");
+                for (u32 i = 0; i < count; ++i)
+                {
+                    const auto name = std::string(tag) + ".View" + std::to_string(id.value) + ".Slot" + std::to_string(i);
+                    VulkanContext::SetDebugName(sets[i], name.c_str());
+                }
+            };
+            allocate(m_PrefilterDescLayout, &state->prefilterSet, 1, "GTAO.Prefilter");
+            allocate(m_MainDescLayout, state->mainSets.data(), MAX_FRAMES_IN_FLIGHT, "GTAO.Main");
+            allocate(m_DenoiseDescLayout, &state->denoiseSet, 1, "GTAO.Denoise");
+            WriteView(*state, depth);
+            return state;
+        }, [] { Renderer::WaitForGPU(); });
+        if (owned->depthSource != &depth)
+        {
+            // A changed physical depth binding also requires a descriptor-safe point.
+            Renderer::WaitForGPU();
+            WriteView(*owned, depth);
+        }
+    }
+
+    void GTAOSubsystem::WriteView(GtaoViewState& vr, const Texture& depth)
+    {
+        LH_PROFILE_FUNCTION();
+        vr.depthSource = &depth;
+        if (vr.prefilterSet == VK_NULL_HANDLE) return;
 
         VkDevice device = VulkanContext::Get().GetDevice();
 
-        auto vkSceneDepth = std::static_pointer_cast<VKTexture>(targets.GetSceneDepth());
-        auto vkLinDepth   = std::static_pointer_cast<VKTexture>(vr.gtaoLinearDepth);
-        auto vkRawAO      = std::static_pointer_cast<VKTexture>(vr.gtaoRawAO);
-        auto vkFinalAO    = std::static_pointer_cast<VKTexture>(vr.gtaoFinal);
+        const auto* vkSceneDepth = static_cast<const VKTexture*>(&depth);
+        auto vkLinDepth   = std::static_pointer_cast<VKTexture>(vr.linearDepth);
+        auto vkRawAO      = std::static_pointer_cast<VKTexture>(vr.rawAO);
+        auto vkFinalAO    = std::static_pointer_cast<VKTexture>(vr.finalAO);
 
         VkDescriptorImageInfo sceneDepthInfo{};
         sceneDepthInfo.sampler     = m_Sampler;
@@ -312,32 +378,32 @@ namespace Luth
         // Prefilter: [sceneDepth (sampler), linDepth (storage)].
         VkWriteDescriptorSet preWrites[2]{};
         preWrites[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        preWrites[0].dstSet          = vr.gtaoPrefilterDescSet;
+        preWrites[0].dstSet          = vr.prefilterSet;
         preWrites[0].dstBinding      = 0;
         preWrites[0].descriptorCount = 1;
         preWrites[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         preWrites[0].pImageInfo      = &sceneDepthInfo;
         preWrites[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        preWrites[1].dstSet          = vr.gtaoPrefilterDescSet;
+        preWrites[1].dstSet          = vr.prefilterSet;
         preWrites[1].dstBinding      = 1;
         preWrites[1].descriptorCount = 1;
         preWrites[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         preWrites[1].pImageInfo      = &linDepthStorageInfo;
         vkUpdateDescriptorSets(device, 2, preWrites, 0, nullptr);
 
-        if (vr.gtaoMainDescSet[0] == VK_NULL_HANDLE) return;
+        if (vr.mainSets[0] == VK_NULL_HANDLE) return;
         // Bindings 0 + 1 stable; binding 2 (UBO) rebound per render-stage in UpdateUBO.
         VkWriteDescriptorSet mainWrites[2 * MAX_FRAMES_IN_FLIGHT]{};
         for (u32 s = 0; s < MAX_FRAMES_IN_FLIGHT; ++s)
         {
             mainWrites[s * 2 + 0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            mainWrites[s * 2 + 0].dstSet          = vr.gtaoMainDescSet[s];
+            mainWrites[s * 2 + 0].dstSet          = vr.mainSets[s];
             mainWrites[s * 2 + 0].dstBinding      = 0;
             mainWrites[s * 2 + 0].descriptorCount = 1;
             mainWrites[s * 2 + 0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             mainWrites[s * 2 + 0].pImageInfo      = &linDepthSampledInfo;
             mainWrites[s * 2 + 1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            mainWrites[s * 2 + 1].dstSet          = vr.gtaoMainDescSet[s];
+            mainWrites[s * 2 + 1].dstSet          = vr.mainSets[s];
             mainWrites[s * 2 + 1].dstBinding      = 1;
             mainWrites[s * 2 + 1].descriptorCount = 1;
             mainWrites[s * 2 + 1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -345,7 +411,7 @@ namespace Luth
         }
         vkUpdateDescriptorSets(device, 2 * MAX_FRAMES_IN_FLIGHT, mainWrites, 0, nullptr);
 
-        if (vr.gtaoDenoiseDescSet == VK_NULL_HANDLE) return;
+        if (vr.denoiseSet == VK_NULL_HANDLE) return;
         VkDescriptorImageInfo rawAOSampledInfo{};
         rawAOSampledInfo.sampler     = m_Sampler;
         rawAOSampledInfo.imageView   = vkRawAO->GetImageView();
@@ -356,19 +422,19 @@ namespace Luth
 
         VkWriteDescriptorSet denoiseWrites[3]{};
         denoiseWrites[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        denoiseWrites[0].dstSet          = vr.gtaoDenoiseDescSet;
+        denoiseWrites[0].dstSet          = vr.denoiseSet;
         denoiseWrites[0].dstBinding      = 0;
         denoiseWrites[0].descriptorCount = 1;
         denoiseWrites[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         denoiseWrites[0].pImageInfo      = &rawAOSampledInfo;
         denoiseWrites[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        denoiseWrites[1].dstSet          = vr.gtaoDenoiseDescSet;
+        denoiseWrites[1].dstSet          = vr.denoiseSet;
         denoiseWrites[1].dstBinding      = 1;
         denoiseWrites[1].descriptorCount = 1;
         denoiseWrites[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         denoiseWrites[1].pImageInfo      = &linDepthSampledInfo;
         denoiseWrites[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        denoiseWrites[2].dstSet          = vr.gtaoDenoiseDescSet;
+        denoiseWrites[2].dstSet          = vr.denoiseSet;
         denoiseWrites[2].dstBinding      = 2;
         denoiseWrites[2].descriptorCount = 1;
         denoiseWrites[2].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -399,211 +465,121 @@ namespace Luth
         static_assert(sizeof(GTAOMainPC) == 32, "GTAOMainPC layout mismatch");
     }
 
-    RG::ResourceHandle GTAOSubsystem::AddPrefilterPass(RG::RenderGraph& rg, RG::ResourceHandle sceneDepth)
+    RG::ResourceHandle GTAOSubsystem::AddPrefilterPass(RG::RenderGraph& rg, RG::ResourceHandle sceneDepth,
+        const GtaoViewState& state, const CameraParams& camera, FrameDebugger* debugger)
     {
         LH_PROFILE_FUNCTION();
-        struct GTAOPrefilterData {
-            RG::ResourceHandle sceneDepth;
-            RG::ResourceHandle linearDepth;
-        };
-        RG::ResourceHandle outputHandle;
-
-        rg.AddComputePass<GTAOPrefilterData>("GTAODepthPrefilter", RG::QueueFamily::AsyncCompute,
-            [&](GTAOPrefilterData& data, RG::RenderPassBuilder& builder)
-            {
-                // ReadStorageImage despite the name gives ComputeRead -> SHADER_READ_ONLY layout.
-                data.sceneDepth = builder.ReadStorageImage(sceneDepth);
-
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
+        struct Data { RG::ResourceHandle depth, linear; };
+        RG::ResourceHandle output;
+        rg.AddComputePass<Data>("GTAODepthPrefilter", RG::QueueFamily::AsyncCompute,
+            [&](Data& data, RG::RenderPassBuilder& builder) {
+                data.depth = builder.ReadStorageImage(sceneDepth);
                 RG::TextureDesc desc;
-                desc.name   = "GTAOLinearDepth";
-                desc.width  = vr->gtaoLinearDepth->GetWidth();
-                desc.height = vr->gtaoLinearDepth->GetHeight();
+                desc.name = "GTAOLinearDepth";
+                desc.width = state.halfWidth; desc.height = state.halfHeight;
                 desc.format = RG::TextureFormat::R32_Float;
-
-                auto vkLin = std::static_pointer_cast<VKTexture>(vr->gtaoLinearDepth);
-                data.linearDepth = rg.ImportResource(desc,
-                    (void*)vkLin->GetImage(), (void*)vkLin->GetImageView(),
-                    RG::ResourceState::Undefined);
-                data.linearDepth = builder.WriteStorageImage(data.linearDepth);
-
-                outputHandle = data.linearDepth;
+                data.linear = rg.ImportResource(desc, (void*)state.linearBinding.image,
+                    (void*)state.linearBinding.view, RG::ResourceState::Undefined);
+                output = data.linear = builder.WriteStorageImage(data.linear);
             },
-            [this](GTAOPrefilterData& data, RG::RenderPassContext& ctx)
-            {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                auto& sys = m_Pipeline->GetSystem();
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "GTAODepthPrefilter", "GTAOLinearDepth", false,
+            [pipeline = m_PrefilterPipeline.get(), set = state.prefilterSet,
+             halfW = state.halfWidth, halfH = state.halfHeight, fullW = state.width, fullH = state.height,
+             nearZ = camera.nearZ, farZ = camera.farZ, debugger](Data&, RG::RenderPassContext& ctx) {
+                if (debugger) debugger->BeginCapturePass(ctx.passIndex, "GTAODepthPrefilter", "GTAOLinearDepth", false,
                     { "gtao_depth_prefilter", 0, 0, VK_POLYGON_MODE_FILL, false, false, false, false });
-
-                if (!m_PrefilterPipeline || vr->gtaoPrefilterDescSet == VK_NULL_HANDLE)
+                if (pipeline && set)
                 {
-                    sys.GetFrameDebugger().EndCapturePass();
-                    return;
+                    pipeline->Bind(ctx.commandBuffer);
+                    vkCmdBindDescriptorSets(ctx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                        pipeline->GetLayout(), 0, 1, &set, 0, nullptr);
+                    GTAOPrefilterPC pc{};
+                    pc.halfResSize = { (i32)halfW, (i32)halfH };
+                    pc.invFullRes = { 1.0f / float(fullW), 1.0f / float(fullH) };
+                    pc.nearZ = nearZ; pc.farZ = farZ;
+                    vkCmdPushConstants(ctx.commandBuffer, pipeline->GetLayout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+                    const u32 groupX = (halfW + 7) / 8, groupY = (halfH + 7) / 8;
+                    vkCmdDispatch(ctx.commandBuffer, groupX, groupY, 1);
+                    if (debugger) debugger->CaptureComputeDispatch("GTAODepthPrefilter", "gtao_depth_prefilter", groupX, groupY, 1);
                 }
-
-                m_PrefilterPipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    m_PrefilterPipeline->GetLayout(), 0, 1, &vr->gtaoPrefilterDescSet, 0, nullptr);
-
-                const u32 halfW = vr->gtaoLinearDepth->GetWidth();
-                const u32 halfH = vr->gtaoLinearDepth->GetHeight();
-                const u32 fullW = m_Pipeline->GetCurrentView()->targets->GetSceneDepth()->GetWidth();
-                const u32 fullH = m_Pipeline->GetCurrentView()->targets->GetSceneDepth()->GetHeight();
-
-                GTAOPrefilterPC pc{};
-                pc.halfResSize = { (i32)halfW, (i32)halfH };
-                pc.invFullRes  = { 1.0f / float(fullW), 1.0f / float(fullH) };
-                pc.nearZ       = m_Pipeline->GetCurrentView()->camera.nearZ;
-                pc.farZ        = m_Pipeline->GetCurrentView()->camera.farZ;
-                vkCmdPushConstants(cmd, m_PrefilterPipeline->GetLayout(),
-                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(GTAOPrefilterPC), &pc);
-
-                const u32 groupX = (halfW + 7) / 8;
-                const u32 groupY = (halfH + 7) / 8;
-                vkCmdDispatch(cmd, groupX, groupY, 1);
-
-                sys.GetFrameDebugger().CaptureComputeDispatch("GTAODepthPrefilter",
-                    "gtao_depth_prefilter", groupX, groupY, 1);
-                sys.GetFrameDebugger().EndCapturePass();
+                if (debugger) debugger->EndCapturePass();
             });
-        return outputHandle;
+        return output;
     }
 
-    RG::ResourceHandle GTAOSubsystem::AddMainPass(RG::RenderGraph& rg, RG::ResourceHandle linearDepth)
+    RG::ResourceHandle GTAOSubsystem::AddMainPass(RG::RenderGraph& rg, RG::ResourceHandle linearDepth,
+        const GtaoViewState& state, const CameraParams& camera, u64 renderFrameIndex, u32 shaderFrameIndex, FrameDebugger* debugger)
     {
         LH_PROFILE_FUNCTION();
-        struct GTAOMainData {
-            RG::ResourceHandle linearDepth;
-            RG::ResourceHandle rawAO;
-        };
-        RG::ResourceHandle outputHandle;
-
-        rg.AddComputePass<GTAOMainData>("GTAOMain", RG::QueueFamily::AsyncCompute,
-            [&](GTAOMainData& data, RG::RenderPassBuilder& builder)
-            {
-                data.linearDepth = builder.ReadStorageImage(linearDepth);
-
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
+        struct Data { RG::ResourceHandle linear, raw; };
+        RG::ResourceHandle output;
+        rg.AddComputePass<Data>("GTAOMain", RG::QueueFamily::AsyncCompute,
+            [&](Data& data, RG::RenderPassBuilder& builder) {
+                data.linear = builder.ReadStorageImage(linearDepth);
                 RG::TextureDesc desc;
-                desc.name   = "GTAORawAO";
-                desc.width  = vr->gtaoRawAO->GetWidth();
-                desc.height = vr->gtaoRawAO->GetHeight();
+                desc.name = "GTAORawAO";
+                desc.width = state.halfWidth; desc.height = state.halfHeight;
                 desc.format = RG::TextureFormat::R8_Unorm;
-
-                auto vkRaw = std::static_pointer_cast<VKTexture>(vr->gtaoRawAO);
-                data.rawAO = rg.ImportResource(desc,
-                    (void*)vkRaw->GetImage(), (void*)vkRaw->GetImageView(),
-                    RG::ResourceState::Undefined);
-                data.rawAO = builder.WriteStorageImage(data.rawAO);
-
-                outputHandle = data.rawAO;
+                data.raw = rg.ImportResource(desc, (void*)state.rawBinding.image,
+                    (void*)state.rawBinding.view, RG::ResourceState::Undefined);
+                output = data.raw = builder.WriteStorageImage(data.raw);
             },
-            [this](GTAOMainData& data, RG::RenderPassContext& ctx)
-            {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                auto& sys = m_Pipeline->GetSystem();
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "GTAOMain", "GTAORawAO", false,
+            [pipeline = m_MainPipeline.get(), set = state.mainSets[static_cast<u32>(renderFrameIndex) % MAX_FRAMES_IN_FLIGHT],
+             halfW = state.halfWidth, halfH = state.halfHeight,
+             projection = Vec2(camera.projection[0][0], std::abs(camera.projection[1][1])),
+             nearZ = camera.nearZ, farZ = camera.farZ, shaderFrameIndex, debugger](Data&, RG::RenderPassContext& ctx) {
+                if (debugger) debugger->BeginCapturePass(ctx.passIndex, "GTAOMain", "GTAORawAO", false,
                     { "gtao_main", 0, 0, VK_POLYGON_MODE_FILL, false, false, false, false });
-
-                if (!m_MainPipeline || vr->gtaoMainDescSet[0] == VK_NULL_HANDLE)
+                if (pipeline && set)
                 {
-                    sys.GetFrameDebugger().EndCapturePass();
-                    return;
+                    pipeline->Bind(ctx.commandBuffer);
+                    vkCmdBindDescriptorSets(ctx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                        pipeline->GetLayout(), 0, 1, &set, 0, nullptr);
+                    GTAOMainPC pc{};
+                    pc.projParams = projection; // Preserve Vulkan Y-flip correction.
+                    pc.nearZ = nearZ; pc.farZ = farZ; pc.frameIndex = shaderFrameIndex;
+                    vkCmdPushConstants(ctx.commandBuffer, pipeline->GetLayout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+                    const u32 groupX = (halfW + 7) / 8, groupY = (halfH + 7) / 8;
+                    vkCmdDispatch(ctx.commandBuffer, groupX, groupY, 1);
+                    if (debugger) debugger->CaptureComputeDispatch("GTAOMain", "gtao_main", groupX, groupY, 1);
                 }
-
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                m_MainPipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    m_MainPipeline->GetLayout(), 0, 1, &vr->gtaoMainDescSet[slot], 0, nullptr);
-
-                const u32 halfW = vr->gtaoRawAO->GetWidth();
-                const u32 halfH = vr->gtaoRawAO->GetHeight();
-
-                // Vulkan Y-flipped projection has P[1][1] < 0; pass |P[1][1]| so the shader
-                // works in conventional +Y-up view space.
-                const auto& P = m_Pipeline->GetCurrentView()->camera.projection;
-                GTAOMainPC pc{};
-                pc.projParams  = { P[0][0], std::abs(P[1][1]) };
-                pc.nearZ       = m_Pipeline->GetCurrentView()->camera.nearZ;
-                pc.farZ        = m_Pipeline->GetCurrentView()->camera.farZ;
-                pc.frameIndex  = (u32)Renderer::GetFrameData()->GetFrameIndex();
-                vkCmdPushConstants(cmd, m_MainPipeline->GetLayout(),
-                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(GTAOMainPC), &pc);
-
-                const u32 groupX = (halfW + 7) / 8;
-                const u32 groupY = (halfH + 7) / 8;
-                vkCmdDispatch(cmd, groupX, groupY, 1);
-
-                sys.GetFrameDebugger().CaptureComputeDispatch("GTAOMain", "gtao_main", groupX, groupY, 1);
-                sys.GetFrameDebugger().EndCapturePass();
+                if (debugger) debugger->EndCapturePass();
             });
-        return outputHandle;
+        return output;
     }
 
-    RG::ResourceHandle GTAOSubsystem::AddDenoisePass(RG::RenderGraph& rg, RG::ResourceHandle rawAO, RG::ResourceHandle linearDepth)
+    RG::ResourceHandle GTAOSubsystem::AddDenoisePass(RG::RenderGraph& rg, RG::ResourceHandle rawAO,
+        RG::ResourceHandle linearDepth, const GtaoViewState& state, FrameDebugger* debugger)
     {
         LH_PROFILE_FUNCTION();
-        struct GTAODenoiseData {
-            RG::ResourceHandle rawAO;
-            RG::ResourceHandle linearDepth;
-            RG::ResourceHandle finalAO;
-        };
-        RG::ResourceHandle outputHandle;
-
-        rg.AddComputePass<GTAODenoiseData>("GTAODenoise", RG::QueueFamily::AsyncCompute,
-            [&](GTAODenoiseData& data, RG::RenderPassBuilder& builder)
-            {
-                data.rawAO       = builder.ReadStorageImage(rawAO);
-                data.linearDepth = builder.ReadStorageImage(linearDepth);
-
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
+        struct Data { RG::ResourceHandle raw, linear, final; };
+        RG::ResourceHandle output;
+        rg.AddComputePass<Data>("GTAODenoise", RG::QueueFamily::AsyncCompute,
+            [&](Data& data, RG::RenderPassBuilder& builder) {
+                data.raw = builder.ReadStorageImage(rawAO);
+                data.linear = builder.ReadStorageImage(linearDepth);
                 RG::TextureDesc desc;
-                desc.name   = "GTAOFinal";
-                desc.width  = vr->gtaoFinal->GetWidth();
-                desc.height = vr->gtaoFinal->GetHeight();
+                desc.name = "GTAOFinal";
+                desc.width = state.halfWidth; desc.height = state.halfHeight;
                 desc.format = RG::TextureFormat::R8_Unorm;
-
-                auto vkFinal = std::static_pointer_cast<VKTexture>(vr->gtaoFinal);
-                data.finalAO = rg.ImportResource(desc,
-                    (void*)vkFinal->GetImage(), (void*)vkFinal->GetImageView(),
-                    RG::ResourceState::Undefined);
-                data.finalAO = builder.WriteStorageImage(data.finalAO);
-
-                outputHandle = data.finalAO;
+                data.final = rg.ImportResource(desc, (void*)state.finalBinding.image,
+                    (void*)state.finalBinding.view, RG::ResourceState::Undefined);
+                output = data.final = builder.WriteStorageImage(data.final);
             },
-            [this](GTAODenoiseData& data, RG::RenderPassContext& ctx)
-            {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                auto& sys = m_Pipeline->GetSystem();
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "GTAODenoise", "GTAOFinal", false,
+            [pipeline = m_DenoisePipeline.get(), set = state.denoiseSet,
+             halfW = state.halfWidth, halfH = state.halfHeight, debugger](Data&, RG::RenderPassContext& ctx) {
+                if (debugger) debugger->BeginCapturePass(ctx.passIndex, "GTAODenoise", "GTAOFinal", false,
                     { "gtao_denoise", 0, 0, VK_POLYGON_MODE_FILL, false, false, false, false });
-
-                if (!m_DenoisePipeline || vr->gtaoDenoiseDescSet == VK_NULL_HANDLE)
+                if (pipeline && set)
                 {
-                    sys.GetFrameDebugger().EndCapturePass();
-                    return;
+                    pipeline->Bind(ctx.commandBuffer);
+                    vkCmdBindDescriptorSets(ctx.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                        pipeline->GetLayout(), 0, 1, &set, 0, nullptr);
+                    const u32 groupX = (halfW + 7) / 8, groupY = (halfH + 7) / 8;
+                    vkCmdDispatch(ctx.commandBuffer, groupX, groupY, 1);
+                    if (debugger) debugger->CaptureComputeDispatch("GTAODenoise", "gtao_denoise", groupX, groupY, 1);
                 }
-
-                m_DenoisePipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    m_DenoisePipeline->GetLayout(), 0, 1, &vr->gtaoDenoiseDescSet, 0, nullptr);
-
-                const u32 halfW = vr->gtaoFinal->GetWidth();
-                const u32 halfH = vr->gtaoFinal->GetHeight();
-                const u32 groupX = (halfW + 7) / 8;
-                const u32 groupY = (halfH + 7) / 8;
-                vkCmdDispatch(cmd, groupX, groupY, 1);
-
-                sys.GetFrameDebugger().CaptureComputeDispatch("GTAODenoise", "gtao_denoise", groupX, groupY, 1);
-                sys.GetFrameDebugger().EndCapturePass();
+                if (debugger) debugger->EndCapturePass();
             });
-        return outputHandle;
+        return output;
     }
 }

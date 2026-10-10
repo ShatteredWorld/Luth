@@ -70,7 +70,8 @@ namespace Luth
         float m_TrimFeedbackTimer = 0.0f;
 
         // GPU
-        float m_GPUFrameTimeMs = 0.0f;
+        float m_GPUFrameTimeMs = -1.0f;
+        u64 m_ProfileViewId = 0, m_ProfileTopologyGeneration = 0;
         u32   m_TriangleCount = 0;
         u32   m_DrawCalls = 0;
         bool  m_BarrierRedundantOnly = false;   // barrier inspector filter

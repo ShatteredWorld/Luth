@@ -4,8 +4,10 @@
 #include "luth/core/types/LuthMath.h"
 #include "luth/core/UUID.h"
 #include "VulkanAllocator.h"
+#include "VulkanAccelerationStructure.h"
 
 #include <span>
+#include <memory>
 #include <unordered_map>
 #include <vulkan/vulkan.h>
 
@@ -36,9 +38,41 @@ namespace Luth
         VkDeviceAddress            geomTableBDA    = 0;
     };
 
+    // Native command data is established before recording and retained through retirement.
+    struct TlasBuildCommand
+    {
+        VkAccelerationStructureBuildGeometryInfoKHR buildInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+        VkAccelerationStructureGeometryKHR geom{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+        VkAccelerationStructureBuildRangeInfoKHR range{};
+        const VkAccelerationStructureBuildRangeInfoKHR* rangePtr = &range;
+        PFN_vkCmdBuildAccelerationStructuresKHR record = nullptr;
+        TlasBuildCommand() = default;
+        TlasBuildCommand(const TlasBuildCommand&) = delete;
+        TlasBuildCommand& operator=(const TlasBuildCommand&) = delete;
+    };
+
+    struct PreparedTlasBuild
+    {
+        TlasBuildResult result;
+        std::shared_ptr<const TlasBuildCommand> command;
+        void Record(VkCommandBuffer cmd) const
+        {
+            if (!command) return; // Reused or empty scene; no Vulkan access.
+            command->record(cmd, 1, &command->buildInfo, &command->rangePtr);
+        }
+    };
+
     class TlasBuilder
     {
     public:
+        // CPU-only preparation: creates the paired TLAS/table and native build inputs.
+        // BLAS readiness must already be established by the scene provider.
+        static PreparedTlasBuild PrepareTlas(std::span<const MeshDrawSnapshot> instances,
+            u32 frameAbs, const TlasBuildResult& prev,
+            const std::unordered_map<UUID, u32, UUIDHash>& materialSlotMap,
+            u64 blasReadyGen, bool markEmitters,
+            std::span<const PreparedBlasBuild> scheduled = {});
+
         // Per-frame TLAS rebuild from a pre-captured snapshot.
         //   `cmd`        - open command buffer, queue supports compute.
         //   `instances`  - per-frame mesh draw snapshot (resolves Model->Mesh->BLAS internally).
@@ -76,5 +110,7 @@ namespace Luth
         static u32 RefitSkinnedBLASes(VkCommandBuffer cmd,
                                       std::span<const MeshDrawSnapshot> instances,
                                       u32 frameAbs);
+        static PreparedBlasBuild PrepareSkinnedBLASes(
+            std::span<const MeshDrawSnapshot> instances, u32 frameAbs);
     };
 }

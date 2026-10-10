@@ -3,6 +3,12 @@
 #include "luth/renderer/subsystems/IDenoiser.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 
+#include "luth/renderer/features/rt/DiDenoiserViewState.h"
+#include "luth/renderer/features/rt/GiDenoiserViewState.h"
+#include "luth/renderer/features/rt/ReflectionDenoiserViewState.h"
+#include "luth/renderer/features/rt/DiDenoiserBindings.h"
+#include "luth/renderer/features/rt/GiDenoiserBindings.h"
+#include "luth/renderer/features/rt/ReflectionDenoiserBindings.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -14,8 +20,8 @@ namespace Luth
     struct ViewResources;
     struct SvgfSettings;
 
-    // Which signal this instance denoises. Selects the ViewResources image/descriptor set (svgf* /
-    // svgfGi* / svgfSpec* / svgfDiSpec*) + the SvgfSettings instance + the RG/debug pass names. Di/Gi
+    // Which signal this instance denoises. Selects domain-owned view state, settings and
+    // RG/debug pass names. Di/Gi
     // denoise a demodulated diffuse irradiance; Reflections denoises the RT specular radiance via a
     // SPECULAR reproject variant (svgf_spec_reproject.slang, hit-distance virtual reprojection,
     // b3 = slim roughness). DiSpecular denoises the ReSTIR-DI demodulated specular with the ordinary
@@ -39,18 +45,37 @@ namespace Luth
         void WriteView(ViewResources& vr, FrameTargets& targets) override;
         RG::ResourceHandle AddPasses(RG::RenderGraph& rg, const DenoiseInputs& in) override;
         bool IsEnabled() const override;
+        std::shared_ptr<DiDenoiserViewState> EnsureDiView(RenderViewId, FrameTargets&,
+            const std::shared_ptr<RestirDiViewState>&);
+        void ReleaseDiView(RenderViewId);
+        std::shared_ptr<GiDenoiserViewState> EnsureGiView(RenderViewId, FrameTargets&,
+            const std::shared_ptr<RestirGiViewState>&);
+        void ReleaseGiView(RenderViewId);
+        std::shared_ptr<ReflectionDenoiserViewState> EnsureReflectionView(RenderViewId, FrameTargets&,
+            const std::shared_ptr<ReflectionViewState>&);
+        void ReleaseReflectionView(RenderViewId);
+        DiDenoiserBindings PrepareDiBindings(const ViewResources&, u64 frameIndex, RenderViewId,
+            u64 generation, const SvgfSettings&) const;
+        static RG::ResourceHandle AddDiPasses(RG::RenderGraph&,
+            const std::array<RG::ResourceHandle, 6>&, const DiDenoiserBindings&);
+        GiDenoiserBindings PrepareGiBindings(const ViewResources&, u64 frameIndex, RenderViewId,
+            u64 generation, const SvgfSettings&) const;
+        static RG::ResourceHandle AddGiPasses(RG::RenderGraph&,
+            const std::array<RG::ResourceHandle, 6>&, const GiDenoiserBindings&);
+        ReflectionDenoiserBindings PrepareReflectionBindings(const ViewResources&, u64 frameIndex, RenderViewId,
+            u64 generation, const SvgfSettings&) const;
+        static RG::ResourceHandle AddReflectionPasses(RG::RenderGraph&,
+            const std::array<RG::ResourceHandle, 5>&, const ReflectionDenoiserBindings&);
 
     private:
-        // enabled + full pipeline -> reproject -> moments -> a-trous xN chain; disabled -> raw copy (the
-        // A/B). Both write svgfDenoised and return its handle; an invalid input handle returns invalid.
-        RG::ResourceHandle AddDenoiseChain(RG::RenderGraph& rg, const DenoiseInputs& in);
-        RG::ResourceHandle AddPassthroughPass(RG::RenderGraph& rg, const DenoiseInputs& in);
-
-        // Channel-selected SvgfSettings instance + RG/debug pass names (the ViewResources image/set
-        // selection lives in a file-local Resolve() in the .cpp).
+        void WriteNativeView(ViewResources&, FrameTargets&);
+        // Channel-selected UI settings; graph recording uses frozen native packets.
         const SvgfSettings& Settings() const;
-        const char*         PassName(int which) const;  // 0=reproject 1=moments 2=atrous 3=passthrough
 
+        DiDenoiserViewStates m_DiViews;
+        GiDenoiserViewStates m_GiViews;
+        ReflectionDenoiserViewStates m_ReflectionViews;
+        u64 m_NextSourceGeneration = 1;
         DenoiserChannel m_Channel = DenoiserChannel::Di;
         RenderPipeline* m_Pipeline = nullptr;
 

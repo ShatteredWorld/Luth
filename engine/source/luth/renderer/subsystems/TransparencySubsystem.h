@@ -2,15 +2,18 @@
 
 #include "luth/core/types/LuthTypes.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
+#include "luth/renderer/features/RefractionBackdropBindings.h"
+#include "luth/renderer/features/TransparencyViewState.h"
+#include "luth/renderer/features/TransparencyBindings.h"
 #include "luth/renderer/pipeline/PipelineManager.h"
 
+#include <memory>
 #include <string>
 #include <vector>
 #include <vulkan/vulkan.h>
 
 namespace Luth
 {
-    class RenderPipeline;
     struct ViewResources;
 
     // Owns the transparent tier: the pass slot after skybox + volumetric composite where
@@ -22,7 +25,7 @@ namespace Luth
     class TransparencySubsystem
     {
     public:
-        void Init(RenderPipeline& pipeline);
+        void Init();
         void BuildPipelines(const std::vector<VkDescriptorSetLayout>& geoLayouts);
         void Shutdown();
 
@@ -31,52 +34,47 @@ namespace Luth
         bool OnShaderReloaded(const std::string& name, const std::vector<u32>& spv);
 
         // Set 6 b0 <- parity-picked resolved fog atlas (the volumetric composite's b1 rule).
-        void WritePerFrame(ViewResources& vr, u32 frameAbs);
+        void WritePerFrame(TransparencyViewState&, const std::shared_ptr<FogViewState>&, VkSampler fogSampler, u32 frameAbs);
+        std::shared_ptr<TransparencyViewState> EnsureView(RenderViewId, u32 width, u32 height, u32 layers);
+        void ReleaseView(RenderViewId);
 
         // Set 6 b1/b2 (heads + nodes, all cycled slots) + the resolve set <- the view's OIT
         // resources. Called from AllocateViewResources + on resize/budget reallocation.
-        void WriteOitView(ViewResources& vr);
+        void WriteOitView(TransparencyViewState& vr);
 
         // Reserved Garlic tag range for per-view OIT node pools: disjoint from ReSTIR DI
         // (0xFFFF0000+) and GI (0xFFFF8000+); outside the per-frame FreeTag(N-2) sweep.
-        u32 NextNodePoolTag() { return m_NextNodePoolTag++; }
+        u32 NextNodePoolTag();
 
-        // Contributes the transparent pass(es) after the volumetric composite. sceneColor/entityID/
-        // sceneDepth are GeometryPass-chain handles (same nodes; never re-imported); fogResolved is
-        // the post-resolve atlas handle (invalid when volumetric is off -> fog flag cleared).
-        // Returns the sceneColor handle downstream passes consume.
-        RG::ResourceHandle AddPasses(RG::RenderGraph& rg,
-                                     RG::ResourceHandle sceneColor,
-                                     RG::ResourceHandle entityID,
-                                     RG::ResourceHandle sceneDepth,
-                                     RG::ResourceHandle fogResolved,
-                                     RG::ResourceHandle refractionBackdrop,
-                                     RG::BufferHandle indirectBufferHandle);
+        static std::vector<u32> SortedOrder(const DrawList&, const Mat4& view);
+        TransparencyBindings PrepareSortedBindings(GeometrySubsystem&, const std::array<VkDescriptorSet, 7>&,
+            bool wireframe, bool captureDraws, const Mat4&, const VisibleDrawRange&, const DrawList&, const RenderSnapshot&,
+            TextureBindingRef fog, TextureBindingRef backdrop, const RtSubsystem*);
+        TransparencyBindings PrepareTransparencyBindings(GeometrySubsystem&, const std::array<VkDescriptorSet, 7>&,
+            bool wireframe, bool captureDraws, const Mat4&, const VisibleDrawRange&, const DrawList&, const RenderSnapshot&,
+            TextureBindingRef fog, TextureBindingRef backdrop, const RtSubsystem*, bool oit,
+            const TransparencyViewState&, u32 maxResolveK);
+        static std::array<RG::ResourceHandle, 3> AddOitPasses(RG::RenderGraph&, RG::ResourceHandle color,
+            RG::ResourceHandle picking, RG::ResourceHandle depth, const VisibleDrawRange&, u32 width, u32 height,
+            const TransparencyBindings&, std::span<const RG::ResourceHandle>, std::span<const RG::BufferHandle>,
+            bool fogValid, FrameDebugger*);
+        static std::array<RG::ResourceHandle, 3> AddSortedPass(RG::RenderGraph&, RG::ResourceHandle color,
+            RG::ResourceHandle picking, RG::ResourceHandle depth, const VisibleDrawRange&, u32 width, u32 height,
+            const TransparencyBindings&, std::span<const RG::ResourceHandle>, std::span<const RG::BufferHandle>,
+            bool fogValid, FrameDebugger*);
+        static RefractionBackdropBindings PrepareBackdropBindings(const std::shared_ptr<Texture>&, bool enabled);
+        static GraphTextureRef AddBackdropCopyPass(RG::RenderGraph&, RG::ResourceHandle source,
+            const RefractionBackdropBindings&);
 
         VkDescriptorSetLayout GetSetLayout()        const { return m_TransparentSetLayout; }
         VkDescriptorSetLayout GetResolveSetLayout() const { return m_ResolveSetLayout; }
 
     private:
-        RG::ResourceHandle AddSortedPass(RG::RenderGraph& rg,
-                                         RG::ResourceHandle sceneColor,
-                                         RG::ResourceHandle entityID,
-                                         RG::ResourceHandle sceneDepth,
-                                         RG::ResourceHandle fogResolved,
-                                         RG::ResourceHandle refractionBackdrop,
-                                         RG::BufferHandle indirectBufferHandle);
-
-        // OITClear (transfer: heads -> OIT_EMPTY, node count -> 0) -> OITStore (shade + list push) ->
-        // OITResolve (fullscreen sort-K + composite). Heads/nodes are imported once in OITClear in
-        // their end-of-frame state (FragmentStorageRead) so the clear orders after last frame's
-        // resolve reads (cross-frame WAR); downstream passes reuse the returned handles.
-        RG::ResourceHandle AddOitPasses(RG::RenderGraph& rg,
-                                        RG::ResourceHandle sceneColor,
-                                        RG::ResourceHandle entityID,
-                                        RG::ResourceHandle sceneDepth,
-                                        RG::ResourceHandle fogResolved,
-                                        RG::ResourceHandle refractionBackdrop,
-                                        RG::BufferHandle indirectBufferHandle);
-
+        TransparencyBindings PrepareDrawBindings(GeometrySubsystem&, const std::array<VkDescriptorSet, 7>&,
+            bool wireframe, bool captureDraws, const Mat4&, const VisibleDrawRange&, const DrawList&, const RenderSnapshot&,
+            TextureBindingRef fog, TextureBindingRef backdrop, const RtSubsystem*, bool oit);
+        static void RecordDraws(const TransparencyBindings&, VkBuffer indirect, u32 width, u32 height,
+            bool fogValid, u32 capacity, RG::RenderPassContext&, FrameDebugger*);
         void BuildResolvePipeline();
 
         // Matches pbr_transparent_shading.glsl's push-constant block (16 B, FRAGMENT).
@@ -88,7 +86,7 @@ namespace Luth
         };
         static_assert(sizeof(TransparentPC) == 16, "must match the shader push-constant block");
 
-        RenderPipeline* m_Pipeline = nullptr;
+        TransparencyViewStateStore m_ViewStates;
 
         // Set 6 (transparent pass-local): b0 fog atlas sampler3D (UAB, parity rewrite), b1 OIT heads
         // storage image + b2 OIT nodes SSBO (UAB + partially-bound: written when the PPLL lands;
@@ -103,6 +101,8 @@ namespace Luth
         PipelineManager  m_SortedSkinnedPm;
         PipelineManager  m_OitPm;
         PipelineManager  m_OitSkinnedPm;
+        UUID m_SortedShaderId, m_OitShaderId; // Native PSO identities, independent of shader assets.
+        std::string m_TransparentShaderName, m_OitShaderName;
         std::vector<u32> m_TransparentFragSpv;
         std::vector<u32> m_OitStoreFragSpv;
         std::vector<u32> m_FullscreenVertSpv;

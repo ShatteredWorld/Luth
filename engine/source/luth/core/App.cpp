@@ -119,7 +119,7 @@ namespace Luth
 
         for (int i = 0; i < 6; ++i)
         {
-            fs::path candidate = dir / "luth";
+            fs::path candidate = dir / /*"luth"*/"engine";
             if (fs::exists(candidate) && fs::is_directory(candidate)
                 && fs::exists(candidate / "assets"))
             {

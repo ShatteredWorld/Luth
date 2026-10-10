@@ -3,7 +3,6 @@
 #include "luth/renderer/Renderer.h"
 #include "luth/core/diagnostics/Log.h"
 #include "luth/renderer/backend/vulkan/VulkanBuffer.h"
-#include "luth/renderer/backend/vulkan/VulkanAccelerationStructure.h"
 #include "luth/assets/AssetManager.h"
 
 namespace Luth
@@ -74,14 +73,12 @@ namespace Luth
                 : static_cast<u32>(data.Vertices.size());
             auto mesh = Mesh::Create(vb, ib, vertCount, data.IsSkinned);
 
-            // Per-mesh BLAS: rigid built once over the source VB; deformable (skinned OR static
-            // wind-deformable) built over the deformed buffer (filled per-frame by the deform compute)
-            // with ALLOW_UPDATE so each frame's MODE_UPDATE refit is cheap. Built unconditionally on
-            // Vulkan backends; factory returns null on non-Vulkan backends (TLAS skips it).
+            // Raster deformation is independent of RT. Optional BLAS resources are requested
+            // lazily by the RT scene service, after a consumer demands that scene.
             if (data.IsSkinned || data.IsDeformable)
-                mesh->SetBlas(VKAccelerationStructure::CreateDeformableBLAS(*mesh));
-            else
-                mesh->SetBlas(VKAccelerationStructure::CreateStaticBLAS(*mesh));
+            {
+                mesh->EnsureDeformation();
+            }
 
             m_Meshes.push_back(mesh);
         }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "luth/renderer/shader/Shader.h"
+#include "luth/renderer/shader/ShaderVariantCache.h"
 
 #include <string>
 #include <unordered_map>
@@ -30,10 +31,17 @@ namespace Luth
         static std::shared_ptr<Shader> LoadEngine(const std::string& engineRelPath);
 
         static bool Reload(const std::string& name);
+        static std::shared_ptr<const CompiledShaderVariant> LoadEngineVariant(const std::string& engineRelPath, ShaderCompileVariant);
+        static void ReloadVariants();
+        static void ReloadSource(const fs::path&);
+        static void ReloadSources(const std::vector<fs::path>&);
+        static void SetVariantReloadCallback(std::function<void(const std::string&, const std::vector<u32>&)>);
         static void SetReloadCallback(std::function<void(const std::string&)> cb);
 
     private:
         static std::unordered_map<std::string, std::shared_ptr<Shader>> s_Shaders;
         static std::function<void(const std::string&)> s_ReloadCallback;
+        static ShaderVariantCache s_Variants;
+        static std::function<void(const std::string&, const std::vector<u32>&)> s_VariantReloadCallback;
     };
 }

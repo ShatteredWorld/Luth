@@ -2,6 +2,7 @@
 
 #include "luth/core/types/LuthTypes.h"
 #include "luth/renderer/QueueRecorders.h"
+#include "luth/renderer/SubmissionCompletion.h"
 #include <memory>
 
 namespace Luth
@@ -32,8 +33,10 @@ namespace Luth
         // imageAvailable; subsequent views' gA waits on the previous view's gB signal at EARLY_FRAGMENT_TESTS.
         // The last view's gB signals renderFinished + caches the per-frame final timeline values consumed by
         // AcquireImage's GPU-N-2 reclaim predicate. No-op if AcquireImage skipped.
-        virtual void SubmitView(u64 frameIndex, u32 viewSlot, QueueRecorders recorders,
+        virtual SubmissionCompletionToken SubmitView(u64 frameIndex, u32 viewSlot, QueueRecorders recorders,
                                 bool hasComputeWork, bool isLastView) = 0;
+
+        virtual bool IsSubmissionComplete(const SubmissionCompletionToken&) const = 0;
 
         virtual void OnResize(u32 width, u32 height) = 0;
 

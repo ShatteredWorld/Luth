@@ -13,7 +13,79 @@ add_executable(LuthTests
     jobs/test_v5_inline.cpp
     jobs/test_workstealing.cpp
     jobs/test_waitcounter.cpp
+    renderer/MeshDeformation.cpp
+    renderer/MeshBufferUsage.cpp
+    renderer/GlobalBindings.cpp
+    renderer/ShaderVariants.cpp
+    renderer/DebugOutputCatalog.cpp
+    renderer/ViewPresentation.cpp
+    renderer/ShaderReloadFanout.cpp
+    renderer/ProfilingQuerySlots.cpp
+    renderer/FrameRetirement.cpp
+    renderer/ProfilingProvenance.cpp
+    renderer/GraphInstrumentation.cpp
+    renderer/CaptureFinalization.cpp
+    renderer/CapturedReplayBindings.cpp
+    renderer/CaptureRecordingSession.cpp
     renderer/RenderGraphSolver.cpp
+    renderer/RenderBlackboard.cpp
+    renderer/RenderPipelineCompiler.cpp
+    renderer/RenderViewState.cpp
+    renderer/SortedTransparencyFeature.cpp
+    renderer/BloomFeature.cpp
+    renderer/TaaFeature.cpp
+    renderer/SlimVizViewState.cpp
+    renderer/SlimVizFeature.cpp
+    renderer/ClusterVizFeature.cpp
+    renderer/FogVizFeature.cpp
+    renderer/GiReservoirVizFeature.cpp
+    renderer/ClusterVizViewState.cpp
+    renderer/OutlineFeature.cpp
+    renderer/DebugDrawFeature.cpp
+    renderer/SelectionMaskFeature.cpp
+    renderer/GridFeature.cpp
+    renderer/CompositeFeature.cpp
+    renderer/EditorOverlayViewState.cpp
+    renderer/CompositeViewState.cpp
+    renderer/BloomViewState.cpp
+    renderer/TaaViewState.cpp
+    renderer/TransparencyViewState.cpp
+    renderer/RefractionBackdropFeature.cpp
+    renderer/FogCompositeFeature.cpp
+    renderer/FogComputeFeature.cpp
+    renderer/FogViewState.cpp
+    renderer/GTAOFeature.cpp
+    renderer/RtSunShadowFeature.cpp
+    renderer/RtSunShadowViewState.cpp
+    renderer/DiDenoiserFeature.cpp
+    renderer/GiDenoiserFeature.cpp
+    renderer/DiTemporalHistory.cpp
+    renderer/GiTemporalHistory.cpp
+    renderer/ReflectionTemporalHistory.cpp
+    renderer/DiDenoiserViewState.cpp
+    renderer/GiDenoiserViewState.cpp
+    renderer/DiUpscaleViewState.cpp
+    renderer/GiUpscaleViewState.cpp
+    renderer/DiUpscaleFeature.cpp
+    renderer/GiUpscaleFeature.cpp
+    renderer/RestirDiViewState.cpp
+    renderer/ReflectionFeature.cpp
+    renderer/ReflectionDenoiserViewState.cpp
+    renderer/ReflectionDenoiserFeature.cpp
+    renderer/ReflectionUpscaleFeature.cpp
+    renderer/ReflectionUpscaleViewState.cpp
+    renderer/ReflectionViewState.cpp
+    renderer/RestirGiViewState.cpp
+    renderer/RestirDiFeature.cpp
+    renderer/RestirGiFeature.cpp
+    renderer/DeformationFeature.cpp
+    renderer/VisibilityFeature.cpp
+    renderer/DepthPrepassFeature.cpp
+    renderer/SlimGBufferFeature.cpp
+    renderer/CsmFeature.cpp
+    renderer/ClusteredLightingFeature.cpp
+    renderer/SkyFeature.cpp
+    renderer/ForwardOpaqueFeature.cpp
 )
 target_compile_features(LuthTests PRIVATE cxx_std_20)
 target_include_directories(LuthTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

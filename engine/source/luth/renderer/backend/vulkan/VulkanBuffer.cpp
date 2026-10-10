@@ -1,5 +1,6 @@
 #include "luthpch.h"
 #include "VulkanBuffer.h"
+#include "VulkanMeshBufferUsage.h"
 #include "VulkanContext.h"
 #include "VulkanAllocator.h"
 #include "UploadContext.h"
@@ -18,11 +19,7 @@ namespace Luth
         VkBufferCreateInfo bufferInfo = {};
         bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bufferInfo.size = size;
-        // AS_BUILD_INPUT_READ_ONLY required by vkCmdBuildAccelerationStructuresKHR per VUID-...-03671.
-        bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
-                         | VK_BUFFER_USAGE_TRANSFER_DST_BIT
-                         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-                         | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        bufferInfo.usage = VulkanMeshBufferUsage::Vertex(VulkanContext::Get().SupportsRayTracing());
         bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         // The deferred static BLAS build reads the VB via BDA on the AsyncCompute queue; EXCLUSIVE +
         // cross-queue access without QFOT is spec-undefined and TDRs on NVIDIA (mirrors the IB below).
@@ -76,11 +73,7 @@ namespace Luth
         VkBufferCreateInfo bufferInfo = {};
         bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bufferInfo.size = size;
-        // AS_BUILD_INPUT_READ_ONLY required by vkCmdBuildAccelerationStructuresKHR per VUID-...-03672.
-        bufferInfo.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT
-                         | VK_BUFFER_USAGE_TRANSFER_DST_BIT
-                         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-                         | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        bufferInfo.usage = VulkanMeshBufferUsage::Index(VulkanContext::Get().SupportsRayTracing());
         bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         // Skinned BLAS refit reads the IB via BDA on the AsyncCompute queue (see TlasBuilder::
         // RefitSkinnedBLASes). EXCLUSIVE + cross-queue access without QFOT is spec-undefined and

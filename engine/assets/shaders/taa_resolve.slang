@@ -71,8 +71,8 @@ float4 main(FIn i) : SV_Target
     aabbMin.yz = chromaCenter - float2(chromaExtent);
     aabbMax.yz = chromaCenter + float2(chromaExtent);
 
-    // 5. Off-screen UV rejection (settles frame 0 + disocclusion).
-    if (prevUv.x < 0.0 || prevUv.x > 1.0 || prevUv.y < 0.0 || prevUv.y > 1.0)
+    // 5. Invalid history / off-screen rejection. Bootstrap never samples historyPrev.
+    if (taa.temporalAlpha < 0.0 || prevUv.x < 0.0 || prevUv.x > 1.0 || prevUv.y < 0.0 || prevUv.y > 1.0)
         return float4(max(YCoCg_RGB(currentBH), float3(0.0)), 1.0);
 
     // 6. History: Catmull-Rom resample (bilinear-only resampling low-passes the EMA every frame), NaN/inf

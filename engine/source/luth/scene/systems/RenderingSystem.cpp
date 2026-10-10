@@ -1,10 +1,20 @@
 #include "luthpch.h"
+#include "luth/renderer/debug/NativeDebugOutputs.h"
+#include "luth/renderer/presentation/ViewPresentation.h"
+#include <imgui.h>
+#include "luth/renderer/shader/ShaderReloadCoordinator.h"
+#include "luth/renderer/shader/ShaderLibrary.h"
 #include "luth/scene/systems/RenderingSystem.h"
 #include "luth/scene/systems/LightingSystem.h"
 #include "luth/scene/systems/SystemRegistry.h"
 #include "luth/core/RenderSnapshot.h"
 #include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/Renderer.h"
+#include "luth/renderer/debug/FrameDebuggerContext.h"
+#include "luth/renderer/debug/CaptureFinalization.h"
+#include "luth/renderer/debug/GraphInstrumentation.h"
+#include "luth/renderer/debug/ViewGpuProfiler.h"
+#include "luth/renderer/backend/vulkan/VulkanContext.h"
 #include "luth/renderer/backend/vulkan/VulkanBackend.h"
 #include "luth/assets/FileSystem.h"
 #include "luth/scene/Scene.h"
@@ -13,43 +23,173 @@
 
 namespace Luth
 {
+    namespace
+    {
+        void FinishViewHistories(ViewResources* state, u64 frame, bool submitted)
+        {
+            if (!state) return;
+            const bool success = submitted && state->graphRecorded;
+            if (state->restirDi) state->restirDi->history.Finish(frame, state->generation, success);
+            if (state->diDenoiser) state->diDenoiser->history.Finish(frame, state->generation, success);
+            if (state->diSpecDenoiser) state->diSpecDenoiser->history.Finish(frame, state->generation, success);
+            if (state->restirGi) state->restirGi->history.Finish(frame, state->generation, success);
+            if (state->giDenoiser) state->giDenoiser->history.Finish(frame, state->generation, success);
+            if (state->reflection) state->reflection->history.Finish(frame, state->generation, success);
+            if (state->reflectionDenoiser) state->reflectionDenoiser->history.Finish(frame, state->generation, success);
+            if (success) state->cameraHistory.Commit(frame, state->generation);
+            else state->cameraHistory.Invalidate();
+            if (state->taa)
+            {
+                if (success && state->taa->recorded) state->taa->history.Commit(frame, state->generation);
+                else state->taa->history.Invalidate();
+            }
+            state->graphRecorded = false;
+        }
+    }
+
     // ---- Construction / Destruction ----
 
     RenderingSystem::RenderingSystem(u32 viewportWidth, u32 viewportHeight)
     {
+        m_SceneViewId = RegisterView(m_SceneTargets);
         m_FrameAllocator = std::make_unique<Memory::LinearAllocator>(1 * Memory::MB);
         m_Pipeline       = std::make_unique<RenderPipeline>(*this);
         m_Pipeline->Initialize(viewportWidth, viewportHeight);
+        m_GpuProfiler = std::make_unique<ViewGpuProfiler>();
+        m_CaptureContext = std::make_unique<FrameDebuggerContext>(*this, m_Pipeline->GetGeometry(),
+            m_Pipeline->GetLighting(), m_Pipeline->GetPostProcess(), m_Pipeline->GetEditorOverlays());
+        m_ShaderReload = std::make_unique<ShaderReloadCoordinator>();
+        if (Renderer::GetBackend()->GetAPI() == RenderBackend::API::Vulkan)
+        {
+            m_Pipeline->RegisterShaderReloadConsumers(*m_ShaderReload);
+            m_ShaderReload->AddConsumer("CapturePreview", [this](const auto& name, const auto& spv) {
+                if (name == "debugBlit.slang") m_FrameDebugger.blitFragSpv = spv;
+                else if (name == "debugDepth.slang") m_FrameDebugger.depthFragSpv = spv;
+                else return false;
+                return true;
+            });
+            m_ShaderReload->Start(FileSystem::EngineAssetsPath("shaders"));
+        }
     }
 
     RenderingSystem::~RenderingSystem()
     {
+        // Replay borrows native domains and descriptor resources. Retire capture first,
+        // after completion, while those dependencies and the Vulkan device are alive.
+        m_ShaderReload->Stop();
+        Renderer::WaitForGPU();
+        m_GpuProfiler->Shutdown();
+        m_CaptureContext->Shutdown();
+        m_FrameDebugger.Shutdown(VulkanContext::Get().GetDevice());
+        m_CaptureContext.reset();
+        m_DebugOutputs.Clear();
         m_Pipeline->Shutdown();
     }
 
     void RenderingSystem::ReloadSkybox(const fs::path& hdrPath)
     {
         m_Pipeline->ReloadSkybox(hdrPath);
+        m_DebugOutputs.ReplaceShared(CollectSharedDebugOutputs(m_Pipeline->GetLighting()));
     }
 
     std::shared_ptr<Texture> RenderingSystem::GetNamedTexture(const std::string& name) const
     {
-        return m_Pipeline->GetNamedTexture(name);
+        const auto* view = m_Views.Get(m_SceneViewId);
+        return view ? GetNamedTexture(view->id, view->generation, name) : nullptr;
+    }
+
+    std::shared_ptr<Texture> RenderingSystem::GetNamedTexture(RenderViewId id, u64 generation, const std::string& name) const
+    {
+        const auto* view = m_Views.Get(id);
+        if (!view || view->generation != generation) return {};
+        return m_DebugOutputs.Find(id, generation, name);
+    }
+
+    void RenderingSystem::RefreshViewDebugOutputs(RenderViewId id, FrameTargets& targets)
+    {
+        const auto* view = m_Views.Get(id);
+        if (!view || view->targets != &targets) throw std::invalid_argument("Debug outputs require the registered view owner");
+        m_DebugOutputs.ReplaceShared(CollectSharedDebugOutputs(m_Pipeline->GetLighting()));
+        m_DebugOutputs.ReplaceView(id, view->generation, CollectViewDebugOutputs(targets,
+            m_Pipeline->GetViewResources(&targets), m_Pipeline->GetGtaoViewState(id)));
     }
 
     void RenderingSystem::ReplayPassUpToDraw(u32 passIdx, u32 localDrawIdx)
     {
-        m_Pipeline->ReplayPassUpToDraw(passIdx, localDrawIdx);
+        m_CaptureContext->ReplayPassUpToDraw(passIdx, localDrawIdx);
     }
 
     void RenderingSystem::BlitArchivedDepthToPreview(u32 archiveIdx, int layer, float nearZ, float farZ)
     {
-        m_Pipeline->BlitArchivedDepthToPreview(archiveIdx, layer, nearZ, farZ);
+        m_CaptureContext->BlitArchivedDepthToPreview(archiveIdx, layer, nearZ, farZ);
     }
 
     const RG::RenderGraphSnapshot& RenderingSystem::GetGraphSnapshot() const
     {
-        return m_Pipeline->GetGraphSnapshot();
+        return m_GraphSnapshot;
+    }
+
+    RG::RenderGraphSnapshot& RenderingSystem::CaptureGraphSnapshot(const RG::RenderGraph& graph, RenderViewId id, u64 generation)
+    {
+        m_GraphSnapshot = Luth::CaptureGraphSnapshot(graph);
+        m_GraphSnapshot.viewId = id.value;
+        m_GraphSnapshot.resourceGeneration = generation;
+        return m_GraphSnapshot;
+    }
+
+    GPUTimerPool* RenderingSystem::PrepareViewProfiling(RenderViewId id, u64 generation, u64 frame,
+        const RG::RenderGraph& graph, RG::RenderGraphSnapshot& snapshot, bool applyPrevious)
+    {
+        m_Profiling.Prepare(id, generation, frame, graph);
+        return m_GpuProfiler->Prepare(*m_Profiling.Find(id), snapshot, applyPrevious);
+    }
+
+    void RenderingSystem::SubmitViewProfiling(RenderViewId id, u64 frame, SubmissionCompletionToken token)
+    {
+        if (m_Profiling.Submit(id, frame, token)) m_GpuProfiler->Submit(id, frame, token);
+    }
+    void RenderingSystem::AppendViewPresentation(RG::RenderGraph& graph, RG::ResourceHandle finalLdr, bool emitImGui)
+    {
+        if (finalLdr.IsValid()) AddViewOutputExport(graph, finalLdr);
+        else if (!emitImGui) throw std::invalid_argument("Secondary view requires final LDR output");
+        if (!emitImGui) return;
+        auto& swapchain = static_cast<VulkanBackend*>(Renderer::GetBackend())->GetSwapchain();
+        const auto imageIndex = swapchain.GetCurrentFrameIndex();
+        ViewPresentationInputs inputs;
+        inputs.backbuffer.name = "Backbuffer";
+        inputs.backbuffer.width = swapchain.GetExtent().width;
+        inputs.backbuffer.height = swapchain.GetExtent().height;
+        inputs.backbuffer.format = RG::TextureFormat::BGRA8_Unorm;
+        inputs.image = (void*)swapchain.GetImage(imageIndex);
+        inputs.imageView = (void*)swapchain.GetImageView(imageIndex);
+        inputs.drawData = ImGui::GetDrawData();
+        AddViewImGuiPass(graph, inputs, m_FrameDebugger, finalLdr);
+    }
+
+    void RenderingSystem::ExecuteMinimal()
+    {
+        RG::RenderGraph graph(GetFrameAllocator());
+        AppendViewPresentation(graph, {}, true); // Frozen outputs already sampled; no duplicate imports.
+        graph.Compile();
+        Renderer::ExecuteGraph(graph, Renderer::GetFrameData()->GetFrameIndex(), nullptr);
+    }
+    void RenderingSystem::BeginViewCapture(const RenderView& view)
+    {
+        if (!view.captureRequested || m_FrameDebugger.state != DebuggerState::CaptureRequested) return;
+        m_CaptureContext->InitDebugBlitResources();
+        m_CaptureContext->ResetPreviewCacheKeys();
+        m_FrameDebugger.BeginCapture(VulkanContext::Get().GetDevice(), VulkanContext::Get().GetAllocator());
+    }
+
+    bool RenderingSystem::FinalizeViewCapture(const CaptureFinalizationInputs& inputs,
+        const RG::RenderGraphSnapshot& snapshot)
+    {
+        return Luth::FinalizeViewCapture(m_FrameDebugger, inputs, snapshot, m_Views);
+    }
+
+    void RenderingSystem::ResetPreviewCacheKeys()
+    {
+        m_CaptureContext->ResetPreviewCacheKeys();
     }
 
     void RenderingSystem::ExitCapture()
@@ -60,36 +200,37 @@ namespace Luth
         m_FrameDebugger.capturedFrame.Clear();
         // Drop the per-draw replay cache key so the next capture starts clean; the preview texture
         // itself is reused across captures.
-        m_Pipeline->ResetPreviewCacheKeys();
+        m_CaptureContext->ResetPreviewCacheKeys();
     }
 
-    VkImageView RenderingSystem::GetPerDrawPreviewView()   const { return m_Pipeline->GetPerDrawPreviewView(); }
-    u64         RenderingSystem::GetPerDrawPreviewKey()    const { return m_Pipeline->GetPerDrawPreviewKey(); }
-    u32         RenderingSystem::GetPerDrawPreviewWidth()  const { return m_Pipeline->GetPerDrawPreviewWidth(); }
-    u32         RenderingSystem::GetPerDrawPreviewHeight() const { return m_Pipeline->GetPerDrawPreviewHeight(); }
-    VkImageView RenderingSystem::GetDepthPreviewView()     const { return m_Pipeline->GetDepthPreviewView(); }
-    u32         RenderingSystem::GetDepthPreviewWidth()    const { return m_Pipeline->GetDepthPreviewWidth(); }
-    u32         RenderingSystem::GetDepthPreviewHeight()   const { return m_Pipeline->GetDepthPreviewHeight(); }
+    VkImageView RenderingSystem::GetPerDrawPreviewView()   const { return m_CaptureContext->GetPerDrawPreviewView(); }
+    u64         RenderingSystem::GetPerDrawPreviewKey()    const { return m_CaptureContext->GetPerDrawPreviewKey(); }
+    u32         RenderingSystem::GetPerDrawPreviewWidth()  const { return m_CaptureContext->GetPerDrawPreviewWidth(); }
+    u32         RenderingSystem::GetPerDrawPreviewHeight() const { return m_CaptureContext->GetPerDrawPreviewHeight(); }
+    VkImageView RenderingSystem::GetDepthPreviewView()     const { return m_CaptureContext->GetDepthPreviewView(); }
+    u32         RenderingSystem::GetDepthPreviewWidth()    const { return m_CaptureContext->GetDepthPreviewWidth(); }
+    u32         RenderingSystem::GetDepthPreviewHeight()   const { return m_CaptureContext->GetDepthPreviewHeight(); }
 
     void RenderingSystem::BlitArchivedSlimToPreview(u32 archiveIdx, u32 mode, float scale)
     {
-        m_Pipeline->BlitArchivedSlimToPreview(archiveIdx, mode, scale);
+        m_CaptureContext->BlitArchivedSlimToPreview(archiveIdx, mode, scale);
     }
-    VkImageView RenderingSystem::GetSlimPreviewView()      const { return m_Pipeline->GetSlimPreviewView(); }
-    u32         RenderingSystem::GetSlimPreviewWidth()     const { return m_Pipeline->GetSlimPreviewWidth(); }
-    u32         RenderingSystem::GetSlimPreviewHeight()    const { return m_Pipeline->GetSlimPreviewHeight(); }
+    VkImageView RenderingSystem::GetSlimPreviewView()      const { return m_CaptureContext->GetSlimPreviewView(); }
+    u32         RenderingSystem::GetSlimPreviewWidth()     const { return m_CaptureContext->GetSlimPreviewWidth(); }
+    u32         RenderingSystem::GetSlimPreviewHeight()    const { return m_CaptureContext->GetSlimPreviewHeight(); }
 
     // ---- Project lifecycle ----
 
     void RenderingSystem::OnProjectLoaded()
     {
         if (!FileSystem::HasProject()) return;
-        m_Pipeline->GetShaderWatcher().AddProjectDir(FileSystem::AssetsPath("shaders"));
+        ShaderLibrary::ReloadVariants(); // Compile against this project's generated material registry.
+        m_ShaderReload->AddProjectDir(FileSystem::AssetsPath("shaders"));
     }
 
     void RenderingSystem::OnProjectUnloaded()
     {
-        m_Pipeline->GetShaderWatcher().RemoveProjectDir();
+        m_ShaderReload->RemoveProjectDir();
     }
 
     // ---- Per-frame dispatcher ----
@@ -104,7 +245,7 @@ namespace Luth
         // Drain pending shader reloads once per frame (FileWatcher detections from its bg thread).
         // Formerly lived inside RenderPipeline::Execute and ran twice per frame when both Scene + Game
         // viewports were open.
-        m_Pipeline->GetShaderWatcher().Poll();
+        m_ShaderReload->Poll();
 
         // ---- Frame Debugger: Frozen state ----
         // Strict snapshot model with auto-recapture on camera move.
@@ -172,7 +313,7 @@ namespace Luth
                 // Static or throttled: minimal graph, just blit ImGui to the swapchain. Drop queued
                 // views; letting the queue grow unbounded spikes the frame when the debugger exits.
                 m_QueuedViews.clear();
-                m_Pipeline->ExecuteMinimal();
+                ExecuteMinimal();
                 return;
             }
 
@@ -202,6 +343,7 @@ namespace Luth
 
         // Primary view: always rendered, emits the per-frame ImGui pass.
         RenderView sceneView;
+        sceneView.id                   = m_SceneViewId;
         sceneView.targets              = &m_SceneTargets;
         sceneView.camera               = m_CameraParams;
         sceneView.viewIndex            = 0;
@@ -219,6 +361,10 @@ namespace Luth
         // view's ImGui pass), then the scene view closes with the ImGui pass + present barrier. Cross-view ordering
         // for shared resources (m_ShadowMap, IBL maps) is enforced by view K+1's gA submit waiting on view K's gB
         // signal at EARLY_FRAGMENT_TESTS_BIT.
+        std::erase_if(m_QueuedViews, [this](const RenderView& view) {
+            const auto* registered = m_Views.Get(view.id);
+            return !registered || registered->targets != view.targets;
+        });
         const u64 frameIndex  = Renderer::GetFrameData()->GetFrameIndex();
         const u32 totalViews  = (u32)m_QueuedViews.size() + 1;  // queued + scene view
         LH_CORE_ASSERT(totalViews <= MAX_VIEWS_PER_FRAME, "view count exceeds MAX_VIEWS_PER_FRAME");
@@ -228,14 +374,20 @@ namespace Luth
         {
             QueueRecorders r = Renderer::BeginPrimaryCmd(frameIndex, viewSlot);
             const bool hasCompute = RecordView(v, r);
-            Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/false);
+            const auto submitted = Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/false);
+            SubmitViewProfiling(v.id, Renderer::GetFrameData()->GetRenderFrameIndex(), submitted);
+            FinishViewHistories(m_Pipeline->GetViewResources(v.targets),
+                Renderer::GetFrameData()->GetRenderFrameIndex(), submitted.valid);
             ++viewSlot;
         }
         m_QueuedViews.clear();
 
         QueueRecorders r = Renderer::BeginPrimaryCmd(frameIndex, viewSlot);
         const bool hasCompute = RecordView(sceneView, r);
-        Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/true);
+        const auto submitted = Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/true);
+        SubmitViewProfiling(sceneView.id, Renderer::GetFrameData()->GetRenderFrameIndex(), submitted);
+        FinishViewHistories(m_Pipeline->GetViewResources(sceneView.targets),
+            Renderer::GetFrameData()->GetRenderFrameIndex(), submitted.valid);
     }
 
     // ---- Per-view record ----
@@ -257,11 +409,12 @@ namespace Luth
 
         // Must precede the per-view UBO writes below; they read m_CurrentViewResources, which PrepareForTargets sets.
         m_Pipeline->PrepareForTargets(*view.targets);
+        m_Pipeline->PrepareRtScene(view, lighting->GetShadowParams());
 
         // Light UBO (Set 3) is hoisted to Update: view-independent, and a single global Set 3 would
         // race across views otherwise.
         m_Pipeline->UpdateGlobalUniforms(view.camera, lighting->GetCascades(), lighting->GetShadowParams());
-        m_Pipeline->UpdatePostProcessUBO();
+
         m_Pipeline->UpdateGTAOUBO();
 
         return m_Pipeline->Execute(view, recorders);
@@ -278,11 +431,46 @@ namespace Luth
         {
             // Drain GPU + drop ViewResources before swapping textures; see GamePanel::SetOnResize for
             // the same hazard description.
-            Renderer::WaitForGPU();
-            m_Pipeline->ReleaseViewResources(m_SceneTargets);
-
-            m_SceneTargets.Resize(width, height);
+            ResizeView(m_SceneViewId, m_SceneTargets, width, height);
             m_Pipeline->OnResize(width, height);
         }
+    }
+
+    u64 RenderingSystem::InvalidateView(RenderViewId id)
+    {
+        const u64 generation = m_Views.Invalidate(id);
+        m_DebugOutputs.Release(id);
+        if (m_FrameDebugger.capturedFrame.capturedView.id == id) ExitCapture();
+        return generation;
+    }
+
+    void RenderingSystem::ResizeView(RenderViewId id, FrameTargets& targets, u32 width, u32 height)
+    {
+        const auto* registered = m_Views.Get(id);
+        if (!registered || registered->targets != &targets)
+            throw std::invalid_argument("Resize requires the registered view owner");
+        if (!width || !height || width > 16384 || height > 16384) return;
+        if (targets.GetSceneColor() && targets.GetSceneColor()->GetWidth() == width &&
+            targets.GetSceneColor()->GetHeight() == height) return;
+        Renderer::WaitForGPU();
+        InvalidateView(id);
+        m_Pipeline->ReleaseViewResources(targets);
+        if (targets.IsAllocated()) targets.Resize(width, height);
+        else targets.Allocate(width, height);
+    }
+
+    void RenderingSystem::ReleaseView(RenderViewId id)
+    {
+        const auto* registered = m_Views.Get(id);
+        if (!registered) return;
+        Renderer::WaitForGPU();
+        if (m_FrameDebugger.capturedFrame.capturedView.id == id) ExitCapture();
+        auto* targets = static_cast<FrameTargets*>(const_cast<void*>(registered->targets));
+        m_Pipeline->ReleaseViewResources(*targets);
+        std::erase_if(m_QueuedViews, [id](const RenderView& view) { return view.id == id; });
+        m_GpuProfiler->Release(id);
+        m_Profiling.Release(id);
+        m_DebugOutputs.Release(id);
+        m_Views.Release(id);
     }
 }

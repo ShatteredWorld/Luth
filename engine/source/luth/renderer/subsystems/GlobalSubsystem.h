@@ -60,6 +60,7 @@ namespace Luth
     private:
         RenderPipeline*       m_Pipeline         = nullptr;
         VkDescriptorSetLayout m_GlobalSetLayout  = VK_NULL_HANDLE;
+        bool m_TlasBindingEnabled = false;
 
         // Per-frame scratch: set in UpdateUBO, read by Execute + frame-debugger CaptureSnapshot.
         CascadeData                        m_FrameCascades{};

@@ -10,8 +10,7 @@
 
 namespace Luth
 {
-    // Per-frame VkQueryPools for GPU timestamp profiling. Results are read with a 2-frame latency
-    // because GPU N-2 is the most recent frame guaranteed to be complete on the device side.
+    // Explicit query slots for one view. The profiling service gates reset/readback on submission completion.
     // Also owns an optional pipeline-statistics pool (graphics passes only); see the stats methods.
     class GPUTimerPool
     {
@@ -30,16 +29,20 @@ namespace Luth
 
         void Init(u32 maxPasses);
         void Shutdown();
+        bool IsInitialized() const { return m_Initialized; }
+        u32 MaxPasses() const { return m_MaxPasses; }
+        void SelectSlot(u32 slot, bool stats) { m_RecordingSlot = slot; m_RecordingStats = stats; }
+        bool RecordingStatsEnabled() const { return m_RecordingStats; }
 
-        // Reset the current frame's query pools. Call once per frame before any passes.
+        // Reset the selected, retired slot once before this graph's passes.
         void ResetForFrame(VkCommandBuffer cmd);
 
         // Write a timestamp before (isBegin=true) or after (isBegin=false) a pass. passIndex is a
         // 0-based counter of non-culled passes in this frame.
         void WriteTimestamp(VkCommandBuffer cmd, u32 passIndex, bool isBegin);
 
-        // Read results from 2 frames ago. Fills outTimesMs with per-pass durations in milliseconds.
-        void ReadResults(u32 passCount, std::vector<float>& outTimesMs);
+        // Read a completed slot using its recorded pass count; never waits.
+        void ReadResults(u32 slot, u32 passCount, std::vector<float>& outTimesMs);
 
         // Pipeline statistics (graphics passes only; async-compute queues can't run graphics stat
         // queries). Begin/End bracket the pass on the graphics primary and span its secondary via
@@ -47,9 +50,8 @@ namespace Luth
         bool StatsSupported() const { return m_StatsSupported; }
         void BeginStats(VkCommandBuffer cmd, u32 passIndex);
         void EndStats(VkCommandBuffer cmd, u32 passIndex);
-        // Read 2-frame-old per-pass stats. MUST be called before ReadResults (shares the frame counter
-        // ReadResults advances). Passes with no recorded query (compute, or stats off) get valid=false.
-        void ReadStats(u32 passCount, std::vector<RG::GpuPipelineStats>& out);
+        // Read only queries actually recorded in this submission (ignores the current UI toggle).
+        void ReadStats(u32 slot, u32 passCount, bool recorded, std::vector<RG::GpuPipelineStats>& out);
 
         static void SetStatsEnabled(bool e) { s_StatsEnabled.store(e, std::memory_order_relaxed); }
         static bool StatsEnabled()          { return s_StatsEnabled.load(std::memory_order_relaxed); }
@@ -58,7 +60,8 @@ namespace Luth
         VkQueryPool m_Pools[MAX_FRAMES_IN_FLIGHT] = {};
         VkQueryPool m_StatsPools[MAX_FRAMES_IN_FLIGHT] = {};
         u32   m_MaxPasses      = 0;
-        u64   m_FrameCounter   = 0;
+        u32   m_RecordingSlot  = 0;
+        bool  m_RecordingStats = false;
         float m_TimestampPeriod = 0.0f;
         bool  m_Initialized    = false;
         bool  m_StatsSupported = false;

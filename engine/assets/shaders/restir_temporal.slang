@@ -46,6 +46,9 @@ void main(uint3 tid : SV_DispatchThreadID)
     int2 pixel = int2(tid.xy);
     int2 size  = int2(pc.dispatchW, pc.dispatchH);
     if (pixel.x >= size.x || pixel.y >= size.y) return;
+    // Initial already wrote every candidate. Never read uninitialized or stale
+    // spatial history on bootstrap, discontinuity, or disabled temporal reuse.
+    if (pc.mCap == 0u) return;
     uint flatIdx = uint(pixel.y) * uint(size.x) + uint(pixel.x);
 
     float depth = u_CurrDepth.Load(int3(GbufCoord(pixel), 0)).r;

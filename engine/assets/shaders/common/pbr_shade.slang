@@ -19,11 +19,14 @@ struct GTAOUBO
 [[vk::binding(5, 0)]] ConstantBuffer<GTAOUBO> gtao;
 
 // Set 3 b4-b8: opaque-depth-coupled screen-space inputs (b0-b3 lights/cluster/shadow via pbr_lighting).
+#if !LUTH_RASTER_ONLY
 [[vk::binding(4, 3)]] Sampler2D sunShadowMask;   // RT sun-shadow visibility (R8)
 [[vk::binding(5, 3)]] Sampler2D diIrradiance;    // demodulated DI diffuse irradiance
 [[vk::binding(6, 3)]] Sampler2D giIrradiance;    // demodulated GI indirect-diffuse irradiance
 [[vk::binding(7, 3)]] Sampler2D reflRadiance;    // demodulated RT reflection radiance
 [[vk::binding(8, 3)]] Sampler2D diSpecular;      // demodulated ReSTIR-DI specular
+
+#endif
 
 // pbr.vert delivers v_TBN as a mat3 at locations 3-5; read its columns as separate T/B/N (layout-safe).
 // Members are public so the per-material entry shaders (pbr.slang / generated pbr_graph_*) can read them.
@@ -49,6 +52,7 @@ public struct FOut
 
 // Karis mobile EnvBRDFApprox with F0 = 1 (rho = A + B): remodulates the ReSTIR DI-spec signal that
 // restir_shade.slang demodulated by the same scalar; keep the two in lockstep.
+#if !LUTH_RASTER_ONLY
 float DiSpecRho(float NoV, float rough)
 {
     float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
@@ -66,10 +70,14 @@ ShadowResult ComputeShadowRT(float2 uv)
     r.shadow = (ubo.shadowBias.x < 0.0) ? 1.0 : sunShadowMask.Sample(uv).r;
     return r;
 }
+#endif
+
 // Dispatch: rtShadowParams.x > 0.5 -> RT mask sample; else cascade PCF.
 ShadowResult ComputeShadow(float3 worldPos, float3 N, float2 uv)
 {
+#if !LUTH_RASTER_ONLY
     if (ubo.rtShadowParams.x > 0.5) return ComputeShadowRT(uv);
+#endif
     return ComputeShadowCSM(worldPos, N);
 }
 
@@ -133,9 +141,14 @@ public FOut PbrShadeSurface(MaterialInputs mi, GPUMaterialData m, VIn i, bool fr
     float2 dbgUv = fragCoord.xy / ubo.viewportSize;
     // Raw signals always claim their mode: show the sampled buffer when the feature is on, else a
     // magenta "unavailable" flag so the view isn't a silent fall-through to the lit image.
+#if LUTH_RASTER_ONLY
+    if (i.shadeMode >= 18u && i.shadeMode <= 20u) { o.color = float4(1.0, 0.0, 1.0, 1.0); return o; }
+#else
     if (i.shadeMode == 18u) { o.color = ubo.restirParams.y > 0.5 ? float4(giIrradiance.Sample(dbgUv).rgb, 1.0) : float4(1.0, 0.0, 1.0, 1.0); return o; }  // GI Raw
     if (i.shadeMode == 19u) { o.color = ubo.restirParams.x > 0.5 ? float4(diIrradiance.Sample(dbgUv).rgb, 1.0) : float4(1.0, 0.0, 1.0, 1.0); return o; }  // DI Raw
     if (i.shadeMode == 20u) { o.color = ubo.reflParams.x  > 0.5 ? float4(reflRadiance.Sample(dbgUv).rgb, 1.0) : float4(1.0, 0.0, 1.0, 1.0); return o; }  // RT Reflection Raw
+
+#endif
 
     // Material-baked AO x screen-space GTAO (half-res R8).
     float ao = mi.occlusion;
@@ -163,6 +176,9 @@ public FOut PbrShadeSurface(MaterialInputs mi, GPUMaterialData m, VIn i, bool fr
     // Punctual lights: demodulated ReSTIR DI image (points only), else the Forward+ cluster loop. Remodulate
     // by diffuse albedo / PI (metals carry no Lambertian diffuse). Spots aren't in the DI reservoir, so when
     // DI is on we still run the cluster loop for spots only; when off, the loop does points + spots.
+#if LUTH_RASTER_ONLY
+    Lo += EvalClusteredLights(fragCoord, i.worldPos, V, surf, false);
+#else
     if (ubo.restirParams.x > 0.5)
     {
         Lo += diIrradiance.Sample(screenUv).rgb * (albedo.rgb * (1.0 - metallic) / GI_PI);
@@ -184,17 +200,22 @@ public FOut PbrShadeSurface(MaterialInputs mi, GPUMaterialData m, VIn i, bool fr
         Lo += diSpecular.Sample(screenUv).rgb * (DiSpecRho(NoV, roughness) * ubo.restirParams.z) * F0;
     }
 
+#endif
+
     IblResult ibl = EvalIblAmbient(surf, V, ao, ubo.iblIntensity);
     float3 color = ibl.ambient + Lo;
 
     // RT specular reflection supersedes IBL specular above the roughness cutoff. reflRad is a
     // traced scene reflection (decoupled from iblIntensity); subtract the iblSpecular it replaces.
+#if !LUTH_RASTER_ONLY
     if (ubo.reflParams.x > 0.5)
     {
         float  reflWeight = 1.0 - smoothstep(ubo.reflParams.y, ubo.reflParams.z, roughness);
         float3 reflRad    = reflRadiance.Sample(screenUv).rgb;
         color += (reflRad * ibl.envBRDF - ibl.specularIBL * ubo.iblIntensity) * ao * reflWeight;
     }
+
+#endif
 
     // Debug: raw GTAO buffer (gtao.visualize toggle or the AmbientOcclusion shade-mode).
     if (i.shadeMode == 17u || (i.shadeMode == 0u && gtao.visualize != 0))
@@ -207,13 +228,16 @@ public FOut PbrShadeSurface(MaterialInputs mi, GPUMaterialData m, VIn i, bool fr
     // Debug: cascade tint (CSM) / raw RT mask. Driven by the global toggle or the ShadowCascades shade-mode.
     if (i.shadeMode == 16u || (i.shadeMode == 0u && ubo.debugVisualizeCascades > 0.5))
     {
+#if !LUTH_RASTER_ONLY
         if (ubo.rtShadowParams.x > 0.5)
         {
             float vis = sunShadowMask.Sample(screenUv).r;
             o.color = float4(vis, vis, vis, 1.0);
             return o;
         }
-        else if (sr.cascade >= 0)
+        else
+#endif
+        if (sr.cascade >= 0)
         {
             float3 cascadeColors[4] = { float3(1.0, 0.2, 0.2), float3(0.2, 1.0, 0.2),
                                         float3(0.2, 0.2, 1.0), float3(1.0, 1.0, 0.2) };

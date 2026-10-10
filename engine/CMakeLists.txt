@@ -43,6 +43,83 @@ add_library(Luth STATIC
     source/luth/renderer/Renderer.cpp
     source/luth/renderer/ViewResources.cpp
 
+    source/luth/renderer/features/RenderBlackboard.cpp
+    source/luth/renderer/features/GTAOFeature.cpp
+    source/luth/renderer/features/rt/RtSunShadowFeature.cpp
+    source/luth/renderer/features/rt/RtFogFeature.cpp
+    source/luth/renderer/features/rt/RtSunShadowViewState.cpp
+    source/luth/renderer/features/rt/DiDenoiserFeature.cpp
+    source/luth/renderer/features/rt/GiDenoiserFeature.cpp
+    source/luth/renderer/features/rt/DiDenoiserViewState.cpp
+    source/luth/renderer/features/rt/GiDenoiserViewState.cpp
+    source/luth/renderer/features/rt/DiUpscaleViewState.cpp
+    source/luth/renderer/features/rt/GiUpscaleViewState.cpp
+    source/luth/renderer/features/rt/DiUpscaleFeature.cpp
+    source/luth/renderer/features/rt/GiUpscaleFeature.cpp
+    source/luth/renderer/features/rt/RestirDiViewState.cpp
+    source/luth/renderer/features/rt/ReflectionFeature.cpp
+    source/luth/renderer/features/rt/ReflectionDenoiserViewState.cpp
+    source/luth/renderer/features/rt/ReflectionDenoiserFeature.cpp
+    source/luth/renderer/features/rt/ReflectionUpscaleFeature.cpp
+    source/luth/renderer/features/rt/ReflectionUpscaleViewState.cpp
+    source/luth/renderer/features/rt/ReflectionViewState.cpp
+    source/luth/renderer/subsystems/ReflectionViewResources.cpp
+    source/luth/renderer/subsystems/ReflectionUpscale.cpp
+    source/luth/renderer/features/rt/RestirGiViewState.cpp
+    source/luth/renderer/features/rt/RestirDiFeature.cpp
+    source/luth/renderer/features/rt/RestirGiFeature.cpp
+    source/luth/renderer/features/DeformationFeature.cpp
+    source/luth/renderer/features/VisibilityFeature.cpp
+    source/luth/renderer/features/DepthPrepassFeature.cpp
+    source/luth/renderer/features/SlimGBufferFeature.cpp
+    source/luth/renderer/features/CsmFeature.cpp
+    source/luth/renderer/features/ClusteredLightingFeature.cpp
+    source/luth/renderer/features/SkyFeature.cpp
+    source/luth/renderer/features/ForwardOpaqueFeature.cpp
+    source/luth/renderer/features/TransparencyFeature.cpp
+    source/luth/renderer/subsystems/TransparencyOit.cpp
+    source/luth/renderer/subsystems/TransparencySorted.cpp
+    source/luth/renderer/features/BloomFeature.cpp
+    source/luth/renderer/subsystems/PostProcessBloom.cpp
+    source/luth/renderer/features/TaaFeature.cpp
+    source/luth/renderer/subsystems/PostProcessTaa.cpp
+    source/luth/renderer/features/SlimVizViewState.cpp
+    source/luth/renderer/subsystems/PostProcessSlimVizState.cpp
+    source/luth/renderer/features/SlimVizFeature.cpp
+    source/luth/renderer/features/ClusterVizFeature.cpp
+    source/luth/renderer/features/FogVizFeature.cpp
+    source/luth/renderer/features/rt/GiReservoirVizFeature.cpp
+    source/luth/renderer/features/ClusterVizViewState.cpp
+    source/luth/renderer/subsystems/PostProcessSlimViz.cpp
+    source/luth/renderer/features/OutlineFeature.cpp
+    source/luth/renderer/features/DebugDrawFeature.cpp
+    source/luth/renderer/subsystems/EditorOverlayOutline.cpp
+    source/luth/renderer/features/SelectionMaskFeature.cpp
+    source/luth/renderer/subsystems/EditorOverlaySelection.cpp
+    source/luth/renderer/features/GridFeature.cpp
+    source/luth/renderer/subsystems/EditorOverlayGrid.cpp
+    source/luth/renderer/features/CompositeFeature.cpp
+    source/luth/renderer/subsystems/PostProcessComposite.cpp
+    source/luth/renderer/features/EditorOverlayViewState.cpp
+    source/luth/renderer/subsystems/EditorOverlayState.cpp
+    source/luth/renderer/features/CompositeViewState.cpp
+    source/luth/renderer/subsystems/PostProcessCompositeState.cpp
+    source/luth/renderer/features/BloomViewState.cpp
+    source/luth/renderer/subsystems/PostProcessBloomState.cpp
+    source/luth/renderer/features/TaaViewState.cpp
+    source/luth/renderer/subsystems/PostProcessTaaState.cpp
+    source/luth/renderer/features/TransparencyViewState.cpp
+    source/luth/renderer/features/RefractionBackdropFeature.cpp
+    source/luth/renderer/subsystems/TransparencyBackdrop.cpp
+    source/luth/renderer/features/FogCompositeFeature.cpp
+    source/luth/renderer/subsystems/VolumetricComposite.cpp
+    source/luth/renderer/subsystems/VolumetricViz.cpp
+    source/luth/renderer/features/FogComputeFeature.cpp
+    source/luth/renderer/subsystems/VolumetricCompute.cpp
+    source/luth/renderer/features/FogViewState.cpp
+    source/luth/renderer/features/GtaoViewState.cpp
+    source/luth/renderer/features/RenderPipelineCompiler.cpp
+
     source/luth/renderer/backend/vulkan/AftermathCrashTracker.cpp
     source/luth/renderer/backend/vulkan/CommandAllocator.cpp
     source/luth/renderer/backend/vulkan/CommandAllocatorPool.cpp
@@ -52,6 +129,7 @@ add_library(Luth STATIC
     source/luth/renderer/backend/vulkan/TimelineSemaphore.cpp
     source/luth/renderer/backend/vulkan/TlasBuilder.cpp
     source/luth/renderer/backend/vulkan/UploadContext.cpp
+    source/luth/renderer/backend/vulkan/VulkanMeshDeformation.cpp
     source/luth/renderer/backend/vulkan/VulkanAccelerationStructure.cpp
     source/luth/renderer/backend/vulkan/VulkanAllocator.cpp
     source/luth/renderer/backend/vulkan/VulkanBackend.cpp
@@ -64,6 +142,13 @@ add_library(Luth STATIC
     source/luth/renderer/backend/vulkan/VulkanSwapchain.cpp
     source/luth/renderer/backend/vulkan/VulkanTexture.cpp
 
+    source/luth/renderer/shader/ShaderReloadCoordinator.cpp
+    source/luth/renderer/debug/ViewGpuProfiler.cpp
+    source/luth/renderer/debug/ProfilingProvenance.cpp
+    source/luth/renderer/debug/NativeDebugOutputs.cpp
+    source/luth/renderer/debug/GraphInstrumentation.cpp
+    source/luth/renderer/debug/CaptureFinalization.cpp
+    source/luth/renderer/debug/CaptureRecordingSession.cpp
     source/luth/renderer/debug/FrameDebuggerContext.cpp
 
     source/luth/renderer/lighting/CascadeBuilder.cpp
@@ -77,6 +162,7 @@ add_library(Luth STATIC
     source/luth/renderer/material/MaterialLayoutGuard.cpp
     source/luth/renderer/material/MaterialSystem.cpp
 
+    source/luth/renderer/presentation/ViewPresentation.cpp
     source/luth/renderer/passes/ImGuiPass.cpp
 
     source/luth/renderer/pipeline/PipelineManager.cpp
@@ -95,23 +181,32 @@ add_library(Luth STATIC
     source/luth/renderer/shader/Shader.cpp
     source/luth/renderer/shader/ShaderCompiler.cpp
     source/luth/renderer/shader/ShaderLibrary.cpp
+    source/luth/renderer/shader/ShaderVariantCache.cpp
     source/luth/renderer/shader/ShaderWatcher.cpp
     source/luth/renderer/shader/SlangCompiler.cpp
 
     source/luth/renderer/subsystems/DebugDrawSubsystem.cpp
+    source/luth/renderer/subsystems/DebugDrawRecording.cpp
     source/luth/renderer/subsystems/EditorOverlaysSubsystem.cpp
     source/luth/renderer/subsystems/GTAOSubsystem.cpp
     source/luth/renderer/subsystems/GeometrySubsystem.cpp
     source/luth/renderer/subsystems/GlobalSubsystem.cpp
     source/luth/renderer/subsystems/LightingSubsystem.cpp
+    source/luth/renderer/subsystems/LightingClusterViz.cpp
+    source/luth/renderer/subsystems/LightingClusterVizState.cpp
     source/luth/renderer/subsystems/PathTraceSubsystem.cpp
     source/luth/renderer/subsystems/PostProcessSubsystem.cpp
     source/luth/renderer/subsystems/ReflectionsSubsystem.cpp
     source/luth/renderer/subsystems/RtRestirGiSubsystem.cpp
+    source/luth/renderer/subsystems/RtRestirGiUpscale.cpp
+    source/luth/renderer/subsystems/RtGiReservoirViz.cpp
     source/luth/renderer/subsystems/RtRestirSubsystem.cpp
     source/luth/renderer/subsystems/RtSubsystem.cpp
     source/luth/renderer/subsystems/SkinningSubsystem.cpp
     source/luth/renderer/subsystems/SlangParityGuard.cpp
+    source/luth/renderer/subsystems/SvgfDi.cpp
+    source/luth/renderer/subsystems/SvgfGi.cpp
+    source/luth/renderer/subsystems/SvgfReflection.cpp
     source/luth/renderer/subsystems/SvgfDenoiser.cpp
     source/luth/renderer/subsystems/TransparencySubsystem.cpp
     source/luth/renderer/subsystems/VolumetricSubsystem.cpp

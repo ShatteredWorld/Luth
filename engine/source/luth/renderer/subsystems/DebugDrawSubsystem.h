@@ -1,6 +1,7 @@
 #pragma once
 
 #include "luth/core/types/LuthTypes.h"
+#include "luth/renderer/features/DebugDrawBindings.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/backend/vulkan/VulkanPipeline.h"
 
@@ -10,7 +11,7 @@
 
 namespace Luth
 {
-    class RenderPipeline;
+    struct FrameDebugger;
 
     // Render-side companion to luth/core/DebugDraw. Owns a single line-list graphics pipeline and
     // drains the current frame's queued line endpoints into a transient vertex buffer carved from
@@ -20,18 +21,19 @@ namespace Luth
     class DebugDrawSubsystem
     {
     public:
-        void Init(RenderPipeline& pipeline);
+        void Init();
         void BuildPipelines();
         void Shutdown();
 
         bool OnShaderReloaded(const std::string& name, const std::vector<u32>& spv);
 
-        RG::ResourceHandle AddDebugDrawPass(RG::RenderGraph& rg, RG::ResourceHandle ldrOutput);
+        DebugDrawBindings PrepareBindings(std::span<const DebugVertex>, const Mat4& viewProj, u64 renderFrameIndex, bool enabled);
+        RG::ResourceHandle AddDebugDrawPass(RG::RenderGraph&, RG::ResourceHandle ldrOutput,
+            const DebugDrawBindings&, FrameDebugger*);
 
     private:
         void BuildLinePipeline();
 
-        RenderPipeline*             m_Pipeline = nullptr;
         std::unique_ptr<VKPipeline> m_LinePipeline;
         std::vector<u32>            m_VertSpv;
         std::vector<u32>            m_FragSpv;

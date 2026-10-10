@@ -1,6 +1,8 @@
 #pragma once
 
 #include "luth/core/types/LuthMath.h"
+#include "luth/renderer/features/RenderViewState.h"
+#include "luth/renderer/debug/CapturedReplayBindings.h"
 #include "luth/renderer/rendergraph/RenderGraphSnapshot.h"
 #include "luth/renderer/rendergraph/ArchivedImage.h"
 #include "luth/renderer/rendergraph/FrameEventTree.h"
@@ -74,12 +76,13 @@ namespace Luth::RG
         u32 groupCountZ = 0;
     };
 
-    // invariant: every Replay* entry calls HasViewResources(targets, viewResourcesId) before reading these;
+    // Replay validates stable identity and resource generation before reading these;
     // FrameTargets pointer alone isn't safe (panel close + re-allocation can hand back the same address with different content).
     struct CapturedViewState
     {
         FrameTargets* targets         = nullptr;
-        u64           viewResourcesId = 0;
+        RenderViewId  id;
+        u64           resourceGeneration = 0;
         u32           viewIndex       = 0;
         u32           width           = 0;
         u32           height          = 0;
@@ -155,6 +158,7 @@ namespace Luth::RG
         // against these, not live state; when capturedSource == Game and the live scene view runs after capture,
         // m_CurrentViewResources points at the scene view, not the captured one.
         CapturedViewState        capturedView;
+        CapturedReplayBindings   replayBindings;
         std::vector<u8>          capturedGlobalUboBytes;   // GlobalUniforms snapshot
         std::shared_ptr<Texture> capturedIrradiance;
         std::shared_ptr<Texture> capturedPrefiltered;
@@ -177,6 +181,7 @@ namespace Luth::RG
             for (auto& m : lightSpaceMatrix) m = Mat4(0.0f);
             capturedRenderFrameIndex = 0;
             capturedView        = {};
+            replayBindings      = {};
             capturedGlobalUboBytes.clear();
             capturedIrradiance.reset();
             capturedPrefiltered.reset();

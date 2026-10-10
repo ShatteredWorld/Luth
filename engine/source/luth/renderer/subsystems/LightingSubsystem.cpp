@@ -13,6 +13,7 @@
 #include "luth/renderer/shader/ShaderLibrary.h"
 #include "luth/renderer/draw/DrawCommand.h"
 #include "luth/renderer/backend/vulkan/VulkanContext.h"
+#include "luth/renderer/backend/vulkan/VulkanLightBindings.h"
 #include "luth/renderer/backend/vulkan/VulkanTexture.h"
 #include "luth/renderer/backend/vulkan/VulkanBuffer.h"
 #include "luth/core/FrameData.h"
@@ -191,11 +192,13 @@ namespace Luth
         LH_PROFILE_FUNCTION();
         VkDevice device = VulkanContext::Get().GetDevice();
 
+        m_ClusterVizStates.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_SkyboxPipeline.reset();
         m_SkyboxVB.reset();
         m_ShadowSkinnedPipeline.reset();
         m_ShadowPipeline.reset();
 
+        m_HybridSignalsEnabled = false;
         m_IrradianceMap.reset();
         m_PrefilteredMap.reset();
         m_BRDFLut.reset();
@@ -351,66 +354,66 @@ namespace Luth
         shadowImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         // Binding 4 (RT sun shadow mask): per-view. The mask image view comes from
-        // vr.sunShadowMask (allocated in RecreateViewTextures). pbr.frag reads it only when
+        // The RT domain's view-local mask. pbr.frag reads it only when
         // rtShadowParams.x > 0.5 (RT mode); CSM-mode pixels take the cascade-PCF branch and
         // don't dynamically access binding 4. Layout is SHADER_READ_ONLY_OPTIMAL; the RG
         // transitions the image to this from the RT pass's GENERAL via the consumer's Read.
         VkDescriptorImageInfo maskImgInfo{};
-        if (vr.sunShadowMask)
+        if (m_HybridSignalsEnabled && vr.rtShadow && vr.rtShadow->mask)
         {
-            auto vkMask = std::static_pointer_cast<VKTexture>(vr.sunShadowMask);
+            auto vkMask = std::static_pointer_cast<VKTexture>(vr.rtShadow->mask);
             maskImgInfo.sampler     = m_SunShadowMaskSampler;
             maskImgInfo.imageView   = vkMask->GetImageView();
             maskImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
 
         // Binding 5 (ReSTIR DI): per-view demodulated diffuse irradiance, post-denoise. Bound to
-        // vr.svgfDenoised (the denoiser output), not vr.restirDI: the denoiser owns this slot whenever
+        // vr.diDenoiser->svgfDenoised (the denoiser output), not vr.restirDI: the denoiser owns this slot whenever
         // ReSTIR is on (it passes the raw DI through when denoising is toggled off), so the bind is
         // static and the A/B is denoise-vs-raw with no descriptor swap. Reused mask sampler (linear
         // clamp-to-edge). pbr.frag reads it only when restirParams.x > 0.5; the denoise pass leaves the
         // image in GENERAL, the GeometryPass Read transitions it to SHADER_READ_ONLY_OPTIMAL.
         VkDescriptorImageInfo diImgInfo{};
-        if (vr.svgfDenoised)
+        if (m_HybridSignalsEnabled && vr.diDenoiser && vr.diDenoiser->svgfDenoised)
         {
-            auto vkDI = std::static_pointer_cast<VKTexture>(vr.svgfDenoised);
+            auto vkDI = std::static_pointer_cast<VKTexture>(vr.diDenoiser->svgfDenoised);
             diImgInfo.sampler     = m_SunShadowMaskSampler;
             diImgInfo.imageView   = vkDI->GetImageView();
             diImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
 
-        // Binding 6 (ReSTIR GI): post-denoise GI irradiance. Bound to vr.svgfGiDenoised (the GI
+        // Binding 6 (ReSTIR GI): post-denoise GI irradiance. Bound to vr.giDenoiser->svgfDenoised (the GI
         // denoiser owns this slot, mirroring b5/DI): the bind is static and the A/B is denoise-vs-raw
         // with no descriptor swap (the denoiser passes the raw GI through when disabled). Same reused
         // mask sampler. pbr.frag adds it only when restirParams.y > 0.5; the GeometryPass Read
         // transitions it from the denoiser's GENERAL to SHADER_READ_ONLY_OPTIMAL.
         VkDescriptorImageInfo giImgInfo{};
-        if (vr.svgfGiDenoised)
+        if (m_HybridSignalsEnabled && vr.giDenoiser && vr.giDenoiser->svgfDenoised)
         {
-            auto vkGI = std::static_pointer_cast<VKTexture>(vr.svgfGiDenoised);
+            auto vkGI = std::static_pointer_cast<VKTexture>(vr.giDenoiser->svgfDenoised);
             giImgInfo.sampler     = m_SunShadowMaskSampler;
             giImgInfo.imageView   = vkGI->GetImageView();
             giImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
 
-        // Binding 7 (RT reflections): post-denoise specular radiance. Bound to vr.svgfSpecDenoised
+        // Binding 7 (RT reflections): post-denoise specular radiance. Bound to vr.reflectionDenoiser->svgfDenoised
         // (the specular denoiser owns the slot, mirroring b5/b6). pbr.frag composites it into the split-sum
         // specular IBL when reflParams.x > 0.5; the GeometryPass Read transitions it to SHADER_READ_ONLY.
         VkDescriptorImageInfo reflImgInfo{};
-        if (vr.svgfSpecDenoised)
+        if (m_HybridSignalsEnabled && vr.reflectionDenoiser && vr.reflectionDenoiser->svgfDenoised)
         {
-            auto vkRefl = std::static_pointer_cast<VKTexture>(vr.svgfSpecDenoised);
+            auto vkRefl = std::static_pointer_cast<VKTexture>(vr.reflectionDenoiser->svgfDenoised);
             reflImgInfo.sampler     = m_SunShadowMaskSampler;
             reflImgInfo.imageView   = vkRefl->GetImageView();
             reflImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
 
-        // Binding 8: post-denoise ReSTIR-DI specular. Bound to vr.svgfDiSpecDenoised; pbr.frag
+        // Binding 8: post-denoise ReSTIR-DI specular. Bound to vr.diSpecDenoiser->svgfDenoised; pbr.frag
         // adds it under restirParams.z. GeometryPass's Read transitions it to SHADER_READ_ONLY.
         VkDescriptorImageInfo diSpecImgInfo{};
-        if (vr.svgfDiSpecDenoised)
+        if (m_HybridSignalsEnabled && vr.diSpecDenoiser && vr.diSpecDenoiser->svgfDenoised)
         {
-            auto vkDiSpec = std::static_pointer_cast<VKTexture>(vr.svgfDiSpecDenoised);
+            auto vkDiSpec = std::static_pointer_cast<VKTexture>(vr.diSpecDenoiser->svgfDenoised);
             diSpecImgInfo.sampler     = m_SunShadowMaskSampler;
             diSpecImgInfo.imageView   = vkDiSpec->GetImageView();
             diSpecImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -490,7 +493,7 @@ namespace Luth
     // Allocates LightSSBO from the tagged heap, copies the header + point / spot / emissive-triangle
     // arrays + the power-weighted alias table (emissive sections appended after spots[]).
     // Returns the region; the BuildGraph caller threads it through WriteSet3PerView, and
-    // m_LastLightSSBORegion is cached for AddLightAssignPass's b0 binding.
+    // Assignment receives this physical slice explicitly through native preparation.
     Memory::GPUSubRegion LightingSubsystem::UploadLightSSBO(const GatheredLights& lights)
     {
         LH_PROFILE_FUNCTION();
@@ -525,7 +528,7 @@ namespace Luth
         if (!lights.tris.empty())   std::memcpy(base + pointBytes + spotBytes, lights.tris.data(), triBytes);
         if (!lights.alias.empty())  std::memcpy(base + pointBytes + spotBytes + triBytes, lights.alias.data(), aliasBytes);
         heap.FlushRegion(region);
-        m_LastLightSSBORegion = region;
+
         return region;
     }
 
@@ -583,9 +586,8 @@ namespace Luth
             VkImageMemoryBarrier2 b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
             b.srcStageMask        = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT;
             b.srcAccessMask       = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
-            b.dstStageMask        = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
-                                  | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                                  | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+            b.dstStageMask        = VulkanBarrierCapabilities::ForEnabledRtPackage(
+                VulkanContext::Get().SupportsRayTracing()).SampledImageReadStages();
             b.dstAccessMask       = VK_ACCESS_2_SHADER_READ_BIT;
             b.oldLayout           = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
             b.newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -623,83 +625,22 @@ namespace Luth
         maskSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         maskSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         maskSamplerInfo.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-        vkCreateSampler(device, &maskSamplerInfo, nullptr, &m_SunShadowMaskSampler);
+        if (VulkanContext::Get().SupportsRayTracing())
+            vkCreateSampler(device, &maskSamplerInfo, nullptr, &m_SunShadowMaskSampler);
 
-        // Set 3 layout: b0 = LightSSBO (header + flexible PointLightData[]), b1 = ClusterGridSSBO,
-        // b2 = LightIndexSSBO, b3 = cascade shadow sampler (sampler2DArrayShadow, PCF), b4 = RT
-        // sun shadow mask (sampler2D R8, populated when ShadowingMode::RtShadows is active), b5 =
-        // ReSTIR DI demodulated irradiance (sampler2D RGBA16F, sampled when restirParams.x > 0.5),
-        // b6 = ReSTIR GI demodulated indirect diffuse (sampler2D RGBA16F, added when restirParams.y > 0.5).
-        VkDescriptorSetLayoutBinding bindings[9] = {};
-        bindings[0].binding = 0;
-        bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[0].descriptorCount = 1;
-        // COMPUTE added so the ReSTIR DI passes (restir_initial/shade.comp) + rt_sun_shadows.comp can
-        // read dirLight.direction / points[] / pointLightCount when this layout binds as their Set 1.
-        // Cluster grid + light index (b1, b2) intentionally stay fragment-only; neither ReSTIR nor the
-        // shadow pass iterates clusters.
-        bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
-        bindings[1].binding = 1;
-        bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[1].descriptorCount = 1;
-        bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[2].binding = 2;
-        bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[2].descriptorCount = 1;
-        bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[3].binding = 3;
-        bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[3].descriptorCount = 1;
-        bindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[4].binding = 4;
-        bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[4].descriptorCount = 1;
-        bindings[4].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT
-                               | VK_SHADER_STAGE_RAYGEN_BIT_KHR;  // raygen may also read for ReSTIR DI
-        bindings[5].binding = 5;
-        bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[5].descriptorCount = 1;
-        bindings[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;  // ReSTIR DI image; pbr.frag only
-        bindings[6].binding = 6;
-        bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[6].descriptorCount = 1;
-        bindings[6].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;  // ReSTIR GI image; pbr.frag only
-        bindings[7].binding = 7;
-        bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[7].descriptorCount = 1;
-        bindings[7].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;  // RT reflections image; pbr.frag only
-        bindings[8].binding = 8;
-        bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[8].descriptorCount = 1;
-        bindings[8].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;  // ReSTIR DI specular; pbr.frag only
-
-        // b0/b1/b2 are SSBOs rebound per-frame and are bound by BOTH graphics passes (PBR fragment)
-        // AND the AsyncCompute RT raygen (set=1 in the RT pipeline-layout). The cycled-slot protocol
-        // alone is no longer sufficient: the second pending reference from the compute submission
-        // means vkUpdateDescriptorSets sees the set as in-use even when writing the "next" slot.
-        // UAB on the rewritten bindings satisfies VUID-vkUpdateDescriptorSets-None-03047 cleanly.
-        // b3-b8 (samplers) stay flag-less; they're per-view stable, not rewritten per frame.
-        VkDescriptorBindingFlags bindingFlags[9] = {
-            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,  // b0 LightSSBO
-            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,  // b1 ClusterGrid
-            VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,  // b2 LightIndex
-            0,                                            // b3 cascade sampler
-            0,                                            // b4 sun shadow mask sampler
-            0,                                            // b5 ReSTIR DI sampler
-            0,                                            // b6 ReSTIR GI sampler
-            0,                                            // b7 RT reflections sampler
-            0,                                            // b8 ReSTIR DI specular sampler
-        };
+        const bool rt = VulkanContext::Get().SupportsRayTracing();
+        const VulkanLightBindings layout({rt, rt});
+        m_HybridSignalsEnabled = layout.HasHybridSignals();
         VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsCI{
             VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO };
-        bindingFlagsCI.bindingCount  = 9;
-        bindingFlagsCI.pBindingFlags = bindingFlags;
+        bindingFlagsCI.bindingCount  = layout.count;
+        bindingFlagsCI.pBindingFlags = layout.flags.data();
 
         VkDescriptorSetLayoutCreateInfo lightLayoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
         lightLayoutInfo.pNext        = &bindingFlagsCI;
         lightLayoutInfo.flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-        lightLayoutInfo.bindingCount = 9;
-        lightLayoutInfo.pBindings    = bindings;
+        lightLayoutInfo.bindingCount = layout.count;
+        lightLayoutInfo.pBindings    = layout.bindings.data();
         vkCreateDescriptorSetLayout(device, &lightLayoutInfo, nullptr, &m_LightSetLayout);
 
         // Descriptor sets themselves move to ViewResources (per-view x MAX_FRAMES_IN_FLIGHT slots).
@@ -788,593 +729,322 @@ namespace Luth
     }
 
     // ---- Render-graph passes ----
-    RG::ResourceHandle LightingSubsystem::AddShadowPass(
-        RG::RenderGraph& rg, RG::BufferHandle indirectBufferHandle, u32 cascadeIndex)
+    CsmBindings LightingSubsystem::PrepareCsmBindings(const std::array<VkDescriptorSet, 6>& sets, bool captureDraws) const
+    {
+        CsmBindings result;
+        result.rigid = m_ShadowPipeline ? m_ShadowPipeline->GetHandle() : VK_NULL_HANDLE;
+        result.deformed = m_ShadowSkinnedPipeline ? m_ShadowSkinnedPipeline->GetHandle() : VK_NULL_HANDLE;
+        result.rigidLayout = m_ShadowPipeline ? m_ShadowPipeline->GetLayout() : VK_NULL_HANDLE;
+        result.deformedLayout = m_ShadowSkinnedPipeline ? m_ShadowSkinnedPipeline->GetLayout() : VK_NULL_HANDLE;
+        result.sets = sets;
+        result.texture = m_ShadowMap.get();
+        result.image = m_ShadowMap ? static_cast<const VKTexture&>(*m_ShadowMap).GetImage() : VK_NULL_HANDLE;
+        std::copy(std::begin(m_ShadowLayerViews), std::end(m_ShadowLayerViews), result.layers.begin());
+        result.captureDraws = captureDraws;
+        return result;
+    }
+
+    GraphTextureRef LightingSubsystem::ImportShadowTarget(RG::RenderGraph& graph, const CsmBindings& bindings, u32 cascadeIndex)
+    {
+        RG::TextureDesc desc;
+        desc.name = "ShadowMap.C" + std::to_string(cascadeIndex);
+        desc.width = desc.height = k_ShadowResolution;
+        desc.format = RG::TextureFormat::D32_Float;
+        return {graph.ImportResource(desc, (void*)bindings.image, (void*)bindings.layers[cascadeIndex],
+            RG::ResourceState::Undefined, cascadeIndex, 1), {bindings.texture, 0, 1, cascadeIndex, 1}};
+    }
+    RG::ResourceHandle LightingSubsystem::AddShadowPass(RG::RenderGraph& rg, RG::ResourceHandle targetDepth,
+        const VisibleDrawRange& visible, const CsmBindings& bindings, u32 cascadeIndex,
+        const DrawList& draws, const RenderSnapshot& snapshot, FrameDebugger* debugger)
     {
         LH_PROFILE_FUNCTION();
-        struct ShadowPassData {
-            RG::ResourceHandle shadowTex;
-            RG::BufferHandle   indirectBuf;
-            u32                cascadeIndex;
+        struct DrawPacket
+        {
+            std::shared_ptr<Mesh> mesh; // Retain native buffers through recording.
+            VkBuffer vertex, index;
+            VkDeviceSize indirectOffset;
+            u32 entityIndex, indexCount, objectIndex;
+            bool deformed, skinned;
+            std::string meshName, entityName;
         };
-
-        RG::ResourceHandle shadowHandle;
-        const std::string passName = "ShadowPass.C" + std::to_string(cascadeIndex);
-        const std::string resName  = "ShadowMap.C" + std::to_string(cascadeIndex);
-
-        rg.AddPass<ShadowPassData>(passName,
-            [&](ShadowPassData& data, RG::RenderPassBuilder& builder)
+        std::vector<DrawPacket> packets;
+        const bool capturing = debugger && bindings.captureDraws;
+        if (bindings.rigid)
+        {
+            if (!bindings.rigidLayout || std::any_of(bindings.sets.begin(), bindings.sets.end(),
+                [](VkDescriptorSet set) { return set == VK_NULL_HANDLE; }))
+                throw std::invalid_argument("ShadowPass: incomplete native bindings");
+            const auto prepareBucket = [&](const auto& bucket) { for (const auto& dc : bucket)
             {
-                data.cascadeIndex = cascadeIndex;
-
-                auto vkShadowTex = std::static_pointer_cast<VKTexture>(m_ShadowMap);
-
-                RG::TextureDesc desc;
-                desc.name   = resName;
-                desc.width  = k_ShadowResolution;
-                desc.height = k_ShadowResolution;
-                desc.format = RG::TextureFormat::D32_Float;
-
-                // Per-layer view targets cascade `i` only. Barriers carry baseArrayLayer=cascadeIndex, layerCount=1.
-                data.shadowTex = rg.ImportResource(desc,
-                    (void*)vkShadowTex->GetImage(),
-                    (void*)m_ShadowLayerViews[cascadeIndex],
-                    RG::ResourceState::Undefined,
-                    /*baseArrayLayer*/ cascadeIndex,
-                    /*layerCount*/     1);
-
-                VkClearValue depthClear{};
-                depthClear.depthStencil = { 1.0f, 0 };
-                data.shadowTex = builder.WriteDepth(data.shadowTex,
-                    VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, depthClear);
-
-                data.indirectBuf = builder.ReadIndirectBuffer(indirectBufferHandle);
-
-                shadowHandle = data.shadowTex;
-            },
-            [this, passName, resName](ShadowPassData& data, RG::RenderPassContext& ctx)
-            {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                auto& sys = m_Pipeline->GetSystem();
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, passName, resName, true,
-                    { "shadowDepth", 0, VK_CULL_MODE_FRONT_BIT, VK_POLYGON_MODE_FILL, false, true, true, false });
-
-                if (!m_ShadowPipeline) { LH_LOG(Renderer, error, "Shadow pipeline is null!"); sys.GetFrameDebugger().EndCapturePass(); return; }
-
-                // Bind all 6 descriptor sets (Set 5 = GPUObjectData SSBO, owned by Geometry).
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                VkDescriptorSet bindlessSet = VulkanContext::Get().GetBindlessSet().GetSet();
-                VkDescriptorSet sets[] = {
-                    m_Pipeline->GetCurrentViewResources()->globalDescriptorSet[slot],
-                    bindlessSet,
-                    MaterialSystem::GetDescriptorSet(slot),
-                    m_Pipeline->GetCurrentViewResources()->lightDescSet[slot],
-                    BoneMatrixBuffer::GetDescriptorSet(slot),
-                    m_Pipeline->GetGeometry().GetObjectSSBODescSet(slot)
-                };
-
-                m_ShadowPipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_ShadowPipeline->GetLayout(), 0, 6, sets, 0, nullptr);
-
-                const u32 cascadeIdxVal = data.cascadeIndex;
-                vkCmdPushConstants(cmd, m_ShadowPipeline->GetLayout(),
-                    VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(u32), &cascadeIdxVal);
-
-                VkViewport viewport{};
-                viewport.width    = (float)k_ShadowResolution;
-                viewport.height   = (float)k_ShadowResolution;
-                viewport.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-                VkRect2D scissor{};
-                scissor.extent = { k_ShadowResolution, k_ShadowResolution };
-                vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-                bool currentSkinned = false;
-
-                auto DrawBatch = [&](const std::vector<DrawCommand>& draws)
+                if (!dc.model) continue;
+                auto mesh = dc.model->GetMesh(dc.meshIndex);
+                if (!mesh) continue;
+                auto vb = std::static_pointer_cast<VKVertexBuffer>(mesh->GetVertexBuffer());
+                auto ib = std::static_pointer_cast<VKIndexBuffer>(mesh->GetIndexBuffer());
+                if (!vb || !ib || (dc.isDeformed && !bindings.deformed)) continue;
+                if (dc.isDeformed && !bindings.deformedLayout)
+                    throw std::invalid_argument("ShadowPass: missing deformed pipeline layout");
+                if (dc.gpuObjectIndex >= visible.maxDrawCount)
+                    throw std::invalid_argument("ShadowPass: draw outside cascade-visible range");
+                const VkDeviceSize offset = visible.indirect.binding.offset
+                    + (u64(visible.firstDraw) + dc.gpuObjectIndex) * sizeof(VkDrawIndexedIndirectCommand);
+                std::string meshName, entityName;
+                if (capturing)
                 {
-                    for (const auto& dc : draws)
+                    meshName = dc.model->GetName() + "[" + std::to_string(dc.meshIndex) + "]";
+                    entityName = "Entity";
+                    const auto entity = entt::to_entity(dc.entity);
+                    if (entity < snapshot.tagsByEntity.size() && snapshot.tagsByEntity[entity])
+                        entityName = snapshot.tagsByEntity[entity];
+                }
+                packets.push_back({mesh, vb->GetVulkanBuffer(), ib->GetVulkanBuffer(), offset,
+                    dc.entityIndex, ib->GetCount(), dc.gpuObjectIndex, dc.isDeformed, dc.isSkinned,
+                    std::move(meshName), std::move(entityName)});
+            } };
+            prepareBucket(draws.opaque);
+            prepareBucket(draws.cutout);
+        }
+        const VkBuffer indirectBuffer = visible.indirect.binding.slice->buffer;
+        struct ShadowPassData { RG::ResourceHandle depthTex; RG::BufferHandle indirectBuf; };
+        const std::string passName = "ShadowPass.C" + std::to_string(cascadeIndex);
+        const std::string resName = "ShadowMap.C" + std::to_string(cascadeIndex);
+        RG::ResourceHandle output;
+        auto metadata = RG::RenderPassMetadata::Graphics("shadowDepth", true, true, false, VK_CULL_MODE_FRONT_BIT, 0);
+        metadata.indirectDraws = true; metadata.AddDraws(packets);
+        rg.AddPass<ShadowPassData>(passName,
+            [&, targetDepth](ShadowPassData& data, RG::RenderPassBuilder& builder) {
+                builder.SetDebugMetadata(metadata);
+                VkClearValue clear{};
+                clear.depthStencil = {1.0f, 0};
+                data.depthTex = builder.WriteDepth(targetDepth,
+                    VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE, clear);
+                data.indirectBuf = builder.ReadIndirectBuffer(visible.indirect.handle);
+                output = data.depthTex;
+            },
+            [bindings, packets = std::move(packets), indirectBuffer, cascadeIndex, passName, resName, debugger, capturing]
+            (ShadowPassData&, RG::RenderPassContext& ctx) {
+                const auto cmd = ctx.commandBuffer;
+                if (debugger) debugger->BeginCapturePass(ctx.passIndex, passName, resName, true,
+                    {"shadowDepth", 0, VK_CULL_MODE_FRONT_BIT, VK_POLYGON_MODE_FILL, false, true, true, false});
+                if (bindings.rigid)
+                {
+                    const auto bind = [&](bool deformed) {
+                        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            deformed ? bindings.deformed : bindings.rigid);
+                        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            deformed ? bindings.deformedLayout : bindings.rigidLayout,
+                            0, 6, bindings.sets.data(), 0, nullptr);
+                        vkCmdPushConstants(cmd, deformed ? bindings.deformedLayout : bindings.rigidLayout,
+                            VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(u32), &cascadeIndex);
+                    };
+                    bind(false);
+                    VkViewport viewport{};
+                    viewport.width = float(k_ShadowResolution); viewport.height = float(k_ShadowResolution); viewport.maxDepth = 1.0f;
+                    vkCmdSetViewport(cmd, 0, 1, &viewport);
+                    const VkRect2D scissor{{0, 0}, {k_ShadowResolution, k_ShadowResolution}};
+                    vkCmdSetScissor(cmd, 0, 1, &scissor);
+                    bool currentDeformed = false;
+                    // Preserve opaque/cutout ordering and exclude transparent casters.
+                    for (const auto& packet : packets)
                     {
-                        auto mesh = dc.model->GetMesh(dc.meshIndex);
-                        auto vb = std::static_pointer_cast<VKVertexBuffer>(mesh->GetVertexBuffer());
-                        auto ib = std::static_pointer_cast<VKIndexBuffer>(mesh->GetIndexBuffer());
-                        if (!vb || !ib) continue;
-                        // Deformed draws need the empty-input pipeline; skip if absent (static binds no VB).
-                        if (dc.isDeformed && !m_ShadowSkinnedPipeline) continue;
-
-                        if (dc.isDeformed != currentSkinned)
+                        if (packet.deformed != currentDeformed)
                         {
-                            currentSkinned = dc.isDeformed;
-                            if (currentSkinned && m_ShadowSkinnedPipeline)
-                            {
-                                m_ShadowSkinnedPipeline->Bind(cmd);
-                                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    m_ShadowSkinnedPipeline->GetLayout(), 0, 6, sets, 0, nullptr);
-                                vkCmdPushConstants(cmd, m_ShadowSkinnedPipeline->GetLayout(),
-                                    VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(u32), &cascadeIdxVal);
-                            }
-                            else
-                            {
-                                m_ShadowPipeline->Bind(cmd);
-                                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    m_ShadowPipeline->GetLayout(), 0, 6, sets, 0, nullptr);
-                                vkCmdPushConstants(cmd, m_ShadowPipeline->GetLayout(),
-                                    VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(u32), &cascadeIdxVal);
-                            }
+                            currentDeformed = packet.deformed;
+                            bind(currentDeformed);
                         }
-
-                        // Deformable draws bind no VB; the VS fetches the deformed buffer by gl_VertexIndex.
-                        if (!dc.isDeformed)
+                        if (!packet.deformed)
                         {
-                            VkBuffer vbuf[] = { vb->GetVulkanBuffer() };
-                            VkDeviceSize offsets[] = { 0 };
-                            vkCmdBindVertexBuffers(cmd, 0, 1, vbuf, offsets);
+                            const VkDeviceSize offset = 0;
+                            vkCmdBindVertexBuffers(cmd, 0, 1, &packet.vertex, &offset);
                         }
-                        vkCmdBindIndexBuffer(cmd, ib->GetVulkanBuffer(), 0, VK_INDEX_TYPE_UINT32);
-
-                        // Per-view region layout: [camera | C0 | C1 | C2 | C3]. View N starts at
-                        // region (N * k_IndirectRegionsPerView); cascade i lives at offset (i+1).
-                        const u32 viewBaseRegion = m_Pipeline->GetCurrentView()->viewIndex * RenderPipeline::k_IndirectRegionsPerView;
-                        const u32 cmdIndex = (viewBaseRegion + data.cascadeIndex + 1) * RenderPipeline::k_IndirectRegionStride + dc.gpuObjectIndex;
-                        const auto& indirectRegion = m_Pipeline->GetGeometry().GetIndirectRegion();
-                        VkDeviceSize indirectOffset = indirectRegion.offset + cmdIndex * sizeof(VkDrawIndexedIndirectCommand);
-                        vkCmdDrawIndexedIndirect(cmd, indirectRegion.buffer, indirectOffset, 1,
+                        vkCmdBindIndexBuffer(cmd, packet.index, 0, VK_INDEX_TYPE_UINT32);
+                        vkCmdDrawIndexedIndirect(cmd, indirectBuffer, packet.indirectOffset, 1,
                             sizeof(VkDrawIndexedIndirectCommand));
-
-                        if (sys.GetFrameDebugger().state == DebuggerState::CaptureRequested)
-                        {
-                            std::string entName = "Entity";
-                            const auto& tags = sys.GetActiveSnapshot().tagsByEntity;
-                            u32 idx = entt::to_entity(dc.entity);
-                            if (idx < tags.size() && tags[idx])
-                                entName = tags[idx];
-                            sys.GetFrameDebugger().CaptureIndirectDraw(passName,
-                                dc.model->GetName() + "[" + std::to_string(dc.meshIndex) + "]",
-                                entName, dc.entityIndex, ib->GetCount(), dc.gpuObjectIndex, indirectOffset,
-                                { "shadowDepth", 0, static_cast<u32>(VK_CULL_MODE_FRONT_BIT),
-                                  VK_POLYGON_MODE_FILL, dc.isSkinned, true, true, false });
-                        }
+                        if (capturing)
+                            debugger->CaptureIndirectDraw(passName, packet.meshName, packet.entityName,
+                                packet.entityIndex, packet.indexCount, packet.objectIndex, packet.indirectOffset,
+                                {"shadowDepth", 0, static_cast<u32>(VK_CULL_MODE_FRONT_BIT),
+                                    VK_POLYGON_MODE_FILL, packet.skinned, true, true, false});
                     }
-                };
-
-                // Transparent casts no shadows; matches its TLAS exclusion (RT-excluded tier).
-                DrawBatch(sys.GetDrawList().opaque);
-                DrawBatch(sys.GetDrawList().cutout);
-
-                sys.GetFrameDebugger().EndCapturePass();
-            }
-        );
-
-        return shadowHandle;
+                }
+                else LH_LOG(Renderer, error, "ShadowPass pipeline is null!");
+                if (debugger) debugger->EndCapturePass();
+            });
+        return output;
+    }
+    SkyBindings LightingSubsystem::PrepareSkyBindings(const std::array<VkDescriptorSet, 5>& sets) const
+    {
+        return {m_SkyboxPipeline ? m_SkyboxPipeline->GetHandle() : VK_NULL_HANDLE,
+            m_SkyboxPipeline ? m_SkyboxPipeline->GetLayout() : VK_NULL_HANDLE,
+            m_SkyboxVB ? m_SkyboxVB->GetVulkanBuffer() : VK_NULL_HANDLE, m_SkyboxVB, sets};
     }
 
-    RG::ResourceHandle LightingSubsystem::AddSkyboxPass(
-        RG::RenderGraph& rg, RG::ResourceHandle sceneColor, RG::ResourceHandle sceneDepth)
+    RG::ResourceHandle LightingSubsystem::AddSkyboxPass(RG::RenderGraph& graph,
+        RG::ResourceHandle sceneColor, RG::ResourceHandle sceneDepth, u32 width, u32 height,
+        const SkyBindings& bindings, FrameDebugger* debugger)
     {
         LH_PROFILE_FUNCTION();
-        struct SkyboxPassData {
-            RG::ResourceHandle colorTex;
-            RG::ResourceHandle depthTex;
-        };
-
-        RG::ResourceHandle outputHandle;
-
-        rg.AddPass<SkyboxPassData>("SkyboxPass",
-            [&](SkyboxPassData& data, RG::RenderPassBuilder& builder)
-            {
-                data.colorTex = builder.Write(sceneColor,
-                    VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
-                data.depthTex = builder.WriteDepth(sceneDepth,
-                    VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_DONT_CARE);
-
-                outputHandle = data.colorTex;
+        struct Data { RG::ResourceHandle color, depth; };
+        RG::ResourceHandle output;
+        graph.AddPass<Data>("SkyboxPass",
+            [&](Data& data, RG::RenderPassBuilder& builder) {
+                builder.SetDebugMetadata(RG::RenderPassMetadata::Graphics("skybox", true, false, false, VK_CULL_MODE_BACK_BIT, bindings.pipeline && bindings.vertex ? 1 : 0));
+                data.color = builder.Write(sceneColor, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);
+                // Preserve the existing attachment policy. Sky shader depth writes are disabled.
+                data.depth = builder.WriteDepth(sceneDepth, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_DONT_CARE);
+                output = data.color;
             },
-            [this](SkyboxPassData& data, RG::RenderPassContext& ctx)
-            {
-                auto& sys = m_Pipeline->GetSystem();
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "SkyboxPass", "SceneColor", false,
-                    { "skybox", 0, VK_CULL_MODE_BACK_BIT, VK_POLYGON_MODE_FILL, false, true, false, false });
-
-                if (!m_SkyboxPipeline || !m_SkyboxVB) { sys.GetFrameDebugger().EndCapturePass(); return; }
-
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                m_SkyboxPipeline->Bind(cmd);
-
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                VkDescriptorSet bindlessSet = VulkanContext::Get().GetBindlessSet().GetSet();
-                VkDescriptorSet sets[] = {
-                    m_Pipeline->GetCurrentViewResources()->globalDescriptorSet[slot],
-                    bindlessSet,
-                    MaterialSystem::GetDescriptorSet(slot),
-                    m_Pipeline->GetCurrentViewResources()->lightDescSet[slot],
-                    BoneMatrixBuffer::GetDescriptorSet(slot)
-                };
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_SkyboxPipeline->GetLayout(), 0, 5, sets, 0, nullptr);
-
-                RG::RenderGraph::ResourceNode* res = (RG::RenderGraph::ResourceNode*)ctx.GetResource(data.colorTex);
-                VkViewport viewport{};
-                viewport.width  = (float)res->desc.width;
-                viewport.height = (float)res->desc.height;
-                viewport.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-                VkRect2D scissor{};
-                scissor.extent = { res->desc.width, res->desc.height };
-                vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-                VkBuffer vb = m_SkyboxVB->GetVulkanBuffer();
-                VkDeviceSize offset = 0;
-                vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &offset);
-                vkCmdDraw(cmd, 36, 1, 0, 0);
-
-                ObjectPushConstants dummyPC{};
-                sys.GetFrameDebugger().CaptureDrawCall("SkyboxPass", "SkyboxCube", "Skybox", 0, 0, dummyPC,
-                    { "skybox", 0, VK_CULL_MODE_BACK_BIT, VK_POLYGON_MODE_FILL, false, true, false, false });
-                sys.GetFrameDebugger().EndCapturePass();
-            }
-        );
-        return outputHandle;
+            [bindings, width, height, debugger](Data&, RG::RenderPassContext& ctx) {
+                if (debugger) debugger->BeginCapturePass(ctx.passIndex, "SkyboxPass", "SceneColor", false,
+                    {"skybox", 0, VK_CULL_MODE_BACK_BIT, VK_POLYGON_MODE_FILL, false, true, false, false});
+                if (bindings.pipeline && bindings.vertex)
+                {
+                    const auto cmd = ctx.commandBuffer;
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bindings.pipeline);
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        bindings.layout, 0, 5, bindings.sets.data(), 0, nullptr);
+                    VkViewport viewport{};
+                    viewport.width = float(width); viewport.height = float(height); viewport.maxDepth = 1.0f;
+                    vkCmdSetViewport(cmd, 0, 1, &viewport);
+                    const VkRect2D scissor{{0, 0}, {width, height}};
+                    vkCmdSetScissor(cmd, 0, 1, &scissor);
+                    const VkDeviceSize offset = 0;
+                    vkCmdBindVertexBuffers(cmd, 0, 1, &bindings.vertex, &offset);
+                    vkCmdDraw(cmd, 36, 1, 0, 0);
+                    if (debugger)
+                    {
+                        ObjectPushConstants dummy{};
+                        debugger->CaptureDrawCall("SkyboxPass", "SkyboxCube", "Skybox", 0, 0, dummy,
+                            {"skybox", 0, VK_CULL_MODE_BACK_BIT, VK_POLYGON_MODE_FILL, false, true, false, false});
+                    }
+                }
+                if (debugger) debugger->EndCapturePass();
+            });
+        return output;
     }
-
     // Forward+ cluster build. Async-compute; per-view tagged-heap regions for AABB + grid.
     // Returns BufferHandles so downstream LightAssignPass / GeometryPass read the same VkBuffer
     // without re-importing (see arch/rendering-pipeline.md re-import hazard).
-    LightingSubsystem::ClusterBuildOutputs LightingSubsystem::AddClusterBuildPass(RG::RenderGraph& rg)
+    GraphBufferRef LightingSubsystem::ImportLightingBuffer(RG::RenderGraph& graph, const char* name,
+        const Memory::GPUSubRegion& slice)
     {
-        LH_PROFILE_FUNCTION();
-        ClusterBuildOutputs out{};
-        if (!m_ClusterBuildPipeline) return out;
-
-        auto* jobCtx = JobSystem::GetCurrentJobContext();
-        if (!jobCtx) return out;
-        const u32 frameAbs = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
-        const u32 slot     = frameAbs % MAX_FRAMES_IN_FLIGHT;
-        jobCtx->GpuCache.CurrentTag = frameAbs;
-
-        ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-        if (!vr || vr->clusterBuildDescSet[slot] == VK_NULL_HANDLE) return out;
-
-        auto& heap = Memory::GPUTaggedPageAllocator::Get();
-        // ClusterAABB std430: vec4 min + vec4 max = 32 B per cluster.
-        const u64 aabbSize = static_cast<u64>(k_ClusterCount) * 32;
-        const u64 gridSize = static_cast<u64>(k_ClusterCount) * sizeof(GPUCluster);
-        Memory::GPUSubRegion aabbR = heap.Allocate(jobCtx->GpuCache, aabbSize, 16);
-        Memory::GPUSubRegion gridR = heap.Allocate(jobCtx->GpuCache, gridSize, 16);
-        if (!aabbR.buffer || !gridR.buffer) return out;
-
-        VkDescriptorBufferInfo aabbBi{ aabbR.buffer, aabbR.offset, aabbR.size };
-        VkDescriptorBufferInfo gridBi{ gridR.buffer, gridR.offset, gridR.size };
-        VkWriteDescriptorSet writes[2] = {};
-        writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[0].dstSet          = vr->clusterBuildDescSet[slot];
-        writes[0].dstBinding      = 0;
-        writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[0].descriptorCount = 1;
-        writes[0].pBufferInfo     = &aabbBi;
-        writes[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[1].dstSet          = vr->clusterBuildDescSet[slot];
-        writes[1].dstBinding      = 1;
-        writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[1].descriptorCount = 1;
-        writes[1].pBufferInfo     = &gridBi;
-        vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 2, writes, 0, nullptr);
-
-        RG::BufferDesc aabbDesc{ "ClusterAABB", aabbSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT };
-        RG::BufferDesc gridDesc{ "ClusterGrid", gridSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT };
-        out.aabb       = rg.ImportBuffer(aabbDesc, (void*)aabbR.buffer, RG::ResourceState::Undefined);
-        out.grid       = rg.ImportBuffer(gridDesc, (void*)gridR.buffer, RG::ResourceState::Undefined);
-        out.aabbRegion = aabbR;
-        out.gridRegion = gridR;
-
-        struct ClusterBuildData {
-            RG::BufferHandle aabb;
-            RG::BufferHandle grid;
-        };
-
-        // Capture per-frame values at graph-build time so the execute lambda body stays terse.
-        auto* pipeline = m_ClusterBuildPipeline.get();
-        FrameDebugger* debugger = &m_Pipeline->GetSystem().GetFrameDebugger();
-
-        rg.AddComputePass<ClusterBuildData>("ClusterBuild", RG::QueueFamily::AsyncCompute,
-            [&](ClusterBuildData& d, RG::RenderPassBuilder& builder)
-            {
-                d.aabb = builder.WriteBuffer(out.aabb);
-                d.grid = builder.WriteBuffer(out.grid);
-            },
-            [this, pipeline, debugger](ClusterBuildData&, RG::RenderPassContext& ctx)
-            {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                if (debugger)
-                    debugger->BeginCapturePass(ctx.passIndex, "ClusterBuild", "", false,
-                        { "cluster_build", 0, 0, VK_POLYGON_MODE_FILL, false, false, false, false });
-
-                const u32 slotLocal = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex())
-                                      % MAX_FRAMES_IN_FLIGHT;
-                ViewResources* vrLocal = m_Pipeline->GetCurrentViewResources();
-                if (!vrLocal || vrLocal->clusterBuildDescSet[slotLocal] == VK_NULL_HANDLE)
-                {
-                    if (debugger) debugger->EndCapturePass();
-                    return;
-                }
-
-                pipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    pipeline->GetLayout(), 0, 1, &vrLocal->clusterBuildDescSet[slotLocal], 0, nullptr);
-
-                const auto* view = m_Pipeline->GetCurrentView();
-                Mat4 proj = view->camera.projection;
-                proj[1][1] *= -1.0f;  // match the Y-flip GlobalSubsystem applies before upload
-                Mat4 invProj = Math::Inverse(proj);
-
-                struct ClusterBuildPC {
-                    Mat4  invProjection;
-                    Vec2  viewportSize;
-                    Vec2  _pad;
-                    float nearZ;
-                    float farZ;
-                    u32   tilesX;
-                    u32   tilesY;
-                } pc{};
-                pc.invProjection = invProj;
-                pc.viewportSize  = Vec2(static_cast<float>(vrLocal->width),
-                                        static_cast<float>(vrLocal->height));
-                pc.nearZ  = view->camera.nearZ;
-                pc.farZ   = view->camera.farZ;
-                pc.tilesX = k_ClusterTilesX;
-                pc.tilesY = k_ClusterTilesY;
-                vkCmdPushConstants(cmd, pipeline->GetLayout(),
-                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ClusterBuildPC), &pc);
-
-                // 4x4x4 local; group dims = ceil(tile/slice counts / 4); bounds-clamp in shader.
-                const u32 groupX = (k_ClusterTilesX  + 3) / 4;
-                const u32 groupY = (k_ClusterTilesY  + 3) / 4;
-                const u32 groupZ = (k_ClusterSlicesZ + 3) / 4;
-                vkCmdDispatch(cmd, groupX, groupY, groupZ);
-
-                if (debugger)
-                {
-                    debugger->CaptureComputeDispatch("ClusterBuild", "cluster_build", groupX, groupY, groupZ);
-                    debugger->EndCapturePass();
-                }
-            });
-
-        return out;
+        return {graph.ImportBuffer({name, slice.size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT},
+            (void*)slice.buffer, RG::ResourceState::Undefined), {&slice, slice.offset, slice.size}};
     }
 
-    // Forward+ light-to-cluster assignment. Reads LightSSBO (cached from UploadLightingResources)
-    // + Cluster AABB; atomicAdd packs per-cluster light indices into LightIndex and writes
-    // (offset, count) to Cluster Grid. Returns the LightIndex handle + SubRegion so the caller
-    // can bind b2 of Set 3 in UploadLightingResources.
-    LightingSubsystem::LightAssignOutputs LightingSubsystem::AddLightAssignPass(RG::RenderGraph& rg,
-                                                                                ClusterBuildOutputs cb)
+    ClusterBindings LightingSubsystem::PrepareClusterBindings(u64 renderFrameIndex, VkDescriptorSet buildSet,
+        VkDescriptorSet assignSet, const CameraParams& camera, u32 width, u32 height,
+        const Memory::GPUSubRegion& lights, u32 pointCount, u32 spotCount) const
     {
-        LH_PROFILE_FUNCTION();
-        LightAssignOutputs out{};
-        if (!m_LightAssignPipeline || !m_LastLightSSBORegion.buffer) return out;
-
+        ClusterBindings out;
+        out.buildSet = buildSet; out.assignSet = assignSet; out.lights = lights;
+        Mat4 projection = camera.projection;
+        projection[1][1] *= -1.0f; // Match GlobalSubsystem's Vulkan Y flip.
+        out.buildConstants.invProjection = Math::Inverse(projection);
+        out.buildConstants.viewportSize = Vec2(float(width), float(height));
+        out.buildConstants.nearZ = camera.nearZ; out.buildConstants.farZ = camera.farZ;
+        out.assignConstants.view = camera.view;
+        out.assignConstants.pointLightCount = pointCount;
+        out.assignConstants.spotLightCount = spotCount;
+        if (!m_ClusterBuildPipeline || !m_LightAssignPipeline || !buildSet || !assignSet || !lights.buffer)
+            return out;
         auto* jobCtx = JobSystem::GetCurrentJobContext();
         if (!jobCtx) return out;
-        const u32 frameAbs = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
-        const u32 slot     = frameAbs % MAX_FRAMES_IN_FLIGHT;
-        jobCtx->GpuCache.CurrentTag = frameAbs;
-
-        ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-        if (!vr || vr->lightAssignDescSet[slot] == VK_NULL_HANDLE) return out;
-
+        jobCtx->GpuCache.CurrentTag = static_cast<u32>(renderFrameIndex);
         auto& heap = Memory::GPUTaggedPageAllocator::Get();
-        const u64 indexSize   = static_cast<u64>(k_ClusterCount) * k_MaxLightsPerCluster * sizeof(u32);
-        Memory::GPUSubRegion indexR   = heap.Allocate(jobCtx->GpuCache, indexSize, 16);
-        Memory::GPUSubRegion counterR = heap.Allocate(jobCtx->GpuCache, 16, 16);
-        if (!indexR.buffer || !counterR.buffer) return out;
-        // Counter zero-init host-side: tagged-heap pages are HOST_VISIBLE | MAPPED, so no barrier
-        // needed before the compute pass on the async-compute queue (submit-time semaphore covers
-        // the host->device dependency).
-        std::memset(counterR.mappedPtr, 0, 16);
-        heap.FlushRegion(counterR);
-
-        // Reuse ClusterBuild's output buffers: same VkBuffers + offsets the producer wrote.
-        VkDescriptorBufferInfo lightBi{ m_LastLightSSBORegion.buffer, m_LastLightSSBORegion.offset,
-                                        m_LastLightSSBORegion.size };
-
-        // invariant: bind via the producer's SubRegion offsets; BufferHandle only carries the
-        // backing VkBuffer; offset+size live on the SubRegion. Tagged-heap bump allocations cannot
-        // be re-derived, so the producer hands its regions through ClusterBuildOutputs.
-        VkDescriptorBufferInfo aabbBi{ cb.aabbRegion.buffer, cb.aabbRegion.offset, cb.aabbRegion.size };
-        VkDescriptorBufferInfo gridBi{ cb.gridRegion.buffer, cb.gridRegion.offset, cb.gridRegion.size };
-        VkDescriptorBufferInfo indexBi{ indexR.buffer,   indexR.offset,   indexR.size };
-        VkDescriptorBufferInfo counterBi{ counterR.buffer, counterR.offset, counterR.size };
-
-        VkWriteDescriptorSet writes[5] = {};
-        for (u32 i = 0; i < 5; ++i)
+        out.aabb = heap.Allocate(jobCtx->GpuCache, u64(k_ClusterCount) * 32, 16);
+        out.grid = heap.Allocate(jobCtx->GpuCache, u64(k_ClusterCount) * sizeof(GPUCluster), 16);
+        out.indices = heap.Allocate(jobCtx->GpuCache, u64(k_ClusterCount) * k_MaxLightsPerCluster * sizeof(u32), 16);
+        out.counter = heap.Allocate(jobCtx->GpuCache, 16, 16);
+        if (!out.aabb.buffer || !out.grid.buffer || !out.indices.buffer || !out.counter.buffer || !out.counter.mappedPtr)
+            return out;
+        std::memset(out.counter.mappedPtr, 0, 16);
+        heap.FlushRegion(out.counter);
+        const auto info = [](const Memory::GPUSubRegion& region) {
+            return VkDescriptorBufferInfo{region.buffer, region.offset, region.size};
+        };
+        const std::array buildInfos{info(out.aabb), info(out.grid)};
+        const std::array assignInfos{info(lights), info(out.aabb), info(out.grid), info(out.indices), info(out.counter)};
+        std::array<VkWriteDescriptorSet, 7> writes{};
+        for (u32 i = 0; i < writes.size(); ++i)
         {
-            writes[i] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            writes[i].dstSet          = vr->lightAssignDescSet[slot];
-            writes[i].dstBinding      = i;
-            writes[i].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = i < 2 ? buildSet : assignSet;
+            writes[i].dstBinding = i < 2 ? i : i - 2;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].descriptorCount = 1;
+            writes[i].pBufferInfo = i < 2 ? &buildInfos[i] : &assignInfos[i - 2];
         }
-        writes[0].pBufferInfo = &lightBi;
-        writes[1].pBufferInfo = &aabbBi;
-        writes[2].pBufferInfo = &gridBi;
-        writes[3].pBufferInfo = &indexBi;
-        writes[4].pBufferInfo = &counterBi;
-        vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 5, writes, 0, nullptr);
-
-        RG::BufferDesc indexDesc{ "LightIndex", indexSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT };
-        out.index       = rg.ImportBuffer(indexDesc, (void*)indexR.buffer, RG::ResourceState::Undefined);
-        out.indexRegion = indexR;
-
-        struct LightAssignData {
-            RG::BufferHandle aabb;
-            RG::BufferHandle grid;
-            RG::BufferHandle index;
-        };
-
-        auto* pipeline = m_LightAssignPipeline.get();
-        FrameDebugger* debugger = &m_Pipeline->GetSystem().GetFrameDebugger();
-        // Snapshot light counts at graph-build time; LightingSystem::GetLights() is final by now.
-        u32 capturedPointCount = 0;
-        u32 capturedSpotCount  = 0;
-        if (auto* lightingSys = SystemRegistry::GetSystem<LightingSystem>())
-        {
-            capturedPointCount = static_cast<u32>(lightingSys->GetLights().points.size());
-            capturedSpotCount  = static_cast<u32>(lightingSys->GetLights().spots.size());
-        }
-
-        rg.AddComputePass<LightAssignData>("LightAssign", RG::QueueFamily::AsyncCompute,
-            [&](LightAssignData& d, RG::RenderPassBuilder& builder)
-            {
-                d.aabb  = builder.ReadBuffer(cb.aabb);
-                d.grid  = builder.WriteBuffer(cb.grid);
-                d.index = builder.WriteBuffer(out.index);
-            },
-            [this, pipeline, debugger, capturedPointCount, capturedSpotCount](LightAssignData&, RG::RenderPassContext& ctx)
-            {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                if (debugger)
-                    debugger->BeginCapturePass(ctx.passIndex, "LightAssign", "", false,
-                        { "light_assign", 0, 0, VK_POLYGON_MODE_FILL, false, false, false, false });
-
-                const u32 slotLocal = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex())
-                                      % MAX_FRAMES_IN_FLIGHT;
-                ViewResources* vrLoc = m_Pipeline->GetCurrentViewResources();
-                if (!vrLoc || vrLoc->lightAssignDescSet[slotLocal] == VK_NULL_HANDLE)
-                {
-                    if (debugger) debugger->EndCapturePass();
-                    return;
-                }
-
-                pipeline->Bind(cmd);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    pipeline->GetLayout(), 0, 1, &vrLoc->lightAssignDescSet[slotLocal], 0, nullptr);
-
-                const auto* view = m_Pipeline->GetCurrentView();
-                struct LightAssignPC {
-                    Mat4 view;
-                    u32  pointLightCount;
-                    u32  spotLightCount;
-                    u32  maxLightsPerCluster;
-                    u32  _pad0;
-                } pc{};
-                pc.view                = view->camera.view;
-                pc.pointLightCount     = capturedPointCount;
-                pc.spotLightCount      = capturedSpotCount;
-                pc.maxLightsPerCluster = k_MaxLightsPerCluster;
-                vkCmdPushConstants(cmd, pipeline->GetLayout(),
-                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(LightAssignPC), &pc);
-
-                // 64-invocation workgroups; one workgroup per 64 clusters.
-                const u32 groupX = (k_ClusterCount + 63) / 64;
-                vkCmdDispatch(cmd, groupX, 1, 1);
-
-                if (debugger)
-                {
-                    debugger->CaptureComputeDispatch("LightAssign", "light_assign", groupX, 1, 1);
-                    debugger->EndCapturePass();
-                }
-            });
-
+        vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+        out.build = m_ClusterBuildPipeline->GetHandle(); out.buildLayout = m_ClusterBuildPipeline->GetLayout();
+        out.assign = m_LightAssignPipeline->GetHandle(); out.assignLayout = m_LightAssignPipeline->GetLayout();
+        out.ready = true;
         return out;
     }
 
-    // Per-view stable depth-sampler write for the ClusterViz set 0; called from
-    // AllocateViewResources after FrameTargets exists.
-    void LightingSubsystem::WriteClusterVizView(ViewResources& vr, FrameTargets& targets)
+    std::array<RG::BufferHandle, 2> LightingSubsystem::AddClusterBuildPass(RG::RenderGraph& graph,
+        RG::BufferHandle aabb, RG::BufferHandle grid, const ClusterBindings& bindings, FrameDebugger* debugger)
     {
-        LH_PROFILE_FUNCTION();
-        if (vr.clusterVizDescSet == VK_NULL_HANDLE || m_ClusterVizDepthSampler == VK_NULL_HANDLE) return;
-
-        auto vkScnDepth = std::static_pointer_cast<VKTexture>(targets.GetSceneDepth());
-        if (!vkScnDepth) return;
-
-        VkDescriptorImageInfo depthInfo{};
-        depthInfo.sampler     = m_ClusterVizDepthSampler;
-        depthInfo.imageView   = vkScnDepth->GetImageView();
-        depthInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        write.dstSet          = vr.clusterVizDescSet;
-        write.dstBinding      = 0;
-        write.descriptorCount = 1;
-        write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        write.pImageInfo      = &depthInfo;
-        vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 1, &write, 0, nullptr);
+        struct Data { RG::BufferHandle aabb, grid; };
+        std::array<RG::BufferHandle, 2> output;
+        graph.AddComputePass<Data>("ClusterBuild", RG::QueueFamily::AsyncCompute,
+            [&](Data& data, RG::RenderPassBuilder& builder) {
+                data.aabb = builder.WriteBuffer(aabb);
+                data.grid = builder.WriteBuffer(grid);
+                output = {data.aabb, data.grid};
+            },
+            [bindings, debugger](Data&, RG::RenderPassContext& ctx) {
+                const auto cmd = ctx.commandBuffer;
+                if (debugger) debugger->BeginCapturePass(ctx.passIndex, "ClusterBuild", "", false,
+                    {"cluster_build", 0, 0, VK_POLYGON_MODE_FILL, false, false, false, false});
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bindings.build);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bindings.buildLayout,
+                    0, 1, &bindings.buildSet, 0, nullptr);
+                vkCmdPushConstants(cmd, bindings.buildLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                    sizeof(ClusterBuildConstants), &bindings.buildConstants);
+                const u32 x = (k_ClusterTilesX + 3) / 4, y = (k_ClusterTilesY + 3) / 4, z = (k_ClusterSlicesZ + 3) / 4;
+                vkCmdDispatch(cmd, x, y, z);
+                if (debugger)
+                {
+                    debugger->CaptureComputeDispatch("ClusterBuild", "cluster_build", x, y, z);
+                    debugger->EndCapturePass();
+                }
+            });
+        return output;
     }
 
-    // Cluster density viz. Fullscreen triangle blended over LDR; samples SceneDepth to compute the
-    // true per-fragment 3D cluster ID (Olsson slice from linearized depth + screen tile from UV),
-    // then heat-maps the cluster's light count over the lit scene.
-    RG::ResourceHandle LightingSubsystem::AddClusterVizPass(RG::RenderGraph& rg,
-                                                            RG::ResourceHandle ldrInput,
-                                                            RG::ResourceHandle sceneDepth)
+    std::array<RG::BufferHandle, 2> LightingSubsystem::AddLightAssignPass(RG::RenderGraph& graph,
+        RG::BufferHandle lights, RG::BufferHandle aabb, RG::BufferHandle grid,
+        RG::BufferHandle indices, RG::BufferHandle counter, const ClusterBindings& bindings, FrameDebugger* debugger)
     {
-        LH_PROFILE_FUNCTION();
-        if (!m_ClusterVizPipeline) return ldrInput;
-
-        struct ClusterVizData {
-            RG::ResourceHandle output;
-            RG::ResourceHandle depth;
-        };
-        RG::ResourceHandle outputHandle;
-
-        rg.AddPass<ClusterVizData>("ClusterVizPass",
-            [&, ldrInput, sceneDepth](ClusterVizData& d, RG::RenderPassBuilder& builder)
-            {
-                VkClearValue clearVal{ { {0.f, 0.f, 0.f, 1.f} } };
-                d.output = builder.Write(ldrInput, VK_ATTACHMENT_LOAD_OP_LOAD,
-                                                   VK_ATTACHMENT_STORE_OP_STORE, clearVal);
-                d.depth  = builder.Read(sceneDepth);
-                outputHandle = d.output;
+        struct Data { RG::BufferHandle lights, aabb, grid, indices, counter; };
+        std::array<RG::BufferHandle, 2> output;
+        graph.AddComputePass<Data>("LightAssign", RG::QueueFamily::AsyncCompute,
+            [&](Data& data, RG::RenderPassBuilder& builder) {
+                data.lights = builder.ReadBuffer(lights);
+                data.aabb = builder.ReadBuffer(aabb);
+                data.grid = builder.WriteBuffer(grid);
+                data.indices = builder.WriteBuffer(indices);
+                data.counter = builder.WriteBuffer(counter);
+                output = {data.grid, data.indices};
             },
-            [this](ClusterVizData&, RG::RenderPassContext& ctx)
-            {
-                auto& sys = m_Pipeline->GetSystem();
-                const auto* view = m_Pipeline->GetCurrentView();
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                if (!vr || vr->clusterVizDescSet == VK_NULL_HANDLE) return;
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex())
-                                 % MAX_FRAMES_IN_FLIGHT;
-                if (vr->lightDescSet[slot] == VK_NULL_HANDLE) return;
-
-                sys.GetFrameDebugger().BeginCapturePass(ctx.passIndex, "ClusterVizPass", "LDROutput", false,
-                    { "cluster_viz", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, false });
-
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                m_ClusterVizPipeline->Bind(cmd);
-                VkDescriptorSet sets[2] = { vr->clusterVizDescSet, vr->lightDescSet[slot] };
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_ClusterVizPipeline->GetLayout(), 0, 2, sets, 0, nullptr);
-
-                struct ClusterVizPC {
-                    Vec2  viewport;
-                    float nearZ;
-                    float farZ;
-                } pc{};
-                pc.viewport = Vec2(static_cast<float>(vr->width), static_cast<float>(vr->height));
-                pc.nearZ    = view->camera.nearZ;
-                pc.farZ     = view->camera.farZ;
-                vkCmdPushConstants(cmd, m_ClusterVizPipeline->GetLayout(),
-                                   VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(ClusterVizPC), &pc);
-
-                const u32 w = view->targets->GetLDROutput()->GetWidth();
-                const u32 h = view->targets->GetLDROutput()->GetHeight();
-                VkViewport vp{}; vp.width = (float)w; vp.height = (float)h; vp.maxDepth = 1.0f;
-                vkCmdSetViewport(cmd, 0, 1, &vp);
-                VkRect2D sc{}; sc.extent = { w, h };
-                vkCmdSetScissor(cmd, 0, 1, &sc);
-                vkCmdDraw(cmd, 3, 1, 0, 0);
-
-                ObjectPushConstants dummyPC{};
-                sys.GetFrameDebugger().CaptureDrawCall("ClusterVizPass", "FullscreenTriangle", "ClusterViz",
-                    0, 0, dummyPC,
-                    { "cluster_viz", 0, VK_CULL_MODE_NONE, VK_POLYGON_MODE_FILL, false, false, false, false });
-                sys.GetFrameDebugger().EndCapturePass();
-            }
-        );
-        return outputHandle;
+            [bindings, debugger](Data&, RG::RenderPassContext& ctx) {
+                const auto cmd = ctx.commandBuffer;
+                if (debugger) debugger->BeginCapturePass(ctx.passIndex, "LightAssign", "", false,
+                    {"light_assign", 0, 0, VK_POLYGON_MODE_FILL, false, false, false, false});
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bindings.assign);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bindings.assignLayout,
+                    0, 1, &bindings.assignSet, 0, nullptr);
+                vkCmdPushConstants(cmd, bindings.assignLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                    sizeof(LightAssignConstants), &bindings.assignConstants);
+                const u32 x = (k_ClusterCount + 63) / 64;
+                vkCmdDispatch(cmd, x, 1, 1);
+                if (debugger)
+                {
+                    debugger->CaptureComputeDispatch("LightAssign", "light_assign", x, 1, 1);
+                    debugger->EndCapturePass();
+                }
+            });
+        return output;
     }
 }

@@ -86,7 +86,7 @@ namespace Luth
         return graph.Execute(recorders, timers);
     }
 
-    void Renderer::EndPrimaryCmdAndSubmit(QueueRecorders recorders, u64 frameIndex, u32 viewSlot,
+    SubmissionCompletionToken Renderer::EndPrimaryCmdAndSubmit(QueueRecorders recorders, u64 frameIndex, u32 viewSlot,
                                           bool hasComputeWork, bool isLastView)
     {
     #if defined(TRACY_ENABLE)
@@ -105,7 +105,12 @@ namespace Luth
         vkEndCommandBuffer(recorders.gA);
         vkEndCommandBuffer(recorders.compute);
         vkEndCommandBuffer(recorders.gB);
-        s_Backend->SubmitView(frameIndex, viewSlot, recorders, hasComputeWork, isLastView);
+        return s_Backend->SubmitView(frameIndex, viewSlot, recorders, hasComputeWork, isLastView);
+    }
+
+    bool Renderer::IsSubmissionComplete(const SubmissionCompletionToken& token)
+    {
+        return s_Backend && s_Backend->IsSubmissionComplete(token);
     }
 
     void Renderer::ExecuteGraph(RG::RenderGraph& graph, u64 frameIndex, GPUTimerPool* timers)

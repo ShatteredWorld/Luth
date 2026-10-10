@@ -9,15 +9,40 @@ namespace Luth
 {
     std::unordered_map<std::string, std::shared_ptr<Shader>> ShaderLibrary::s_Shaders;
     std::function<void(const std::string&)> ShaderLibrary::s_ReloadCallback;
+    ShaderVariantCache ShaderLibrary::s_Variants;
+    std::function<void(const std::string&, const std::vector<u32>&)> ShaderLibrary::s_VariantReloadCallback;
 
+    namespace
+    {
+        // Session import roots change with the project. Never reuse compiled variants
+        // from the prior environment; refresh registrations while retaining snapshots for retiring owners.
+        bool VariantEnvironmentChanged()
+        {
+            static fs::path engineRoot, projectRoot;
+            static bool initialized = false;
+            const auto assets = FileSystem::EngineAssetsPath();
+            const auto engine = assets.empty() ? fs::path{} : ShaderVariantCache::NormalizeSource(assets);
+            const auto project = FileSystem::HasProject()
+                ? ShaderVariantCache::NormalizeSource(FileSystem::ProjectPath("Library/Generated/shaders")) : fs::path{};
+            if (initialized && engineRoot == engine && projectRoot == project) return false;
+            engineRoot = engine;
+            projectRoot = project;
+            initialized = true;
+            return true;
+        }
+    }
     void ShaderLibrary::Init()
     {
         s_Shaders.clear();
+        s_Variants.Clear();
+        s_VariantReloadCallback = nullptr;
         s_ReloadCallback = nullptr;
     }
 
     void ShaderLibrary::Shutdown()
     {
+        s_VariantReloadCallback = nullptr;
+        s_Variants.Clear();
         s_ReloadCallback = nullptr;
         s_Shaders.clear();
     }
@@ -72,6 +97,17 @@ namespace Luth
     bool ShaderLibrary::Reload(const std::string& name)
     {
         LH_PROFILE_FUNCTION();
+        if (s_Variants.Find(name))
+        {
+            const auto next = s_Variants.Reload(name);
+            if (!next)
+            {
+                LH_LOG(Shaders, error, "Shader variant reload '{}' failed - keeping prior compiled program", name);
+                return false;
+            }
+            if (s_VariantReloadCallback) s_VariantReloadCallback(name, next->spirv);
+            return true;
+        }
         auto it = s_Shaders.find(name);
         if (it == s_Shaders.end())
         {
@@ -97,5 +133,40 @@ namespace Luth
     void ShaderLibrary::SetReloadCallback(std::function<void(const std::string&)> cb)
     {
         s_ReloadCallback = std::move(cb);
+    }
+
+    std::shared_ptr<const CompiledShaderVariant> ShaderLibrary::LoadEngineVariant(
+        const std::string& path, ShaderCompileVariant variant)
+    {
+        if (VariantEnvironmentChanged()) ReloadVariants();
+        return s_Variants.Load(FileSystem::EngineAssetsPath(path), variant);
+    }
+
+    void ShaderLibrary::SetVariantReloadCallback(std::function<void(const std::string&, const std::vector<u32>&)> callback)
+    { s_VariantReloadCallback = std::move(callback); }
+
+    void ShaderLibrary::ReloadVariants()
+    {
+        (void)VariantEnvironmentChanged();
+        for (const auto& name : s_Variants.Names()) Reload(name);
+    }
+
+    void ShaderLibrary::ReloadSource(const fs::path& source)
+    { ReloadSources({source}); }
+
+    void ShaderLibrary::ReloadSources(const std::vector<fs::path>& sources)
+    {
+        if (sources.empty()) return;
+        (void)VariantEnvironmentChanged();
+        std::vector<std::string> names;
+        for (const auto& [name, shader] : s_Shaders)
+            for (const auto& source : sources)
+                if (ShaderVariantCache::NormalizeSource(shader->GetPath()) == ShaderVariantCache::NormalizeSource(source))
+                { names.push_back(name); break; }
+        // Imports share session defines. Conservatively refresh all cached variants on
+        // source edits until dependency tracking exists; each retains its own options.
+        const auto variants = s_Variants.Names();
+        names.insert(names.end(), variants.begin(), variants.end());
+        for (const auto& name : names) Reload(name);
     }
 }

@@ -559,10 +559,10 @@ namespace Luth
                 s_ReloadPending.store(false);   // clear first: a compile landing mid-reload re-posts a fresh batch
                 const char* kGraphConsumers[] = {
                     "restir_gi_initial.slang", "restir_initial.slang", "rt_reflections.slang",
-                    "rt_sun_shadows.slang", "path_trace.slang", "volumetric_inject_scatter.slang",
-                    "pbr_transparent.slang", "pbr_oit_store.slang"
+                    "rt_sun_shadows.slang", "path_trace.slang"
                 };
                 for (const char* n : kGraphConsumers) ShaderLibrary::Reload(n);
+                ShaderLibrary::ReloadVariants(); // Fog and transparency retain their native selection.
             });
         }
 

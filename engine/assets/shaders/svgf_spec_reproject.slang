@@ -116,7 +116,8 @@ void main(uint3 tid : SV_DispatchThreadID)
     // Rougher reflections are blurry -> hitDist-insensitive, so loosen the reflected-depth gate.
     float hitTol = pc.depthThreshold * (1.0 + rough * 4.0);
     bool inBounds = all(prevUV >= float2(0.0)) && all(prevUV <= float2(1.0));
-    if (inBounds)
+    // A zero cap rejects undefined or discontinuous history before any previous-image load.
+    if (pc.historyCap > 0.0 && inBounds)
     {
         for (int i = 0; i < 4; ++i)
         {

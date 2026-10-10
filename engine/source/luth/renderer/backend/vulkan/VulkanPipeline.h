@@ -49,6 +49,7 @@ namespace Luth
 
         void Bind(VkCommandBuffer cmd);
         VkPipelineLayout GetLayout() const { return m_PipelineLayout; }
+        VkPipeline GetHandle() const { return m_Pipeline; }
 
     private:
         void CreatePipeline(const PipelineConfig& config, 

@@ -13,7 +13,9 @@ import froxel;
 
 // Set 0 b6: TLAS (RtSubsystem keeps a persistent empty TLAS bound; this static read is never null).
 // Set 6 b0: resolved volumetric in-scatter atlas (b1/b2 are the OIT heads/nodes; pbr_oit_store only).
+#if !LUTH_RASTER_ONLY
 [[vk::binding(6, 0)]] RaytracingAccelerationStructure topLevelAS;
+#endif
 [[vk::binding(0, 6)]] Sampler3D volInScatter;
 // b3: pre-transparent scene copy (opaque + fog) for screen-space refraction; partially-bound (glass only).
 [[vk::binding(3, 6)]] Sampler2D refractionBackdrop;
@@ -30,6 +32,7 @@ public static const uint TRANSPARENT_FLAG_FOG = 1u;
 
 // 1-spp alpha-tested sun-shadow ray at the transparent fragment's own position (the screen-space R8 mask
 // is opaque-depth-coupled, wrong for glass). Same epsilons as rt_sun_shadows.
+#if !LUTH_RASTER_ONLY
 float TraceSunShadow(float3 worldPos, float3 N)
 {
     if (ubo.shadowBias.x < 0.0) return 1.0;   // shadows globally disabled
@@ -44,6 +47,8 @@ float TraceSunShadow(float3 worldPos, float3 N)
     RtConfirmAlphaCandidates(rq, pc.geomTable);
     return (rq.CommittedStatus() == COMMITTED_NOTHING) ? 1.0 : 0.0;
 }
+
+#endif
 
 // Full transparent radiance: sun + clustered point lights + IBL + emission, fogged at the fragment's
 // depth. Discards below alphaCutoff (inside the decode). Returns straight alpha.
@@ -93,8 +98,12 @@ public float4 EvalTransparentSurfaceColor(uint materialIndex, uint shadeMode, fl
                                        mi.transmission, mi.ior, frontFacing, mi.sheenColor, mi.sheenRoughness,
                                        mi.subsurfaceColor, mi.subsurfaceRadius, mi.subsurfaceThickness);
 
+#if LUTH_RASTER_ONLY
+    float sunVis = ComputeShadowCSM(worldPos, nrm).shadow;
+#else
     float sunVis = (ubo.rtShadowParams.x > 0.5) ? TraceSunShadow(worldPos, nrm)
                                                 : ComputeShadowCSM(worldPos, nrm).shadow;
+#endif
     DirectionalLightData dl = LoadDirLight();
     float3 dirRadiance = dl.color * dl.intensity;
     Lo += EvalSurfBRDFTimesNdotL(normalize(-dl.direction), dirRadiance, V, surf) * sunVis;

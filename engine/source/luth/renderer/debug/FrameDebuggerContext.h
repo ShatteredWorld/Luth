@@ -8,24 +8,28 @@
 
 namespace Luth
 {
-    class RenderPipeline;
+    class RenderingSystem;
+    class GeometrySubsystem;
+    class LightingSubsystem;
+    class PostProcessSubsystem;
+    class EditorOverlaysSubsystem;
 
-    // Render-side frame-debugger infrastructure that lives next to RenderPipeline. Owns the
+    // Render-side frame-debugger infrastructure owned by RenderingSystem. Owns the
     // per-draw and depth preview textures, the debug-blit render-graph pass, and the replay-
     // then-copy path. Distinct from RenderingSystem::m_FrameDebugger, which holds the archive,
     // state machine, and capture metadata; this context only deals with the render-side preview
     // surface that the editor's Frame Debugger panel samples.
     //
-    // Constructed by RenderPipeline::Initialize. Holds 12 preview-texture fields (image, view,
-    // alloc, width, height, key per preview) and reaches back into RenderPipeline through its
-    // public accessors.
+    // Native domains are explicit borrowed dependencies and outlive this context.
+    // RenderingSystem supplies capture lifecycle and frozen scene data during migration.
     class FrameDebuggerContext
     {
     public:
-        explicit FrameDebuggerContext(RenderPipeline& pipeline);
+        FrameDebuggerContext(RenderingSystem&, GeometrySubsystem&, LightingSubsystem&,
+            PostProcessSubsystem&, EditorOverlaysSubsystem&);
         ~FrameDebuggerContext();
 
-        // Tear down the preview textures. Called from RenderPipeline::Shutdown before the Vulkan device is destroyed.
+        // Tear down previews before borrowed native domains and the Vulkan device are destroyed.
         void Shutdown();
 
         // Lazily create the debug-blit shader + descriptor resources. Safe to call repeatedly; returns early once
@@ -52,7 +56,7 @@ namespace Luth
         // the motion magnification (only used in mode 1; ignored otherwise).
         void BlitArchivedSlimToPreview(u32 archiveIdx, u32 mode, float scale);
 
-        // Editor/debug accessors (forwarded by RenderPipeline).
+        // Editor/debug accessors (forwarded by RenderingSystem).
         VkImageView GetPerDrawPreviewView()  const { return m_PerDrawPreviewView; }
         u64         GetPerDrawPreviewKey()   const { return m_PerDrawPreviewKey; }
         u32         GetPerDrawPreviewWidth() const { return m_PerDrawPreviewWidth; }
@@ -86,7 +90,11 @@ namespace Luth
         void ReplayDepthPrepass  (u32 passIdx, u32 localDrawIdx);
         void ReplaySelectionMask (u32 passIdx, u32 localDrawIdx);
 
-        RenderPipeline& m_Pipeline;
+        RenderingSystem& m_System;
+        GeometrySubsystem& m_Geometry;
+        LightingSubsystem& m_Lighting;
+        PostProcessSubsystem& m_PostProcess;
+        EditorOverlaysSubsystem& m_EditorOverlays;
 
         // Per-draw replay preview (matches SceneColor format, RGBA16F)
         VkImage       m_PerDrawPreviewImage  = VK_NULL_HANDLE;

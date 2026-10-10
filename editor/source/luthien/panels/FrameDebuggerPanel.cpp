@@ -470,7 +470,7 @@ namespace Luth
                     ImGui::TextDisabled("(depth buffer - no preview)");
                 else
                 {
-                    auto tex = m_RS->GetNamedTexture(res.name);
+                    auto tex = m_RS->GetNamedTexture({snapshot.viewId}, snapshot.resourceGeneration, res.name);
                     if (tex)
                     {
                         float panelW = ImGui::GetContentRegionAvail().x;
@@ -515,22 +515,25 @@ namespace Luth
 
             ImGui::Spacing(); ImGui::Spacing();
 
-            if (ImGui::BeginTable("##PipelineState", 2)) {
+            if (!pass.pipelineStateAvailable) ImGui::TextDisabled("Pipeline state unavailable");
+            if (pass.pipelineStateAvailable && ImGui::BeginTable("##PipelineState", 2)) {
                 ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 130.0f);
                 ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextDisabled("Depth Test");  ImGui::TableNextColumn(); ImGui::Text("%s", pass.depthTest ? "On" : "Off");
-                ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextDisabled("Depth Write"); ImGui::TableNextColumn(); ImGui::Text("%s", pass.depthWrite ? "On" : "Off");
-                ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextDisabled("Blend");       ImGui::TableNextColumn(); ImGui::Text("%s", pass.blendEnabled ? "On" : "Off");
-                ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextDisabled("Cull Mode");   ImGui::TableNextColumn(); ImGui::Text("%s", CullModeToString(pass.cullMode));
+                ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextDisabled("Depth Test");  ImGui::TableNextColumn(); ImGui::Text("%s", pass.pipelineStateMixed ? "Varies by draw" : pass.depthTest ? "On" : "Off");
+                ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextDisabled("Depth Write"); ImGui::TableNextColumn(); ImGui::Text("%s", pass.pipelineStateMixed ? "Varies by draw" : pass.depthWrite ? "On" : "Off");
+                ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextDisabled("Blend");       ImGui::TableNextColumn(); ImGui::Text("%s", pass.pipelineStateMixed ? "Varies by draw" : pass.blendEnabled ? "On" : "Off");
+                ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextDisabled("Cull Mode");   ImGui::TableNextColumn(); ImGui::Text("%s", pass.pipelineStateMixed ? "Varies by draw" : CullModeToString(pass.cullMode));
                 ImGui::EndTable();
             }
 
             ImGui::Spacing(); ImGui::Spacing();
 
-            if (ImGui::BeginTable("##GeoStats", 2)) {
+            if (!pass.geometryStatsAvailable) ImGui::TextDisabled("Draw counts unavailable");
+            if (pass.geometryStatsAvailable && ImGui::BeginTable("##GeoStats", 2)) {
                 ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, 130.0f);
                 ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextDisabled("Draw Calls"); ImGui::TableNextColumn(); ImGui::Text("%u", pass.drawCalls);
+                ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextDisabled("Draw Commands"); ImGui::TableNextColumn(); ImGui::Text("%u", pass.drawCalls);
+                if (pass.indirectDraws && ImGui::IsItemHovered()) ImGui::SetTooltip("Submitted command/index budgets before GPU visibility culling.");
                 if (pass.indices > 0) { ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextDisabled("Indices"); ImGui::TableNextColumn(); ImGui::Text("%u", pass.indices); }
                 ImGui::EndTable();
             }

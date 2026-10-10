@@ -7,6 +7,8 @@
 #include "luth/renderer/DrawListBuilder.h"
 #include "luth/renderer/FrameDebugger.h"
 #include "luth/renderer/FrameTargets.h"
+#include "luth/renderer/debug/ProfilingProvenance.h"
+#include "luth/renderer/debug/DebugOutputCatalog.h"
 #include "luth/renderer/RenderPipeline.h"
 #include "luth/renderer/draw/DrawList.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
@@ -32,7 +34,10 @@
 
 namespace Luth
 {
+    class GPUTimerPool;
     class Texture;
+    class FrameDebuggerContext;
+    struct CaptureFinalizationInputs;
     struct RenderSnapshot;
 
     // Per-frame global shader inputs (Set 0 UBO). Layout mirrors GLSL binding.
@@ -170,11 +175,6 @@ namespace Luth
         RG::ResourceHandle materialID; // R16U:  bindless material slot
     };
 
-    struct SelectionMaskOutput {
-        RG::ResourceHandle mask;
-        RG::ResourceHandle depth;
-    };
-
     // ECS-glue layer for the renderer. Owns frame-level scene inputs (CameraParams, DrawList,
     // FrameTargets) and orchestrates per-frame work by invoking RenderPipeline. Lighting inputs
     // (gatherer, cascade fit, shadow params) live on LightingSystem; RenderingSystem looks it up
@@ -195,6 +195,12 @@ namespace Luth
         // Queue an extra view to render this frame. Called by editor panels (e.g. GamePanel) before
         // Update; views record in queued order ahead of the scene view's subgraph. Cleared each Update.
         void QueueView(const RenderView& view) { m_QueuedViews.push_back(view); }
+
+        RenderViewId RegisterView(FrameTargets& targets) { return m_Views.Register(&targets); }
+        void ReleaseView(RenderViewId id);
+        void ResizeView(RenderViewId id, FrameTargets& targets, u32 width, u32 height);
+        const RenderViewRegistry& GetViews() const { return m_Views; }
+        u64 InvalidateView(RenderViewId id);
 
         // Project lifecycle hooks: extend / restrict the shader hot-reload watcher to cover the active project's shaders directory.
         void OnProjectLoaded();
@@ -266,6 +272,8 @@ namespace Luth
 
         const RG::RenderGraphSnapshot& GetGraphSnapshot() const;
         std::shared_ptr<Texture> GetNamedTexture(const std::string& name) const;
+        std::shared_ptr<Texture> GetNamedTexture(RenderViewId, u64 generation, const std::string& name) const;
+        void RefreshViewDebugOutputs(RenderViewId, FrameTargets&);
 
         u32 GetTriangleCount() const { return m_DrawList.visibleTriCount; }
 
@@ -304,6 +312,17 @@ namespace Luth
         // Frame debugger capture
         void RequestCapture()   { if (m_FrameDebugger.state == DebuggerState::Inactive) m_FrameDebugger.state = DebuggerState::CaptureRequested; }
         void ExitCapture();
+        void BeginViewCapture(const RenderView& view);
+        void AppendViewPresentation(RG::RenderGraph&, RG::ResourceHandle finalLdr, bool emitImGui);
+        void ExecuteMinimal();
+        bool FinalizeViewCapture(const CaptureFinalizationInputs&, const RG::RenderGraphSnapshot&);
+        RG::RenderGraphSnapshot& CaptureGraphSnapshot(const RG::RenderGraph&, RenderViewId, u64 generation);
+        GPUTimerPool* PrepareViewProfiling(RenderViewId, u64 generation, u64 renderFrame,
+            const RG::RenderGraph&, RG::RenderGraphSnapshot&, bool applyPrevious);
+        void SubmitViewProfiling(RenderViewId, u64 renderFrame, SubmissionCompletionToken);
+        const ProfileSubmissionProvenance* GetViewProfiling(RenderViewId id) const { return m_Profiling.Find(id); }
+        ShaderReloadCoordinator& GetShaderReloadCoordinator() { return *m_ShaderReload; }
+        void ResetPreviewCacheKeys();
         DebuggerState GetDebuggerState() const { return m_FrameDebugger.state; }
         const RG::CapturedFrame& GetCapturedFrame() const { return m_FrameDebugger.capturedFrame; }
         VkSampler GetDebugSampler() const { return m_FrameDebugger.sampler; }
@@ -315,7 +334,7 @@ namespace Luth
         CaptureSource GetCaptureSource() const          { return m_FrameDebugger.requestedSource; }
         CaptureSource GetCapturedSource() const         { return m_FrameDebugger.capturedSource; }
 
-        // Frame-debugger preview forwarders (implementations on RenderPipeline).
+        // Frame-debugger previews are owned here; native domains are borrowed from the pipeline.
         void        ReplayPassUpToDraw(u32 passIdx, u32 localDrawIdx);
         VkImageView GetPerDrawPreviewView() const;
         u64         GetPerDrawPreviewKey()  const;
@@ -351,6 +370,8 @@ namespace Luth
 
         // Scene panel's render targets. GamePanel owns its own FrameTargets so the two views resize independently.
         FrameTargets m_SceneTargets;
+        RenderViewRegistry m_Views;
+        RenderViewId m_SceneViewId;
 
         // Per-frame draw list (RenderMode-sorted buckets + tri count).
         DrawListBuilder m_DrawListBuilder;
@@ -359,6 +380,12 @@ namespace Luth
         // Graphics resources + render-graph orchestration (owns all pipelines,
         // descriptor sets, samplers, UBOs, SSBOs, preview textures, etc.).
         std::unique_ptr<RenderPipeline> m_Pipeline;
+        std::unique_ptr<FrameDebuggerContext> m_CaptureContext;
+        RG::RenderGraphSnapshot m_GraphSnapshot;
+        DebugOutputCatalog m_DebugOutputs;
+        ProfilingProvenance m_Profiling;
+        std::unique_ptr<class ViewGpuProfiler> m_GpuProfiler;
+        std::unique_ptr<class ShaderReloadCoordinator> m_ShaderReload;
 
         // Editor-facing state.
         PostProcessSettings  m_PostProcessSettings;

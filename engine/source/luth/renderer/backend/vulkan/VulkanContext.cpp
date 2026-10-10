@@ -358,9 +358,8 @@ namespace Luth
             && rqFeatures.rayQuery;
     }
 
-    // Renderer baseline: VK_KHR_swapchain + 4 RT extensions + a graphics queue family.
-    // RT-mandatory: a device missing any RT extension is ineligible, not a fallback
-    // candidate; hard-fail at the picker rather than after vkCreateDevice.
+    // Raster baseline: swapchain, BC texture compression and a graphics queue family.
+    // Optional RT support is queried separately for whichever device is selected.
     static bool DeviceMeetsBaseline(VkPhysicalDevice device)
     {
         u32 extCount = 0;
@@ -429,6 +428,7 @@ namespace Luth
             VkPhysicalDeviceProperties props;
             vkGetPhysicalDeviceProperties(m_PhysicalDevice, &props);
             m_PhysicalDeviceProperties = props;
+            m_RayTracingSupported = DeviceSupportsRayTracing(m_PhysicalDevice);
             LH_LOG(Renderer, warn, "Vulkan GPU (non-discrete): {0}", props.deviceName);
             return;
         }

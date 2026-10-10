@@ -14,11 +14,11 @@
 #include "luth/renderer/resources/Texture.h"
 #include "luth/renderer/shader/ShaderCompiler.h"
 #include "luth/renderer/shader/ShaderLibrary.h"
-#include "luth/renderer/subsystems/SkinningSubsystem.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/scene/systems/RenderingSystem.h"
-#include "luth/scene/systems/SystemRegistry.h"
 #include "luth/assets/FileSystem.h"
+#include "luth/assets/AssetManager.h"
+#include "luth/renderer/resources/Model.h"
 #include "luth/core/diagnostics/Log.h"
 #include "luth/core/BuildConfig.h"
 #include "luth/core/FrameData.h"
@@ -193,6 +193,7 @@ namespace Luth
     void RtSubsystem::Shutdown()
     {
         LH_PROFILE_FUNCTION();
+        m_ShadowViews.ReleaseAll([] { Renderer::WaitForGPU(); });
         // Persistent empty TLAS: push to deletion queue so it retires after the last in-flight
         // frame stops referencing it via Set 0 binding 6 (PushDeletion drains N+2 frames out).
         if (m_PersistentEmptyTlas != VK_NULL_HANDLE)
@@ -228,7 +229,7 @@ namespace Luth
         }
 
         // Final per-frame TLAS: push to deletion so FlushAllDeletionQueues catches it on shutdown.
-        // The hash-skip path inside AddTlasBuildPass only pushes when REPLACING the slot, so a
+        // The hash-skip path inside PrepareScene only pushes when REPLACING the slot, so a
         // long-stable m_LastResult lives until shutdown without ever being deferred.
         if (m_LastResult.tlas != VK_NULL_HANDLE)
         {
@@ -246,7 +247,7 @@ namespace Luth
             });
         }
         m_LastResult = {};
-        m_LastBuildFrame = ~u64(0);
+        m_PreparedScene.reset();
         m_Pipeline = nullptr;
     }
 
@@ -290,21 +291,46 @@ namespace Luth
         return true;
     }
 
-    void RtSubsystem::WriteShadowPassView(ViewResources& vr, FrameTargets& targets)
+    std::shared_ptr<RtSunShadowViewState> RtSubsystem::EnsureShadowView(RenderViewId id, const FrameTargets& targets)
+    {
+        if (!m_ShadowPassSetLayout) return {};
+        const auto depth = targets.GetSceneDepth();
+        const auto normal = targets.GetSlimNormal();
+        if (!depth || !normal || depth->GetWidth() != normal->GetWidth() || depth->GetHeight() != normal->GetHeight())
+            throw std::invalid_argument("RtSunShadow: incompatible depth/normal sources");
+        const auto depthView = std::static_pointer_cast<VKTexture>(depth)->GetImageView();
+        const auto normalView = std::static_pointer_cast<VKTexture>(normal)->GetImageView();
+        const auto config = RtSunShadowViewState::Config(depth->GetWidth(), depth->GetHeight(),
+            reinterpret_cast<u64>(depthView), reinterpret_cast<u64>(normalView));
+        return m_ShadowViews.Ensure(id, config, [&](const ViewStateConfig& requested) {
+            auto state = RtSunShadowViewState::Create(id, requested, m_ShadowPassSetLayout);
+            state->depthSource = depth;
+            state->normalSource = normal;
+            WriteShadowPassView(*state);
+            return state;
+        }, [] { Renderer::WaitForGPU(); });
+    }
+
+    void RtSubsystem::ReleaseShadowView(RenderViewId id)
+    {
+        m_ShadowViews.Release(id, [] { Renderer::WaitForGPU(); });
+    }
+
+    void RtSubsystem::WriteShadowPassView(const RtSunShadowViewState& state)
     {
         LH_PROFILE_FUNCTION();
         if (m_ShadowPassSetLayout == VK_NULL_HANDLE) return;
-        if (!targets.GetSceneDepth() || !targets.GetSlimNormal() || !vr.sunShadowMask) return;
+        if (!state.depthSource || !state.normalSource || !state.mask) return;
 
-        VkDevice device = VulkanContext::Get().GetDevice();
+        VkDevice device = state.device;
 
-        const VkImageView depthView  = std::static_pointer_cast<VKTexture>(targets.GetSceneDepth())->GetImageView();
-        const VkImageView normalView = std::static_pointer_cast<VKTexture>(targets.GetSlimNormal())->GetImageView();
-        const VkImageView maskView   = std::static_pointer_cast<VKTexture>(vr.sunShadowMask)->GetImageView();
+        const VkImageView depthView  = std::static_pointer_cast<VKTexture>(state.depthSource)->GetImageView();
+        const VkImageView normalView = std::static_pointer_cast<VKTexture>(state.normalSource)->GetImageView();
+        const VkImageView maskView   = std::static_pointer_cast<VKTexture>(state.mask)->GetImageView();
 
         for (u32 slot = 0; slot < MAX_FRAMES_IN_FLIGHT; ++slot)
         {
-            VkDescriptorSet set = vr.rtShadowPassDescSet[slot];
+            VkDescriptorSet set = state.sets[slot];
             if (set == VK_NULL_HANDLE) continue;
 
             VkDescriptorImageInfo depthInfo{};
@@ -348,182 +374,153 @@ namespace Luth
         }
     }
 
-    RG::ResourceHandle RtSubsystem::AddRtSunShadowsPass(RG::RenderGraph& rg,
-                                                        RG::ResourceHandle sceneDepth,
-                                                        RG::ResourceHandle slimNormal)
+    RtSunShadowBindings RtSubsystem::PrepareShadowBindings(const ViewResources& vr, const FrameTargets& targets,
+        u64 frameIndex, RenderViewId view, u64 generation, const PreparedRtScene* scene) const
     {
-        LH_PROFILE_FUNCTION();
-        // Pre-flight: pipeline must exist (shaders loaded). Mask must exist (view allocated).
-        ViewResources* preflightVr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
-        if (!m_SunShadowsPipeline || !preflightVr || !preflightVr->sunShadowMask)
-            return {};
+        RtSunShadowBindings packet;
+        if (!m_SunShadowsPipeline || !vr.rtShadow || !vr.rtShadow->mask)
+            return packet;
+        const auto& state = *vr.rtShadow;
+        if (state.id != view || state.depthSource != targets.GetSceneDepth() || state.normalSource != targets.GetSlimNormal())
+            throw std::invalid_argument("RtSunShadow: stale native view state");
+        const auto mask = std::static_pointer_cast<VKTexture>(state.mask);
+        packet.pipeline = m_SunShadowsPipeline->GetHandle();
+        packet.layout = m_SunShadowsPipeline->GetLayout();
+        const auto slot = static_cast<u32>(frameIndex % MAX_FRAMES_IN_FLIGHT);
+        packet.sets = {vr.globalDescriptorSet[slot], vr.lightDescSet[slot], state.sets[slot],
+            MaterialSystem::GetDescriptorSet(slot), VulkanContext::Get().GetBindlessSet().GetSet()};
+        packet.image = mask->GetImage();
+        packet.imageView = mask->GetImageView();
+        packet.mask = {mask.get()};
+        packet.depthSource = state.depthSource.get();
+        packet.normalSource = state.normalSource.get();
+        packet.view = view;
+        packet.generation = generation;
+        packet.frameIndex = frameIndex;
+        packet.width = state.width;
+        packet.height = state.height;
+        if (scene) {
+            packet.tlas = scene->GetTlas();
+            packet.geometryTable = scene->GetGeometryTableBDA();
+        }
+        return packet;
+    }
 
-        struct RtSunShadowsData {
-            RG::ResourceHandle mask;
-            RG::ResourceHandle depth;
-            RG::ResourceHandle normal;
-        };
-        RG::ResourceHandle outputHandle{};
-        rg.AddComputePass<RtSunShadowsData>(
-            "RtSunShadows",
-            RG::QueueFamily::AsyncCompute,
-            [&, this](RtSunShadowsData& data, RG::RenderPassBuilder& builder) {
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                auto maskTex = std::static_pointer_cast<VKTexture>(vr->sunShadowMask);
-
+    GraphTextureRef RtSubsystem::AddRtSunShadowsPass(RG::RenderGraph& rg, RG::ResourceHandle depth,
+        RG::ResourceHandle normal, const RtSunShadowBindings& packet)
+    {
+        if (!packet.pipeline) return {};
+        struct Data { RG::ResourceHandle mask; };
+        RG::ResourceHandle output;
+        rg.AddComputePass<Data>("RtSunShadows", RG::QueueFamily::AsyncCompute,
+            [&](Data& data, RG::RenderPassBuilder& builder) {
                 RG::TextureDesc desc;
-                desc.name   = "SunShadowMask";
-                desc.width  = maskTex->GetWidth();
-                desc.height = maskTex->GetHeight();
+                desc.name = "SunShadowMask";
+                desc.width = packet.width;
+                desc.height = packet.height;
                 desc.format = RG::TextureFormat::R8_Unorm;
-
-                data.mask = rg.ImportResource(desc,
-                    (void*)maskTex->GetImage(), (void*)maskTex->GetImageView(),
+                data.mask = rg.ImportResource(desc, (void*)packet.image, (void*)packet.imageView,
                     RG::ResourceState::Undefined);
                 data.mask = builder.WriteStorageImage(data.mask);
-                // SceneDepth + slimNormal are descriptor-bound to the pass-local set (set 2 b0, b1) with
-                // imageLayout = SHADER_READ_ONLY_OPTIMAL. ReadStorageImage maps to ResourceState::ComputeRead
-                // (COMPUTE_SHADER | RAY_TRACING_SHADER stages, SHADER_READ_ONLY_OPTIMAL layout); compatible
-                // with AsyncCompute, unlike plain Read which uses FRAGMENT_SHADER_BIT and would error on this
-                // queue. Despite the name, the descriptor type is COMBINED_IMAGE_SAMPLER, not storage; the
-                // "StorageImage" suffix is about queue affinity (same convention used by
-                // VolumetricSubsystem::AddInjectScatterPass for the cascade shadow reads).
-                if (sceneDepth.IsValid()) data.depth  = builder.ReadStorageImage(sceneDepth);
-                if (slimNormal.IsValid()) data.normal = builder.ReadStorageImage(slimNormal);
-                outputHandle = data.mask;
+                builder.ReadStorageImage(depth);
+                builder.ReadStorageImage(normal);
+                output = data.mask;
             },
-            [this](RtSunShadowsData&, RG::RenderPassContext& ctx) {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                ViewResources*  vr  = m_Pipeline->GetCurrentViewResources();
-                if (!vr) return;
-
-                const u64 frameAbs = Renderer::GetFrameData()->GetRenderFrameIndex();
-                const u32 slot     = static_cast<u32>(frameAbs % MAX_FRAMES_IN_FLIGHT);
-
-                // AS-build -> AS-read barrier. TlasBuildPass (same AsyncCompute primary) emits
-                // BLAS->TLAS-build barriers internally but not the final AS-write -> read hop. Without
-                // this, the dispatch may sample a TLAS that's still being built. dstStage = COMPUTE_SHADER
-                // (NOT RAY_TRACING: rayQuery runs in compute; a RAY_TRACING dst here is a TDR trap).
-                VkMemoryBarrier2 asBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-                asBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
-                asBarrier.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-                asBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-                asBarrier.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-                VkDependencyInfo asDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-                asDep.memoryBarrierCount = 1;
-                asDep.pMemoryBarriers    = &asBarrier;
-                vkCmdPipelineBarrier2(cmd, &asDep);
-
-                m_SunShadowsPipeline->Bind(cmd);
-
-                // Sets: 0 = global (TLAS + UBO), 1 = light SSBO (PBR's Set 3 remapped to Set 1), 2 = per-view
-                // pass-local (depth + normal + mask), 3 = Material SSBO, 4 = bindless (cutout alpha-test).
-                VkDescriptorSet sets[5] = {
-                    vr->globalDescriptorSet[slot],
-                    vr->lightDescSet[slot],
-                    vr->rtShadowPassDescSet[slot],
-                    MaterialSystem::GetDescriptorSet(slot),
-                    VulkanContext::Get().GetBindlessSet().GetSet(),
-                };
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                        m_SunShadowsPipeline->GetLayout(),
-                                        /*firstSet*/ 0, 5, sets, 0, nullptr);
-
-                const VkDeviceAddress geomTableBDA = GetGeometryTableBDA();
-                vkCmdPushConstants(cmd, m_SunShadowsPipeline->GetLayout(),
-                                   VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(geomTableBDA), &geomTableBDA);
-
-                const u32 groupX = (vr->width  + 7) / 8;
-                const u32 groupY = (vr->height + 7) / 8;
-                vkCmdDispatch(cmd, groupX, groupY, 1);
+            [packet](Data&, RG::RenderPassContext& ctx) {
+                const auto cmd = ctx.commandBuffer;
+                // Ray queries execute in compute. Preserve AS build-write -> query-read visibility.
+                VkMemoryBarrier2 memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+                memory.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+                memory.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+                memory.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                memory.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+                VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+                dependency.memoryBarrierCount = 1;
+                dependency.pMemoryBarriers = &memory;
+                vkCmdPipelineBarrier2(cmd, &dependency);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, packet.pipeline);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, packet.layout,
+                    0, static_cast<u32>(packet.sets.size()), packet.sets.data(), 0, nullptr);
+                vkCmdPushConstants(cmd, packet.layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                    0, sizeof(packet.geometryTable), &packet.geometryTable);
+                vkCmdDispatch(cmd, (packet.width + 7) / 8, (packet.height + 7) / 8, 1);
             });
+        return {output, packet.mask};
+    }
 
-        return outputHandle;
+    void PreparedRtScene::Record(VkCommandBuffer cmd) const
+    {
+        if (recorded) return;
+        for (const auto& batch : blas) batch.Record(cmd);
+        // Preserve BLAS/refit-write -> TLAS-build-read synchronization and submission routing.
+        VkMemoryBarrier2 memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        memory.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        memory.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        memory.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        memory.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dependency.memoryBarrierCount = 1;
+        dependency.pMemoryBarriers = &memory;
+        barrier(cmd, &dependency);
+        tlas.Record(cmd);
+        recorded = true;
+    }
+
+    std::shared_ptr<const PreparedRtScene> RtSubsystem::PrepareScene(std::span<const MeshDrawSnapshot> meshes, u64 frameIndex,
+        const std::unordered_map<UUID, u32, UUIDHash>& materialSlots, bool markEmitters)
+    {
+        if (IsPreparedFor(frameIndex)) return m_PreparedScene;
+        auto prepared = std::make_shared<PreparedRtScene>();
+        prepared->frameIndex = frameIndex;
+        prepared->emptyFallback = m_PersistentEmptyTlas;
+        // Request only meshes referenced by this demanded scene. Missing assets retry naturally
+        // on a later frame; repeated instances/views share the mesh's existing native resource.
+        for (const auto& instance : meshes)
+            if (const auto model = AssetManager::GetAsset<Model>(instance.modelUUID))
+                if (const auto mesh = model->GetMesh(instance.meshIndex))
+                    m_MeshResources.Ensure(*mesh, instance.isSkinned || instance.isDeformable);
+        prepared->blas[0] = VKAccelerationStructure::PreparePendingStaticBuilds(static_cast<u32>(frameIndex));
+        prepared->blas[1] = TlasBuilder::PrepareSkinnedBLASes(meshes, static_cast<u32>(frameIndex));
+        if (prepared->blas[0].FirstBuildCount() || prepared->blas[1].FirstBuildCount())
+            ++m_BlasReadyGeneration;
+        // Interrupted graph construction must never reuse a TLAS whose build did not record.
+        const auto previous = m_PreparedScene ? m_PreparedScene->ReuseCandidate() : m_LastResult;
+        prepared->tlas = TlasBuilder::PrepareTlas(meshes, static_cast<u32>(frameIndex),
+            previous, materialSlots, m_BlasReadyGeneration, markEmitters, prepared->blas);
+        const auto& fresh = prepared->tlas.result;
+        if (!fresh.reused && m_LastResult.tlas != VK_NULL_HANDLE)
+        {
+            const auto old = m_LastResult;
+            VulkanContext::Get().PushDeletion([old]() {
+                auto& context = VulkanContext::Get();
+                context.GetRtFn().vkDestroyAccelerationStructureKHR(context.GetDevice(), old.tlas, nullptr);
+                if (old.storageBuffer != VK_NULL_HANDLE)
+                    VulkanAllocator::FreeBuffer(old.storageBuffer, old.storageAlloc);
+                if (old.geomTableBuffer != VK_NULL_HANDLE)
+                    VulkanAllocator::FreeBuffer(old.geomTableBuffer, old.geomTableAlloc);
+            });
+        }
+        // Publish the pair before global descriptors and parallel recording consume it.
+        m_LastResult = fresh;
+        m_PreparedScene = std::move(prepared);
+        return m_PreparedScene;
     }
 
     void RtSubsystem::AddTlasBuildPass(RG::RenderGraph& rg)
     {
+        AddTlasBuildPass(rg, m_PreparedScene);
+    }
+
+    void RtSubsystem::AddTlasBuildPass(RG::RenderGraph& rg, std::shared_ptr<const PreparedRtScene> prepared)
+    {
         LH_PROFILE_FUNCTION();
+        if (!prepared) throw std::logic_error("RT scene must be prepared before graph construction");
         struct TlasBuildData {};
         rg.AddComputePass<TlasBuildData>(
-            "TlasBuild",
-            RG::QueueFamily::AsyncCompute,
-            [&](TlasBuildData&, RG::RenderPassBuilder& builder) {
-                // No RG-tracked resources: all per-frame allocations live outside the RG (per-frame VMA +
-                // PushDeletion / tagged-heap large-one-shot scratch). The pass's actual output
-                // (m_LastResult.tlas -> Set 0 binding 6 via UpdateUBO) is an engine-side side effect;
-                // SetHasSideEffect keeps the pass alive through CullDeadPasses (which otherwise drops
-                // passes with no Write/Read).
-                builder.SetHasSideEffect();
-            },
-            [this](TlasBuildData&, RG::RenderPassContext& ctx) {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                const u64 frameAbs = Renderer::GetFrameData()->GetRenderFrameIndex();
-
-                // Multi-view guard: Execute runs per view; TLAS is scene-global. Second view
-                // returns the same m_LastResult.tlas without re-recording any GPU commands.
-                if (m_LastBuildFrame == frameAbs) return;
-                m_LastBuildFrame = frameAbs;
-
-                auto* rs = SystemRegistry::GetSystem<RenderingSystem>();
-                if (!rs) return;
-                const RenderSnapshot& snapshot = rs->GetActiveSnapshot();
-
-                // Skinning now runs in SkinningSubsystem::AddDeformPass at frame start (graphics queue);
-                // the deformed buffers are ready for both raster and this refit. The gA->compute timeline
-                // semaphore makes the deform writes visible to this async-compute refit; no inline
-                // compute-write barrier here. see arch/multi-queue.md
-
-                // Deferred static BLAS builds: record the MODE_BUILD for every queued static mesh whose
-                // VB/IB upload has retired. Batched on this async-compute cmd before the refit + TLAS
-                // build; the AS-build -> AS-read barrier below covers both writer steps.
-                const u32 staticBuilt = VKAccelerationStructure::DrainPendingStaticBuilds(cmd, static_cast<u32>(frameAbs));
-
-                // Batched skinned refits + deformable first-builds: one vkCmdBuildAccelerationStructuresKHR
-                // call, N infos sharing one scratch (per-mesh sub-regions, no overlap).
-                const u32 refitBuilt = TlasBuilder::RefitSkinnedBLASes(cmd, snapshot.meshes, static_cast<u32>(frameAbs));
-
-                // A first-build this frame (static or deformable) advances the ready-generation so BuildTlas
-                // rebuilds once to fold the now-ready BLAS in (its instance hash is otherwise unchanged).
-                if (staticBuilt != 0u || refitBuilt != 0u) ++m_BlasReadyGeneration;
-
-                // Refit-write -> TLAS-build-read barrier. Same shape as above; the TLAS build
-                // reads the freshly-refitted BLAS device addresses through the instance buffer.
-                VkMemoryBarrier2 mem2{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-                mem2.srcStageMask  = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
-                mem2.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-                mem2.dstStageMask  = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
-                mem2.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-                VkDependencyInfo dep2{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-                dep2.memoryBarrierCount = 1;
-                dep2.pMemoryBarriers    = &mem2;
-                vkCmdPipelineBarrier2(cmd, &dep2);
-
-                // TLAS build with hash-skip. When skip fires, prior TLAS + storage + geom table stay
-                // alive; PushDeletion only fires when an actual rebuild replaces them. The geom table
-                // shares the TLAS lifetime exactly (same retire schedule).
-                // Emissive area lights: mark emitter instances in the geometry table when the feature and
-                // ReSTIR DI are both on (DI then owns their direct lighting; GI drops the on-hit seed).
-                const bool markEmitters = rs->GetEmissiveLightSettings().enabled && rs->GetRestirSettings().enabled;
-                TlasBuildResult fresh = TlasBuilder::BuildTlas(
-                    cmd, snapshot.meshes, static_cast<u32>(frameAbs), m_LastResult,
-                    m_Pipeline->GetMaterialSlotMap(), m_BlasReadyGeneration, markEmitters);
-                if (!fresh.reused && m_LastResult.tlas != VK_NULL_HANDLE)
-                {
-                    auto old       = m_LastResult.tlas;
-                    auto oldBuf    = m_LastResult.storageBuffer;
-                    auto oldAlloc  = m_LastResult.storageAlloc;
-                    auto oldGeom   = m_LastResult.geomTableBuffer;
-                    auto oldGeomAl = m_LastResult.geomTableAlloc;
-                    VulkanContext::Get().PushDeletion([old, oldBuf, oldAlloc, oldGeom, oldGeomAl]() {
-                        auto& ctx2 = VulkanContext::Get();
-                        if (old != VK_NULL_HANDLE)
-                            ctx2.GetRtFn().vkDestroyAccelerationStructureKHR(ctx2.GetDevice(), old, nullptr);
-                        if (oldBuf != VK_NULL_HANDLE)  VulkanAllocator::FreeBuffer(oldBuf, oldAlloc);
-                        if (oldGeom != VK_NULL_HANDLE) VulkanAllocator::FreeBuffer(oldGeom, oldGeomAl);
-                    });
-                }
-                m_LastResult = fresh;
+            "TlasBuild", RG::QueueFamily::AsyncCompute,
+            [](TlasBuildData&, RG::RenderPassBuilder& builder) { builder.SetHasSideEffect(); },
+            [prepared](TlasBuildData&, RG::RenderPassContext& context) {
+                prepared->Record(context.commandBuffer);
             });
     }
 }

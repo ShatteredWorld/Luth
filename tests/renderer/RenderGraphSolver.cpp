@@ -10,6 +10,69 @@
 using namespace Luth;
 using namespace Luth::RG;
 
+TEST_CASE("RGSolver: raster state mappings and deformation omit disabled native RT stages")
+{
+    for (u32 value = 0; value < static_cast<u32>(ResourceState::AccelerationStructureBuild); ++value)
+    {
+        const auto [stage, access] = RenderGraph::GetStateInfo(static_cast<ResourceState>(value));
+        CHECK((stage & VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR) == 0);
+        CHECK((stage & VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR) == 0);
+        CHECK((access & (VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR
+            | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR)) == 0);
+    }
+    const auto stages = VulkanBarrierCapabilities{}.DeformationReadStages();
+    CHECK(stages == (VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+        | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT));
+    CHECK_THROWS_AS(RenderGraph::GetStateInfo(ResourceState::AccelerationStructureBuild), std::invalid_argument);
+    CHECK_THROWS_AS(RenderGraph::GetStateInfo(ResourceState::AccelerationStructureRead), std::invalid_argument);
+}
+
+TEST_CASE("RGSolver: query-only and RT-pipeline stage capabilities remain distinct")
+{
+    const VulkanBarrierCapabilities queryOnly{true, false};
+    const VulkanBarrierCapabilities full{true, true};
+    for (const auto state : {ResourceState::ComputeRead, ResourceState::ComputeReadStorage, ResourceState::ComputeWrite})
+    {
+        const auto raster = RenderGraph::GetStateInfo(state);
+        CHECK(RenderGraph::GetStateInfo(state, queryOnly) == raster);
+        const auto pipeline = RenderGraph::GetStateInfo(state, full);
+        CHECK(pipeline.first == (raster.first | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR));
+        CHECK(pipeline.second == raster.second);
+    }
+    const auto [stage, access] = RenderGraph::GetStateInfo(ResourceState::AccelerationStructureRead, queryOnly);
+    CHECK(stage == (VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT));
+    CHECK(access == VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+    const auto pipeline = RenderGraph::GetStateInfo(ResourceState::AccelerationStructureRead, full);
+    CHECK(pipeline.first == (stage | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR));
+    CHECK(pipeline.second == access);
+    const auto build = RenderGraph::GetStateInfo(ResourceState::AccelerationStructureBuild, queryOnly);
+    CHECK(build.first == VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR);
+    CHECK(build.second == VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
+    CHECK(queryOnly.DeformationReadStages() == full.DeformationReadStages());
+    CHECK(full.DeformationReadStages() == (VulkanBarrierCapabilities{}.DeformationReadStages()
+        | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR));
+    CHECK(VulkanBarrierCapabilities::ForEnabledRtPackage(true).rayTracingPipelines);
+    CHECK_FALSE(VulkanBarrierCapabilities::ForEnabledRtPackage(false).accelerationStructures);
+}
+
+TEST_CASE("RGSolver: compiled AS barrier rejects raster before native recording")
+{
+    Memory::LinearAllocator alloc(64 * 1024);
+    RenderGraph graph(alloc);
+    BufferDesc desc; desc.name = "AS input"; desc.size = 128;
+    const auto input = graph.ImportBuffer(desc, reinterpret_cast<void*>(uintptr_t(1)), ResourceState::AccelerationStructureBuild);
+    struct Data {};
+    graph.AddComputePass<Data>("Read", [&](Data&, RenderPassBuilder& builder) {
+        builder.SetHasSideEffect(); builder.ReadBuffer(input);
+    }, [](Data&, RenderPassContext&) {});
+    graph.Compile();
+    REQUIRE(graph.GetPasses().size() == 1);
+    REQUIRE_FALSE(graph.GetPasses()[0].bufferPreBarriers.empty());
+    CHECK_THROWS_AS(graph.ValidateBarrierCapabilities({}), std::invalid_argument);
+    CHECK_NOTHROW(graph.ValidateBarrierCapabilities({true, false}));
+    CHECK_NOTHROW(graph.ValidateBarrierCapabilities({true, true}));
+}
+
 namespace
 {
     struct PassData {};
@@ -145,4 +208,16 @@ TEST_CASE("RGSolver: attachment states carry READ access so loadOp LOAD is cover
     auto [dStage, dAccess] = RenderGraph::GetStateInfo(ResourceState::DepthStencilAttachment);
     CHECK((dAccess & VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT)  != 0);
     CHECK((dAccess & VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT) != 0);
+}
+
+TEST_CASE("RGSolver: native sampled reads and compute history waits omit unsupported stages")
+{
+    const VulkanBarrierCapabilities raster{}, query{true, false}, hybrid{true, true};
+    const auto ordinaryReads = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    CHECK(raster.SampledImageReadStages() == ordinaryReads);
+    CHECK(query.SampledImageReadStages() == ordinaryReads);
+    CHECK(hybrid.SampledImageReadStages() == (ordinaryReads | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR));
+    CHECK(raster.ComputeHistoryWaitStages() == VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+    CHECK(query.ComputeHistoryWaitStages() == (VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR));
+    CHECK(hybrid.ComputeHistoryWaitStages() == query.ComputeHistoryWaitStages());
 }

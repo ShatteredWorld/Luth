@@ -17,6 +17,7 @@ typedef struct VmaAllocator_T* VmaAllocator;
 
 namespace Luth
 {
+    class CaptureRecordingSession;
     // Capture-and-replay state for the editor's Frame Debugger panel. Implements RG::IArchiveSink so
     // the render graph copies tracked render-targets into owned VkImages post-pass. The panel can
     // then preview each pass's output and re-record individual draws via ImmediateSubmit while the
@@ -76,7 +77,9 @@ namespace Luth
         VkDevice     archiveDevice    = VK_NULL_HANDLE;
         VmaAllocator archiveAllocator = nullptr;
 
-        // Capture helpers (called during normal recording when CaptureRequested). graphPassIndex is
+        bool IsRecordingCapture() const;
+
+        // Capture helpers (called only within the selected view's recording session). graphPassIndex is
         // RenderPassContext::passIndex, needed so the Frozen panel can key passArchives lookups by graph index
         // instead of dense push order. Pass call sites grab it from ctx.passIndex.
         void BeginCapturePass(u32 graphPassIndex,
@@ -107,5 +110,9 @@ namespace Luth
                             RG::QueueFamily queueFamily) override;
 
         void Shutdown(VkDevice device);
+
+    private:
+        friend class CaptureRecordingSession;
+        const CaptureRecordingSession* m_RecordingSession = nullptr;
     };
 }

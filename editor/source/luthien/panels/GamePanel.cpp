@@ -24,25 +24,24 @@ namespace Luth
     {
         m_WindowID = "Game";
         m_Viewport->SetOnResize([this](u32 w, u32 h) {
-            // Drain GPU + drop ViewResources before swapping FrameTargets;
-            // the size-keyed cache otherwise leaves descriptors pointing at
-            // views the deletion queue is about to destroy.
-            Renderer::WaitForGPU();
-            m_RenderingSystem->GetPipeline().ReleaseViewResources(m_Targets);
-
-            if (!m_TargetsAllocated) {
-                m_Targets.Allocate(w, h);
-                m_TargetsAllocated = true;
-            } else {
-                m_Targets.Resize(w, h);
-            }
+            // Preserve identity while the system retires old bindings safely.
+            if (!m_ViewId.value) m_ViewId = m_RenderingSystem->RegisterView(m_Targets);
+            m_RenderingSystem->ResizeView(m_ViewId, m_Targets, w, h);
+            m_TargetsAllocated = m_Targets.IsAllocated();
             m_Viewport->SetSize(w, h);
         });
 
         LH_LOG(Editor, info, "Created Game panel");
     }
 
-    GamePanel::~GamePanel() = default;
+    GamePanel::~GamePanel() { OnClosed(); }
+
+    void GamePanel::OnClosed()
+    {
+        if (!m_ViewId.value) return;
+        m_RenderingSystem->ReleaseView(m_ViewId);
+        m_ViewId = {};
+    }
 
     void GamePanel::OnInit() {}
 
@@ -59,6 +58,7 @@ namespace Luth
         if (it == view.end()) return false;
 
         auto& cam = view.get<Camera>(*it);
+        out.historyCamera = static_cast<u64>(entt::to_integral(*it)) + 1;
         auto& xf  = view.get<WorldTransform>(*it);
 
         out.view = Math::Inverse(xf.Matrix);
@@ -117,7 +117,9 @@ namespace Luth
             m_Viewport->BeginViewport(camAspect);
 
             if (haveCamera && m_TargetsAllocated) {
+                if (!m_ViewId.value) m_ViewId = m_RenderingSystem->RegisterView(m_Targets);
                 RenderView gameView;
+                gameView.id                   = m_ViewId;
                 gameView.targets              = &m_Targets;
                 gameView.camera               = camera;
                 gameView.viewIndex            = 1;
