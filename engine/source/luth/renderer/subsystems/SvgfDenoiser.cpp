@@ -80,7 +80,7 @@ namespace Luth
                     && std::static_pointer_cast<VKTexture>(vr.svgfSpecColorHist[0])->GetWidth()
                        < std::static_pointer_cast<VKTexture>(vr.svgfSpecDenoised)->GetWidth();
                 return { vr.svgfSpecColorHist, vr.svgfSpecMoments, vr.svgfSpecGeom, vr.svgfSpecAtrous,
-                         specHalf ? &vr.svgfSpecHalf : &vr.svgfSpecDenoised, &vr.reflRadiance,
+                         specHalf ? &vr.svgfSpecHalf : &vr.svgfSpecDenoised, vr.reflection ? &vr.reflection->radiance : nullptr,
                          &vr.svgfSpecPassthroughDescSet, vr.svgfSpecReprojectDescSet,
                          vr.svgfSpecMomentsDescSet, vr.svgfSpecAtrousDescSet };
             }

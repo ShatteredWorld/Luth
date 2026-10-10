@@ -214,14 +214,7 @@ namespace Luth
         // at the last accumulating frame. A mismatch this frame zeroes the accumulation. 0 means frame 0 resets.
         u64                      ptResetHash = 0;
 
-        // RT specular reflections. reflRadiance = viewport-sized RGBA16F STORAGE+SAMPLED;
-        // rgb = demodulated specular radiance (Li*F*G1 / Fenv), a = hitDist. The trace writes every
-        // pixel each frame (reflection or env fallback), so no cross-frame read and no bootstrap clear.
-        // reflDescSet binds Set 2 b0 = reflRadiance (GENERAL) + b1-b3 = depth/slimNormal/slimRoughness
-        // samplers; stable per-view (single, not cycled). The specular denoiser's svgfSpec* history
-        // lands beside the GI SVGF fields above.
-        std::shared_ptr<Texture> reflRadiance;
-        VkDescriptorSet          reflDescSet = VK_NULL_HANDLE;
+        std::shared_ptr<ReflectionViewState> reflection; // Borrowed raw reflection domain state.
         VkDescriptorSet          reflUpscaleDescSet = VK_NULL_HANDLE;   // half-res reflection bilateral-upscale set
         u32                      reflHalfCached = ~0u;                  // last-applied halfResolution; drives realloc
     };

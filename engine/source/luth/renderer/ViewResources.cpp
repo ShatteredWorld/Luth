@@ -107,6 +107,12 @@ namespace Luth
         vr.restirDi = std::move(restirDi);
         if (restirDiReplaced) vr.generation = m_System.InvalidateView(id);
 
+        auto reflection = m_RtNativeInitialized ? m_Reflections.EnsureView(id, targets,
+            m_System.GetReflectionsSettings().halfResolution) : nullptr;
+        const bool reflectionReplaced = vr.reflection && vr.reflection != reflection;
+        vr.reflection = std::move(reflection);
+        if (reflectionReplaced) vr.generation = m_System.InvalidateView(id);
+
         auto restirGi = m_RtNativeInitialized ? m_RestirGi.EnsureView(id, targets,
             m_System.GetRestirGiSettings().halfResolution) : nullptr;
         const bool restirGiReplaced = vr.restirGi && vr.restirGi != restirGi;
@@ -159,7 +165,6 @@ namespace Luth
             if (m_RtNativeInitialized)
             {
                 m_PathTrace.WriteView(vr);              // re-bind PT accumulator + display image (recreated on resize)
-                m_Reflections.WriteView(vr, targets);   // re-bind reflection output + slim G-buffer samplers
                 m_Reflections.WriteUpscaleView(vr, targets);    // re-bind refl upscale half-input + full output
 
                 m_DenoiseRefl->WriteView(vr, targets);  // re-bind specular SVGF inputs + output to the new images
@@ -169,6 +174,7 @@ namespace Luth
             m_Global.WriteView(vr, MakeGlobalCtx(*this, vr));
         }
 
+        if (reflectionReplaced && m_RtNativeInitialized) m_DenoiseRefl->WriteView(vr, targets);
         if (giDenoiserReplaced && m_RtNativeInitialized) {
             // Lighting borrows the new GI output; EnsureGiView completed the safe point.
             m_Lighting.WriteShadowView(vr);
@@ -194,6 +200,7 @@ namespace Luth
         m_Restir.ReleaseView(id);
         static_cast<SvgfDenoiser*>(m_DenoiseGi.get())->ReleaseGiView(id);
         m_RestirGi.ReleaseView(id);
+        m_Reflections.ReleaseView(id);
         m_Transparency.ReleaseView(id);
         m_PostProcess.ReleaseTaaView(id);
         m_EditorOverlays.ReleaseView(id);
@@ -295,7 +302,6 @@ namespace Luth
         if (m_RtNativeInitialized)
         {
             allocSingle(m_PathTrace.GetSetLayout(),          vr.ptDescSet,            "View.PathTrace");
-            allocSingle(m_Reflections.GetSetLayout(),        vr.reflDescSet,          "View.Reflections");
             allocSingle(m_Reflections.GetUpscaleLayout(),    vr.reflUpscaleDescSet,   "View.ReflUpscale");
             m_DenoiseGi->AllocateViewSets(vr);
             m_DenoiseRefl->AllocateViewSets(vr);
@@ -304,7 +310,6 @@ namespace Luth
         if (m_RtNativeInitialized)
         {
             m_PathTrace.WriteView(vr);
-            m_Reflections.WriteView(vr, targets);
             m_Reflections.WriteUpscaleView(vr, targets);    // bind refl upscale half-input + full output
 
             m_DenoiseRefl->WriteView(vr, targets);
@@ -318,8 +323,8 @@ namespace Luth
         // This remaining compatibility allocation group is entirely RT-owned.
         if (!m_RtNativeInitialized) return;
 
-        // Half-res reflections (ReflectionsSettings::halfResolution): reflRadiance trace output + svgfSpec*
-        // history allocate at half; svgfSpecDenoised stays full (the bilateral-upscale output).
+        // Remaining reflection denoiser history allocates at half when requested;
+        // svgfSpecDenoised stays full. Raw trace resources belong to ReflectionsSubsystem.
         const bool reflHalf = m_System.GetReflectionsSettings().halfResolution;
         const u32  reflW    = reflHalf ? halfW : fullW;
         const u32  reflH    = reflHalf ? halfH : fullH;
@@ -335,14 +340,6 @@ namespace Luth
             VK_IMAGE_USAGE_STORAGE_BIT);
         vr.ptColor = std::make_shared<VKTexture>(
             fullW, fullH, TextureFormat::RGBA16F,
-            /*arrayLayers*/ 1, /*createFlags*/ 0u, /*mipLevels*/ 1,
-            VK_IMAGE_USAGE_STORAGE_BIT);
-
-        // RT specular reflections: reflection working res (half when halfResolution). STORAGE for the
-        // trace's imageStore + SAMPLED (ctor) for pbr.frag's Set 3 b7 read. rgb = demodulated specular
-        // radiance, a = hitDist. Fully written each frame (reflection or env fallback), so no bootstrap clear.
-        vr.reflRadiance = std::make_shared<VKTexture>(
-            reflW, reflH, TextureFormat::RGBA16F,
             /*arrayLayers*/ 1, /*createFlags*/ 0u, /*mipLevels*/ 1,
             VK_IMAGE_USAGE_STORAGE_BIT);
 
@@ -440,7 +437,7 @@ namespace Luth
         vr.giDenoiser.reset();
         vr.ptAccum.reset();
         vr.ptColor.reset();
-        vr.reflRadiance.reset();
+        vr.reflection.reset();
         vr.svgfSpecDenoised.reset();
         vr.svgfSpecHalf.reset();
         for (u32 i = 0; i < 2; ++i)

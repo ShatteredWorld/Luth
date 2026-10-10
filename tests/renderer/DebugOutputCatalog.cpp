@@ -140,7 +140,8 @@ TEST_CASE("DebugOutputCatalog: native domain contributions borrow the selected v
     state.fog->volInScatter = std::make_shared<TestTexture>();
     state.fog->volInScatterHistA = std::make_shared<TestTexture>();
     state.fog->volInScatterHistB = std::make_shared<TestTexture>();
-    state.reflRadiance = std::make_shared<TestTexture>();
+    state.reflection = std::make_shared<ReflectionViewState>();
+    state.reflection->radiance = std::make_shared<TestTexture>();
     ao.linearDepth = std::make_shared<TestTexture>();
     ao.rawAO = std::make_shared<TestTexture>();
     ao.finalAO = std::make_shared<TestTexture>();
@@ -157,7 +158,7 @@ TEST_CASE("DebugOutputCatalog: native domain contributions borrow the selected v
     CHECK(catalog.Find({1}, 1, "VolInScatter") == state.fog->volInScatter);
     CHECK(catalog.Find({1}, 1, "VolInScatterHistA") == state.fog->volInScatterHistA);
     CHECK(catalog.Find({1}, 1, "VolInScatterHistB") == state.fog->volInScatterHistB);
-    CHECK(catalog.Find({1}, 1, "Reflections") == state.reflRadiance);
+    CHECK(catalog.Find({1}, 1, "Reflections") == state.reflection->radiance);
     CHECK(catalog.Find({1}, 1, "GTAOLinearDepth") == ao.linearDepth);
     CHECK(catalog.Find({1}, 1, "GTAORawAO") == ao.rawAO);
     CHECK(catalog.Find({1}, 1, "GTAOFinal") == ao.finalAO);

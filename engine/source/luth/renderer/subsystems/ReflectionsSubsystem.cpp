@@ -141,6 +141,7 @@ namespace Luth
     void ReflectionsSubsystem::Shutdown()
     {
         LH_PROFILE_FUNCTION();
+        m_Views.ReleaseAll([] { Renderer::WaitForGPU(); });
         VkDevice device = VulkanContext::Get().GetDevice();
         m_ReflPipeline.reset();
         m_UpscalePipeline.reset();
@@ -178,8 +179,7 @@ namespace Luth
             return true;
         }
 
-        // Shared with the GI/DI upscale loaders: the reload dispatch's || short-circuit rebuilds only the
-        // first matching subsystem; a restart picks up all three (known watch-item).
+        // Shared shader reload fans out to the GI/DI/reflection upscale owners.
         if (name == "bilateral_upscale.slang" && m_UpscaleSetLayout != VK_NULL_HANDLE)
         {
             m_UpscaleSpv = spv;
@@ -195,43 +195,43 @@ namespace Luth
         return false;
     }
 
-    void ReflectionsSubsystem::WriteView(ViewResources& vr, FrameTargets& targets)
+    void ReflectionsSubsystem::WriteView(ReflectionViewState& state)
     {
         LH_PROFILE_FUNCTION();
-        if (vr.reflDescSet == VK_NULL_HANDLE || !vr.reflRadiance) return;
-        if (!targets.GetSceneDepth() || !targets.GetSlimNormal() || !targets.GetSlimRoughness()) return;
+        if (state.descriptorSet == VK_NULL_HANDLE || !state.radiance) return;
+        if (!state.sources[0] || !state.sources[1] || !state.sources[2]) return;
 
         VkDescriptorImageInfo reflInfo{};
-        reflInfo.imageView   = std::static_pointer_cast<VKTexture>(vr.reflRadiance)->GetImageView();
+        reflInfo.imageView   = std::static_pointer_cast<VKTexture>(state.radiance)->GetImageView();
         reflInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         VkDescriptorImageInfo depthInfo{};
         depthInfo.sampler     = m_Sampler;
-        depthInfo.imageView   = std::static_pointer_cast<VKTexture>(targets.GetSceneDepth())->GetImageView();
+        depthInfo.imageView   = state.sourceViews[0];
         depthInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkDescriptorImageInfo normalInfo{};
         normalInfo.sampler     = m_Sampler;
-        normalInfo.imageView   = std::static_pointer_cast<VKTexture>(targets.GetSlimNormal())->GetImageView();
+        normalInfo.imageView   = state.sourceViews[1];
         normalInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkDescriptorImageInfo roughInfo{};
         roughInfo.sampler     = m_Sampler;
-        roughInfo.imageView   = std::static_pointer_cast<VKTexture>(targets.GetSlimRoughness())->GetImageView();
+        roughInfo.imageView   = state.sourceViews[2];
         roughInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkWriteDescriptorSet writes[4]{};
         writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[0].dstSet = vr.reflDescSet; writes[0].dstBinding = 0;
+        writes[0].dstSet = state.descriptorSet; writes[0].dstBinding = 0;
         writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          writes[0].descriptorCount = 1; writes[0].pImageInfo = &reflInfo;
         writes[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[1].dstSet = vr.reflDescSet; writes[1].dstBinding = 1;
+        writes[1].dstSet = state.descriptorSet; writes[1].dstBinding = 1;
         writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[1].descriptorCount = 1; writes[1].pImageInfo = &depthInfo;
         writes[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[2].dstSet = vr.reflDescSet; writes[2].dstBinding = 2;
+        writes[2].dstSet = state.descriptorSet; writes[2].dstBinding = 2;
         writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[2].descriptorCount = 1; writes[2].pImageInfo = &normalInfo;
         writes[3] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[3].dstSet = vr.reflDescSet; writes[3].dstBinding = 3;
+        writes[3].dstSet = state.descriptorSet; writes[3].dstBinding = 3;
         writes[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; writes[3].descriptorCount = 1; writes[3].pImageInfo = &roughInfo;
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 4, writes, 0, nullptr);
     }
@@ -244,12 +244,12 @@ namespace Luth
         LH_PROFILE_FUNCTION();
         if (!IsEnabled() || !m_ReflPipeline) return {};
         ViewResources* preflightVr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
-        if (!preflightVr || !preflightVr->reflRadiance || preflightVr->reflDescSet == VK_NULL_HANDLE) return {};
+        if (!preflightVr || !preflightVr->reflection || !preflightVr->reflection->radiance || preflightVr->reflection->descriptorSet == VK_NULL_HANDLE) return {};
         if (m_Pipeline->GetRt().GetTlas() == VK_NULL_HANDLE) return {};
 
         // Reflection working resolution (half when ReflectionsSettings::halfResolution): derive from
         // reflRadiance's extent (the alloc-time source of truth); G-buffer reads remap to full in-shader.
-        auto reflTex0 = std::static_pointer_cast<VKTexture>(preflightVr->reflRadiance);
+        auto reflTex0 = std::static_pointer_cast<VKTexture>(preflightVr->reflection->radiance);
         const i32 reflW = reflTex0 ? static_cast<i32>(reflTex0->GetWidth())  : static_cast<i32>(preflightVr->width);
         const i32 reflH = reflTex0 ? static_cast<i32>(reflTex0->GetHeight()) : static_cast<i32>(preflightVr->height);
         const i32 reflScale = ((u32)reflW == preflightVr->width && (u32)reflH == preflightVr->height) ? 1 : 2;
@@ -285,7 +285,7 @@ namespace Luth
 
                 // Reflection output: fully overwritten each frame (every pixel gets reflection or env
                 // fallback), so Undefined import (restirGiDI pattern; no cross-frame read -> no clear).
-                auto reflTex = std::static_pointer_cast<VKTexture>(v->reflRadiance);
+                auto reflTex = std::static_pointer_cast<VKTexture>(v->reflection->radiance);
                 RG::TextureDesc desc;
                 desc.name   = "Reflections";
                 desc.width  = reflTex->GetWidth();
@@ -296,15 +296,13 @@ namespace Luth
                     RG::ResourceState::Undefined);
                 data.refl = builder.WriteStorageImage(data.refl);
                 reflHandle = data.refl;
-                // The specular denoiser reads reflHandle (its in.di), so the RG keeps this pass alive in
-                // normal mode and dead-pass-culls it when nothing consumes the chain, e.g. PathTrace mode,
-                // where GeometryPass + the denoiser are culled. No SetHasSideEffect (it would force the
-                // ~1 ms trace to run in PT).
+                // The host skips this contribution in PathTrace mode; external output writes
+                // are live graph work and do not rely on dead-pass culling for activation.
             },
             [this, pc](ReflData&, RG::RenderPassContext& ctx) {
                 VkCommandBuffer cmd = ctx.commandBuffer;
                 ViewResources*  v   = m_Pipeline->GetCurrentViewResources();
-                if (!v || v->reflDescSet == VK_NULL_HANDLE) return;
+                if (!v || !v->reflection || v->reflection->descriptorSet == VK_NULL_HANDLE) return;
 
                 // AS-build -> AS-read barrier. dstStageMask is COMPUTE_SHADER (NOT RAY_TRACING):
                 // rayQuery executes in the compute stage; a RAY_TRACING dst here is a TDR trap.
@@ -323,7 +321,7 @@ namespace Luth
                 VkDescriptorSet sets[5] = {
                     v->globalDescriptorSet[slot],
                     v->lightDescSet[slot],
-                    v->reflDescSet,
+                    v->reflection->descriptorSet,
                     MaterialSystem::GetDescriptorSet(slot),
                     VulkanContext::Get().GetBindlessSet().GetSet(),
                 };

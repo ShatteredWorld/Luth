@@ -1,6 +1,7 @@
 #pragma once
 
 #include "luth/core/types/LuthTypes.h"
+#include "luth/renderer/features/rt/ReflectionViewState.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 
@@ -22,8 +23,8 @@ namespace Luth
     //
     // Mirrors PathTraceSubsystem's compute-RT shape (5-set bind, inline AS barrier dst=COMPUTE, geom-table
     // BDA push constant) + RtRestirGiSubsystem's slim-G-buffer input + half-res bilateral upscale. The trace
-    // output is consumed by the specular denoiser (DenoiserChannel::Reflections), so the RG keeps it alive in
-    // normal mode and dead-pass-culls it when unconsumed (PathTrace). see arch/rendering-pipeline.md
+    // output is consumed by the specular denoiser (DenoiserChannel::Reflections). The host skips trace
+    // registration in PathTrace mode. see arch/rendering-pipeline.md
     class ReflectionsSubsystem
     {
     public:
@@ -34,7 +35,9 @@ namespace Luth
 
         // Stable per-view Set 2 writes: b0 reflection output (GENERAL storage), b1 depth, b2 slim normal,
         // b3 slim roughness (SHADER_READ_ONLY samplers). Written once at view alloc / resize.
-        void WriteView(ViewResources& vr, FrameTargets& targets);
+        std::shared_ptr<ReflectionViewState> EnsureView(RenderViewId, const FrameTargets&, bool half);
+        void ReleaseView(RenderViewId);
+        void WriteView(ReflectionViewState& state);
 
         // Reflection trace dispatch -> writes the demodulated reflection image. Returns its handle
         // (invalid when disabled / no view). AsyncCompute, after the TLAS build. Reads the slim G-buffer
@@ -59,6 +62,8 @@ namespace Luth
         bool IsEnabled() const;
 
     private:
+        ReflectionViewStates m_Views;
+        u64 m_NextSourceGeneration = 1;
         RenderPipeline* m_Pipeline = nullptr;
 
         std::unique_ptr<VKComputePipeline> m_ReflPipeline;

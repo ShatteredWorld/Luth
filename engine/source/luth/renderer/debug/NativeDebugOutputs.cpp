@@ -29,7 +29,7 @@ namespace Luth
                 outputs.push_back({"VolInScatterHistA", state->fog->volInScatterHistA});
                 outputs.push_back({"VolInScatterHistB", state->fog->volInScatterHistB});
             }
-            outputs.push_back({"Reflections", state->reflRadiance});
+            outputs.push_back({"Reflections", state->reflection ? state->reflection->radiance : nullptr});
         }
         if (ao)
         {
