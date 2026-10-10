@@ -160,6 +160,9 @@ namespace Luth
 
         vr.width  = newW;
         vr.height = newH;
+        // Explicit owner invalidation must reach temporal preparation even when
+        // no physical resource or extent changed.
+        vr.generation = m_System.GetViews().Get(id)->generation;
         // Source views can change without an extent change. Refresh the consumer's mask binding.
         if (shadowReplaced || diDenoiserReplaced || diSpecDenoiserReplaced) m_Lighting.WriteShadowView(vr);
         return vr;

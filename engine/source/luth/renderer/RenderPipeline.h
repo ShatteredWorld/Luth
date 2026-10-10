@@ -136,6 +136,8 @@ namespace Luth
         // independent. Identity-initialized, so frame 0 has nonsense motion; settles by frame 1.
         Mat4 prevViewProj{ 1.0f };
         ViewHistoryState cameraHistory;
+        u64 historyCamera = 0, historyRevision = 0;
+        bool graphRecorded = false;
         // Per-view previous-frame camera position; feeds ubo.prevCameraPos for DI temporal BASIC's
         // view-dependent spec target. Per-view for the same multi-view reason as prevViewProj.
         Vec3 prevCameraPos{ 0.0f };

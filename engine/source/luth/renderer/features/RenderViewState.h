@@ -118,6 +118,11 @@ namespace Luth
             safePoint();
             m_States.clear();
         }
+        template<class Visitor>
+        void ForEach(Visitor&& visitor)
+        {
+            for (auto& [id, entry] : m_States) visitor(entry->state);
+        }
     private:
         struct Entry { ViewStateConfig config; State state; };
         std::unordered_map<u64, std::unique_ptr<Entry>> m_States;

@@ -23,6 +23,26 @@
 
 namespace Luth
 {
+    namespace
+    {
+        void FinishViewHistories(ViewResources* state, u64 frame, bool submitted)
+        {
+            if (!state) return;
+            const bool success = submitted && state->graphRecorded;
+            if (state->restirDi) state->restirDi->history.Finish(frame, state->generation, success);
+            if (state->diDenoiser) state->diDenoiser->history.Finish(frame, state->generation, success);
+            if (state->diSpecDenoiser) state->diSpecDenoiser->history.Finish(frame, state->generation, success);
+            if (success) state->cameraHistory.Commit(frame, state->generation);
+            else state->cameraHistory.Invalidate();
+            if (state->taa)
+            {
+                if (success && state->taa->recorded) state->taa->history.Commit(frame, state->generation);
+                else state->taa->history.Invalidate();
+            }
+            state->graphRecorded = false;
+        }
+    }
+
     // ---- Construction / Destruction ----
 
     RenderingSystem::RenderingSystem(u32 viewportWidth, u32 viewportHeight)
@@ -350,28 +370,20 @@ namespace Luth
         {
             QueueRecorders r = Renderer::BeginPrimaryCmd(frameIndex, viewSlot);
             const bool hasCompute = RecordView(v, r);
-            SubmitViewProfiling(v.id, Renderer::GetFrameData()->GetRenderFrameIndex(), Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/false));
-            if (auto* state = m_Pipeline->GetViewResources(v.targets))
-            {
-                state->cameraHistory.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
-                if (state->taa && state->taa->recorded)
-                    state->taa->history.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
-                else if (state->taa) state->taa->history.Invalidate();
-            }
+            const auto submitted = Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/false);
+            SubmitViewProfiling(v.id, Renderer::GetFrameData()->GetRenderFrameIndex(), submitted);
+            FinishViewHistories(m_Pipeline->GetViewResources(v.targets),
+                Renderer::GetFrameData()->GetRenderFrameIndex(), submitted.valid);
             ++viewSlot;
         }
         m_QueuedViews.clear();
 
         QueueRecorders r = Renderer::BeginPrimaryCmd(frameIndex, viewSlot);
         const bool hasCompute = RecordView(sceneView, r);
-        SubmitViewProfiling(sceneView.id, Renderer::GetFrameData()->GetRenderFrameIndex(), Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/true));
-        if (auto* state = m_Pipeline->GetViewResources(sceneView.targets))
-        {
-            state->cameraHistory.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
-            if (state->taa && state->taa->recorded)
-                state->taa->history.Commit(Renderer::GetFrameData()->GetRenderFrameIndex(), state->generation);
-            else if (state->taa) state->taa->history.Invalidate();
-        }
+        const auto submitted = Renderer::EndPrimaryCmdAndSubmit(r, frameIndex, viewSlot, hasCompute, /*isLastView=*/true);
+        SubmitViewProfiling(sceneView.id, Renderer::GetFrameData()->GetRenderFrameIndex(), submitted);
+        FinishViewHistories(m_Pipeline->GetViewResources(sceneView.targets),
+            Renderer::GetFrameData()->GetRenderFrameIndex(), submitted.valid);
     }
 
     // ---- Per-view record ----

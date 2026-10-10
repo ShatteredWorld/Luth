@@ -338,6 +338,7 @@ namespace Luth
             m_ShadePipeline = std::make_unique<VKComputePipeline>(
                 m_ShadeSpv, layouts, std::vector<VkPushConstantRange>{ pcRange });
         }
+        m_Views.ForEach([](auto& state) { state->history.Invalidate(); });
         return true;
     }
 
@@ -530,6 +531,8 @@ namespace Luth
             packet.pipelines[i] = pipelines[i]->GetHandle(); packet.layouts[i] = pipelines[i]->GetLayout();
         }
         packet.retained = vr.restirDi;
+        packet.historyValid = vr.restirDi->history.CanReuse(frameIndex, generation,
+            vr.cameraHistory.CanReuse(frameIndex, generation));
         packet.width = vr.restirDi->width; packet.height = vr.restirDi->height;
         packet.scratch = vr.restirDi->restirReservoir; packet.spatial = vr.restirDi->restirSpatial;
         packet.sets = {vr.globalDescriptorSet[slot], vr.lightDescSet[slot], vr.restirDi->restirDescSet[slot],
@@ -577,7 +580,7 @@ namespace Luth
 
         RestirTemporalPC tpc{};
         tpc.invViewProj     = invVP;
-        tpc.mCap            = settings.temporalMCap;
+        tpc.mCap            = native.historyValid ? settings.temporalMCap : 0;
         tpc.frameSeed       = frameAbs;
         tpc.depthThreshold  = settings.temporalDepthThreshold;
         tpc.normalThreshold = settings.temporalNormalThreshold;

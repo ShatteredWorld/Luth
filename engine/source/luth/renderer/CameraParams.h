@@ -11,6 +11,9 @@ namespace Luth
     // luthien/. Populated by App before SystemRegistry::Update<RenderingSystem>().
     struct CameraParams
     {
+        // Owners change identity on camera replacement and revision on an explicit
+        // cut/teleport. Ordinary camera motion preserves both values.
+        u64 historyCamera = 0, historyRevision = 0;
         Mat4 view       = Mat4(1.0f);
         Mat4 projection = Mat4(1.0f);
         Vec3 position   = Vec3(0.0f);

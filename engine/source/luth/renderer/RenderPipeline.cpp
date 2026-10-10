@@ -530,6 +530,10 @@ namespace Luth
     void RenderPipeline::PrepareForTargets(FrameTargets& targets)
     {
         m_CurrentViewResources = &EnsureViewResources(targets);
+        m_CurrentViewResources->graphRecorded = false;
+        if (m_CurrentViewResources->restirDi) m_CurrentViewResources->restirDi->history.Begin();
+        if (m_CurrentViewResources->diDenoiser) m_CurrentViewResources->diDenoiser->history.Begin();
+        if (m_CurrentViewResources->diSpecDenoiser) m_CurrentViewResources->diSpecDenoiser->history.Begin();
         if (m_CurrentViewResources->taa) m_CurrentViewResources->taa->recorded = false;
     }
 
@@ -918,7 +922,11 @@ namespace Luth
             ViewRenderInputs inputs;
             inputs.id = view.id; inputs.resourceGeneration = m_CurrentViewResources->generation;
             inputs.width = m_CurrentViewResources->width; inputs.height = m_CurrentViewResources->height;
-            const std::array exports{RenderOutputBinding::Capture(DiUpscaleResources::Diffuse, denoisedDiffuse),
+            GraphTextureRef rawDiffuse, filteredDiffuse, filteredSpecular;
+            const std::array exports{RenderOutputBinding::Capture(RestirDiResources::Diffuse, rawDiffuse),
+                RenderOutputBinding::Capture(DiDenoiserResources::Diffuse, filteredDiffuse),
+                RenderOutputBinding::Capture(DiDenoiserResources::Specular, filteredSpecular),
+                RenderOutputBinding::Capture(DiUpscaleResources::Diffuse, denoisedDiffuse),
                 RenderOutputBinding::Capture(DiUpscaleResources::Specular, denoisedSpecular)};
             const auto built = m_RestirDiComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports);
             if (!built.success) {
@@ -926,6 +934,14 @@ namespace Luth
                     LH_LOG(Renderer, error, "ReSTIR DI composition: {}", diagnostic.message);
                 return false;
             }
+            // These receipts remain provisional until recording and submission succeed.
+            const auto generation = m_CurrentViewResources->generation;
+            if (rawDiffuse.handle.IsValid() && m_CurrentViewResources->restirDi)
+                m_CurrentViewResources->restirDi->history.Record(frameIndex, generation);
+            if (filteredDiffuse.handle.IsValid() && denoiser.ChainReady() && m_CurrentViewResources->diDenoiser)
+                m_CurrentViewResources->diDenoiser->history.Record(frameIndex, generation);
+            if (filteredSpecular.handle.IsValid() && specularDenoiser.ChainReady() && m_CurrentViewResources->diSpecDenoiser)
+                m_CurrentViewResources->diSpecDenoiser->history.Record(frameIndex, generation);
         }
         RG::ResourceHandle denoisedDIHandle = denoisedDiffuse.handle;
 
@@ -1417,6 +1433,7 @@ namespace Luth
                 m_CurrentViewResources ? m_CurrentViewResources->generation : 0, view.captureRequested);
             recordedSource = recording.Source();
             hasComputeWork = Renderer::RecordGraph(recorders, rg, timers);
+            m_CurrentViewResources->graphRecorded = true;
         }
         // Finalize capture (only the source view; matches the sink gate above).
         if (view.captureRequested && m_System.GetFrameDebugger().state == DebuggerState::CaptureRequested)

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "luth/renderer/features/RenderResource.h"
 #include "luth/renderer/features/rt/DiDenoiserViewState.h"
 #include "luth/renderer/settings/SvgfSettings.h"
@@ -26,6 +26,7 @@ namespace Luth
         VkImageView outputView = VK_NULL_HANDLE;
         std::shared_ptr<const DiDenoiserViewState> retained;
         SvgfSettings settings;
+        bool historyValid = false;
         RenderViewId view;
         u64 generation = 0, frameIndex = 0;
         u32 width = 0, height = 0, fullWidth = 0, fullHeight = 0;

@@ -27,6 +27,7 @@ namespace Luth
             if (!input) return nullptr;
             return signal == DiDenoiserSignal::Specular ? &input->restirDISpec : &input->restirDI;
         }
+        DiTemporalHistory history;
         RenderViewId id;
         u32 width = 0, height = 0;
         u64 sourceGeneration = 0;

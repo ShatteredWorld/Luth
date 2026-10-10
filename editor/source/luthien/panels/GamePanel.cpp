@@ -58,6 +58,7 @@ namespace Luth
         if (it == view.end()) return false;
 
         auto& cam = view.get<Camera>(*it);
+        out.historyCamera = static_cast<u64>(entt::to_integral(*it)) + 1;
         auto& xf  = view.get<WorldTransform>(*it);
 
         out.view = Math::Inverse(xf.Matrix);

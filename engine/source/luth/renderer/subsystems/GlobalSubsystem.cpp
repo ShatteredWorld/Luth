@@ -111,6 +111,13 @@ namespace Luth
         ubo.invViewProjection = Math::Inverse(ubo.viewProjection);
 
         if (vr) {
+            if (vr->historyCamera != camera.historyCamera || vr->historyRevision != camera.historyRevision)
+            {
+                vr->cameraHistory.Invalidate();
+                if (vr->taa) vr->taa->history.Invalidate();
+            }
+            vr->historyCamera = camera.historyCamera;
+            vr->historyRevision = camera.historyRevision;
             if (!vr->cameraHistory.CanReuse(Renderer::GetFrameData()->GetRenderFrameIndex(), vr->generation))
             {
                 vr->prevViewProj = ubo.viewProjection;

@@ -20,6 +20,7 @@ namespace Luth
         std::shared_ptr<const RestirDiViewState> retained;
         Mat4 inverseViewProjection{1.0f};
         RestirSettings settings;
+        bool historyValid = false;
         VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
         VkDeviceAddress geometryTable = 0;
         RenderViewId view;

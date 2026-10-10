@@ -1,4 +1,5 @@
 #pragma once
+#include "luth/renderer/features/rt/DiTemporalHistory.h"
 #include "luth/renderer/features/RenderViewState.h"
 #include "luth/renderer/resources/Texture.h"
 #include "luth/memory/GPUTaggedPageAllocator.h"
@@ -38,6 +39,7 @@ namespace Luth
         }
         static std::shared_ptr<RestirDiViewState> Create(RenderViewId, const ViewStateConfig&,
             VkDescriptorSetLayout, u32 scratchTag, u32 spatialTag);
+        DiTemporalHistory history;
         RenderViewId id;
         u32 width = 0, height = 0;
         Memory::GPUSubRegion restirReservoir{}, restirSpatial{};

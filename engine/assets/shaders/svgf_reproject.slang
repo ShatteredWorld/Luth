@@ -115,7 +115,9 @@ void main(uint3 tid : SV_DispatchThreadID)
     float  pHist  = 0.0;
     float  sumw   = 0.0;
     bool inBounds = all(prevUV >= float2(0.0)) && all(prevUV <= float2(1.0));
-    if (inBounds)
+    // A zero cap rejects previous images before any load. DI uses this sentinel
+    // for invalid history; other native channels keep their positive caps.
+    if (pc.historyCap > 0.0 && inBounds)
     {
         for (int i = 0; i < 4; ++i)
         {
