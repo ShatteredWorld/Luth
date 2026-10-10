@@ -49,6 +49,7 @@ add_library(Luth STATIC
     source/luth/renderer/features/rt/RtFogFeature.cpp
     source/luth/renderer/features/rt/RtSunShadowViewState.cpp
     source/luth/renderer/features/rt/DiDenoiserFeature.cpp
+    source/luth/renderer/features/rt/GiDenoiserFeature.cpp
     source/luth/renderer/features/rt/DiDenoiserViewState.cpp
     source/luth/renderer/features/rt/GiDenoiserViewState.cpp
     source/luth/renderer/features/rt/DiUpscaleViewState.cpp
@@ -193,6 +194,7 @@ add_library(Luth STATIC
     source/luth/renderer/subsystems/SkinningSubsystem.cpp
     source/luth/renderer/subsystems/SlangParityGuard.cpp
     source/luth/renderer/subsystems/SvgfDi.cpp
+    source/luth/renderer/subsystems/SvgfGi.cpp
     source/luth/renderer/subsystems/SvgfDenoiser.cpp
     source/luth/renderer/subsystems/TransparencySubsystem.cpp
     source/luth/renderer/subsystems/VolumetricSubsystem.cpp

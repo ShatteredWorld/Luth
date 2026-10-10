@@ -6,6 +6,7 @@
 #include "luth/renderer/features/rt/DiDenoiserViewState.h"
 #include "luth/renderer/features/rt/GiDenoiserViewState.h"
 #include "luth/renderer/features/rt/DiDenoiserBindings.h"
+#include "luth/renderer/features/rt/GiDenoiserBindings.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -52,6 +53,10 @@ namespace Luth
             u64 generation, const SvgfSettings&) const;
         static RG::ResourceHandle AddDiPasses(RG::RenderGraph&,
             const std::array<RG::ResourceHandle, 6>&, const DiDenoiserBindings&);
+        GiDenoiserBindings PrepareGiBindings(const ViewResources&, u64 frameIndex, RenderViewId,
+            u64 generation, const SvgfSettings&) const;
+        static RG::ResourceHandle AddGiPasses(RG::RenderGraph&,
+            const std::array<RG::ResourceHandle, 6>&, const GiDenoiserBindings&);
 
     private:
         void WriteNativeView(ViewResources&, FrameTargets&);

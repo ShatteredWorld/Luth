@@ -662,7 +662,8 @@ namespace Luth
         LH_PROFILE_FUNCTION();
         // Invalid input -> ReSTIR produced no DI this frame; return invalid so the GeometryPass skips
         // the read and pbr.frag runs its own light loop.
-        if (m_Channel == DenoiserChannel::Di || m_Channel == DenoiserChannel::DiSpecular || !in.di.IsValid()) return {};
+        if (m_Channel == DenoiserChannel::Di || m_Channel == DenoiserChannel::DiSpecular ||
+            m_Channel == DenoiserChannel::Gi || !in.di.IsValid()) return {};
 
         ViewResources* vr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
         if (!vr || (m_Channel == DenoiserChannel::DiSpecular && !vr->diSpecDenoiser)) return {};

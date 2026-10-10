@@ -58,6 +58,7 @@ add_executable(LuthTests
     renderer/RtSunShadowFeature.cpp
     renderer/RtSunShadowViewState.cpp
     renderer/DiDenoiserFeature.cpp
+    renderer/GiDenoiserFeature.cpp
     renderer/DiTemporalHistory.cpp
     renderer/DiDenoiserViewState.cpp
     renderer/GiDenoiserViewState.cpp

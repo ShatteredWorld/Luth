@@ -26,6 +26,7 @@
 #include "luth/renderer/features/rt/RtSunShadowFeature.h"
 #include "luth/renderer/features/rt/RestirDiFeature.h"
 #include "luth/renderer/features/rt/RestirGiFeature.h"
+#include "luth/renderer/features/rt/GiDenoiserFeature.h"
 #include "luth/renderer/features/rt/DiDenoiserFeature.h"
 #include "luth/renderer/features/rt/DiUpscaleFeature.h"
 #include "luth/renderer/features/rt/RtFogFeature.h"
@@ -178,8 +179,10 @@ namespace Luth
                 throw std::runtime_error("RT sun-shadow definition failed semantic validation");
             RenderPipelineDefinition giDefinition;
             giDefinition.AddFeature<RestirGiFeature>();
+            giDefinition.AddFeature<GiDenoiserFeature>();
             PipelineInputContract giInputs;
             giInputs.resources = {{RtSceneResources::Parameters}, {RestirGiResources::Bindings},
+                {GiDenoiserResources::Bindings}, {RenderResources::MaterialID}, {RenderResources::Roughness},
                 {RenderResources::SurfaceDepth}, {RenderResources::Normal}, {RenderResources::MotionVectors},
                 {RenderResources::LightData}, {RtSceneResources::Scene, ResourceOutputPresence::Optional}};
             giInputs.capabilities = {&RtSceneResources::RayScene};
@@ -964,15 +967,21 @@ namespace Luth
         // ReSTIR GI: 1-bounce indirect diffuse via per-pixel reservoir resampling. Returns the demodulated
         // GI image; restirParams.y gates the remodulation in pbr.frag. Invalid when disabled / no TLAS.
         GraphBufferRef giSpatialReservoir;
-        GraphTextureRef rawGi;
+        GraphTextureRef filteredGi;
         if (m_RestirGiComposition) {
             const auto frameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
             const auto native = m_RestirGi.PrepareBindings(*m_CurrentViewResources, frameIndex, view.id,
                 m_CurrentViewResources->generation, rayScene.native, s.GetRestirGiSettings(),
                 Math::Inverse(m_Global.GetCachedViewProj()), lightSSBORegion);
             const RestirGiBindingRef binding{&native};
+            const auto denoiser = static_cast<SvgfDenoiser&>(*m_DenoiseGi).PrepareGiBindings(*m_CurrentViewResources, frameIndex,
+                view.id, m_CurrentViewResources->generation, s.GetSvgfGiSettings());
+            const GiDenoiserBindingRef denoiserBinding{&denoiser};
             const std::array resources{RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters),
                 RenderInputBinding::Present(RestirGiResources::Bindings, binding),
+                RenderInputBinding::Present(GiDenoiserResources::Bindings, denoiserBinding),
+                RenderInputBinding::Present(RenderResources::MaterialID, materialOutput),
+                RenderInputBinding::Present(RenderResources::Roughness, roughnessOutput),
                 RenderInputBinding::Present(RenderResources::LightData, uploadedLights),
                 RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
                 RenderInputBinding::Present(RenderResources::Normal, normalOutput),
@@ -982,7 +991,7 @@ namespace Luth
             if (rayScene.native) frame.capabilities = RtSceneResources::Requests;
             ViewRenderInputs inputs; inputs.id = view.id; inputs.resourceGeneration = m_CurrentViewResources->generation;
             inputs.width = m_CurrentViewResources->width; inputs.height = m_CurrentViewResources->height;
-            const std::array exports{RenderOutputBinding::Capture(RestirGiResources::Diffuse, rawGi),
+            const std::array exports{RenderOutputBinding::Capture(GiDenoiserResources::Diffuse, filteredGi),
                 RenderOutputBinding::Capture(GiReservoirVizResources::SpatialReservoir, giSpatialReservoir)};
             const auto built = m_RestirGiComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports);
             if (!built.success) {
@@ -991,14 +1000,7 @@ namespace Luth
                 return false;
             }
         }
-        const auto giDIHandle = rawGi.handle;
-
-        // Denoise the demodulated GI (second SVGF instance, DenoiserChannel::Gi). Same transparent-filter
-        // contract as DI: consumes the GI handle, returns the denoised handle GeometryPass reads + Set 3 b6
-        // binds. Invalid in -> invalid out (pbr.frag then adds nothing under the .y gate).
-        RG::ResourceHandle denoisedGiHandle = m_DenoiseGi->AddPasses(rg, DenoiseInputs{
-            giDIHandle, surfaceDepth.handle, slimGB.normal, slimGB.motion,
-            slimGB.roughness, slimGB.materialID, {}, {} });
+        RG::ResourceHandle denoisedGiHandle = filteredGi.handle;
         // Half-res GI: AddPasses returns the half-res svgfGiHalf handle; bilaterally upscale it into the
         // full-res svgfGiDenoised that GeometryPass / pbr Set 3 b6 consume. Full-res mode is a no-op.
         if (denoisedGiHandle.IsValid() && m_System.GetRestirGiSettings().halfResolution)
