@@ -27,6 +27,7 @@ namespace Luth
         }
         RenderViewId id;
         u32 width = 0, height = 0;
+        TemporalSignalHistory history;
         u64 sourceGeneration = 0;
         std::shared_ptr<Texture> svgfDenoised, svgfGiHalf;
         std::shared_ptr<Texture> svgfColorHist[2], svgfMoments[2], svgfGeom[2], svgfAtrous[2];

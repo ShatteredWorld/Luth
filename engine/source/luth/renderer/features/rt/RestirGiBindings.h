@@ -20,10 +20,15 @@ namespace Luth
         std::shared_ptr<const RestirGiViewState> retained;
         Mat4 inverseViewProjection{1.0f};
         RestirGiSettings settings;
+        bool historyValid = false;
         VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
         VkDeviceAddress geometryTable = 0;
         RenderViewId view;
         u64 generation = 0, frameIndex = 0;
         u32 width = 0, height = 0, fullWidth = 0, fullHeight = 0;
+        u32 TemporalCapAndAge() const {
+            return (historyValid ? settings.temporalMCap & 0xFFFFu : 0u)
+                | ((settings.maxReservoirAge & 0xFFFFu) << 16);
+        }
     };
 }

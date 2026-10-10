@@ -41,6 +41,8 @@ namespace Luth
             throw std::invalid_argument("DenoiseGI: incompatible native view owner");
         native.retained = owner; native.settings = settings;
         native.view = id; native.generation = generation; native.frameIndex = frame;
+        native.historyValid = state.history.CanReuse(frame, generation,
+            vr.cameraHistory.CanReuse(frame, generation)) && state.input->history.CanReuse(frame, generation, true);
         native.fullWidth = vr.width; native.fullHeight = vr.height;
         native.width = state.width; native.height = state.height;
         const u32 parity = static_cast<u32>(frame & 1u);
@@ -93,7 +95,7 @@ namespace Luth
         const auto& s = native.settings;
         const i32 scale = native.width == native.fullWidth && native.height == native.fullHeight ? 1 : 2;
         const i32 width = static_cast<i32>(native.width), height = static_cast<i32>(native.height);
-        const ReprojectPC rpc{s.alphaColor, s.alphaMoments, static_cast<f32>(s.historyCap), s.depthThreshold,
+        const ReprojectPC rpc{s.alphaColor, s.alphaMoments, native.historyValid ? static_cast<f32>(s.historyCap) : 0.0f, s.depthThreshold,
             s.normalThreshold, scale, width, height, s.antiFireflySigma, s.confidenceScale};
         const MomentsPC mpc{s.phiDepth, s.phiNormal, scale, width, height};
         struct ReprojectData { RG::ResourceHandle color, moments; };

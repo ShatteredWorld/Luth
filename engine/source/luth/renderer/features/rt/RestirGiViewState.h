@@ -1,4 +1,5 @@
 #pragma once
+#include "luth/renderer/features/rt/TemporalSignalHistory.h"
 
 #include "luth/renderer/features/RenderViewState.h"
 #include "luth/renderer/resources/Texture.h"
@@ -41,6 +42,7 @@ namespace Luth
             VkDescriptorSetLayout, VkDescriptorSetLayout vizLayout, u32 scratchTag, u32 spatialTag);
         RenderViewId id;
         u32 width = 0, height = 0;
+        TemporalSignalHistory history;
         Memory::GPUSubRegion restirGiReservoir{}, restirGiSpatial{};
         u32 restirGiReservoirTag = 0, restirGiSpatialTag = 0;
         std::shared_ptr<Texture> restirGiDI;

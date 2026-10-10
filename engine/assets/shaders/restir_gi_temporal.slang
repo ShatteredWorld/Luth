@@ -43,6 +43,9 @@ void main(uint3 tid : SV_DispatchThreadID)
     int2 pixel = int2(tid.xy);
     int2 size  = int2(pc.dispatchW, pc.dispatchH);
     if (pixel.x >= size.x || pixel.y >= size.y) return;
+    // Zero history cap is the reset sentinel. Preserve the fresh initial candidate
+    // and reject reuse before reading the persistent spatial reservoir.
+    if ((pc.mCapMaxAge & 0xFFFFu) == 0u) return;
     uint flatIdx = uint(pixel.y) * uint(size.x) + uint(pixel.x);
 
     float depth = u_CurrDepth.Load(int3(GiGuide(pixel), 0)).r;

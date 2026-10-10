@@ -60,6 +60,7 @@ add_executable(LuthTests
     renderer/DiDenoiserFeature.cpp
     renderer/GiDenoiserFeature.cpp
     renderer/DiTemporalHistory.cpp
+    renderer/GiTemporalHistory.cpp
     renderer/DiDenoiserViewState.cpp
     renderer/GiDenoiserViewState.cpp
     renderer/DiUpscaleViewState.cpp

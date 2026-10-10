@@ -553,6 +553,8 @@ namespace Luth
         if (m_CurrentViewResources->restirDi) m_CurrentViewResources->restirDi->history.Begin();
         if (m_CurrentViewResources->diDenoiser) m_CurrentViewResources->diDenoiser->history.Begin();
         if (m_CurrentViewResources->diSpecDenoiser) m_CurrentViewResources->diSpecDenoiser->history.Begin();
+        if (m_CurrentViewResources->restirGi) m_CurrentViewResources->restirGi->history.Begin();
+        if (m_CurrentViewResources->giDenoiser) m_CurrentViewResources->giDenoiser->history.Begin();
         if (m_CurrentViewResources->taa) m_CurrentViewResources->taa->recorded = false;
     }
 
@@ -970,7 +972,7 @@ namespace Luth
         // ReSTIR GI: 1-bounce indirect diffuse via per-pixel reservoir resampling. Returns the demodulated
         // GI image; restirParams.y gates the remodulation in pbr.frag. Invalid when disabled / no TLAS.
         GraphBufferRef giSpatialReservoir;
-        GraphTextureRef filteredGi;
+        GraphTextureRef rawGi, denoisedGi, filteredGi;
         if (m_RestirGiComposition) {
             const auto frameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
             const auto native = m_RestirGi.PrepareBindings(*m_CurrentViewResources, frameIndex, view.id,
@@ -999,6 +1001,8 @@ namespace Luth
             ViewRenderInputs inputs; inputs.id = view.id; inputs.resourceGeneration = m_CurrentViewResources->generation;
             inputs.width = m_CurrentViewResources->width; inputs.height = m_CurrentViewResources->height;
             const std::array exports{RenderOutputBinding::Capture(GiUpscaleResources::Diffuse, filteredGi),
+                RenderOutputBinding::Capture(RestirGiResources::Diffuse, rawGi),
+                RenderOutputBinding::Capture(GiDenoiserResources::Diffuse, denoisedGi),
                 RenderOutputBinding::Capture(GiReservoirVizResources::SpatialReservoir, giSpatialReservoir)};
             const auto built = m_RestirGiComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports);
             if (!built.success) {
@@ -1006,6 +1010,11 @@ namespace Luth
                     LH_LOG(Renderer, error, "ReSTIR GI composition: {}", diagnostic.message);
                 return false;
             }
+            const auto generation = m_CurrentViewResources->generation;
+            if (rawGi.handle.IsValid() && m_CurrentViewResources->restirGi)
+                m_CurrentViewResources->restirGi->history.Record(frameIndex, generation);
+            if (denoisedGi.handle.IsValid() && denoiser.ChainReady() && m_CurrentViewResources->giDenoiser)
+                m_CurrentViewResources->giDenoiser->history.Record(frameIndex, generation);
         }
         RG::ResourceHandle denoisedGiHandle = filteredGi.handle;
 

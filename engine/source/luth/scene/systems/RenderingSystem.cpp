@@ -32,6 +32,8 @@ namespace Luth
             if (state->restirDi) state->restirDi->history.Finish(frame, state->generation, success);
             if (state->diDenoiser) state->diDenoiser->history.Finish(frame, state->generation, success);
             if (state->diSpecDenoiser) state->diSpecDenoiser->history.Finish(frame, state->generation, success);
+            if (state->restirGi) state->restirGi->history.Finish(frame, state->generation, success);
+            if (state->giDenoiser) state->giDenoiser->history.Finish(frame, state->generation, success);
             if (success) state->cameraHistory.Commit(frame, state->generation);
             else state->cameraHistory.Invalidate();
             if (state->taa)

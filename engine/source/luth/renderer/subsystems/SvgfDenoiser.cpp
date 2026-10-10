@@ -386,6 +386,7 @@ namespace Luth
             m_PassthroughPipeline = std::make_unique<VKComputePipeline>(
                 m_PassthroughSpv, layouts, std::vector<VkPushConstantRange>{});
             m_DiViews.ForEach([](auto& state) { state->history.Invalidate(); });
+            m_GiViews.ForEach([](auto& state) { state->history.Invalidate(); });
             return true;
         }
         const char* myReproj = (m_Channel == DenoiserChannel::Reflections)
@@ -401,6 +402,7 @@ namespace Luth
             m_ReprojectPipeline = std::make_unique<VKComputePipeline>(
                 m_ReprojectSpv, layouts, std::vector<VkPushConstantRange>{ pcRange });
             m_DiViews.ForEach([](auto& state) { state->history.Invalidate(); });
+            m_GiViews.ForEach([](auto& state) { state->history.Invalidate(); });
             return true;
         }
         if (name == "svgf_moments.slang" && m_MomentsLayout != VK_NULL_HANDLE)
@@ -414,6 +416,7 @@ namespace Luth
             m_MomentsPipeline = std::make_unique<VKComputePipeline>(
                 m_MomentsSpv, layouts, std::vector<VkPushConstantRange>{ pcRange });
             m_DiViews.ForEach([](auto& state) { state->history.Invalidate(); });
+            m_GiViews.ForEach([](auto& state) { state->history.Invalidate(); });
             return true;
         }
         if (name == "svgf_atrous.slang" && m_AtrousLayout != VK_NULL_HANDLE)
@@ -427,6 +430,7 @@ namespace Luth
             m_AtrousPipeline = std::make_unique<VKComputePipeline>(
                 m_AtrousSpv, layouts, std::vector<VkPushConstantRange>{ pcRange });
             m_DiViews.ForEach([](auto& state) { state->history.Invalidate(); });
+            m_GiViews.ForEach([](auto& state) { state->history.Invalidate(); });
             return true;
         }
         return false;
