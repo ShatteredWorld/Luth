@@ -51,6 +51,7 @@ add_library(Luth STATIC
     source/luth/renderer/features/rt/DiDenoiserFeature.cpp
     source/luth/renderer/features/rt/DiDenoiserViewState.cpp
     source/luth/renderer/features/rt/DiUpscaleViewState.cpp
+    source/luth/renderer/features/rt/DiUpscaleFeature.cpp
     source/luth/renderer/features/rt/RestirDiViewState.cpp
     source/luth/renderer/features/rt/RestirDiFeature.cpp
     source/luth/renderer/features/DeformationFeature.cpp

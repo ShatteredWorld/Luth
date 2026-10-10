@@ -56,8 +56,6 @@ namespace Luth
             const std::shared_ptr<DiDenoiserViewState>&, const std::shared_ptr<DiDenoiserViewState>&);
         DiUpscaleBindings PrepareUpscaleBindings(const ViewResources&, u64 frameIndex, RenderViewId,
             u64 generation, DiDenoiserSignal, const RestirSettings&) const;
-        RG::ResourceHandle AddUpscalePass(RG::RenderGraph& rg, RG::ResourceHandle half,
-                                          RG::ResourceHandle sceneDepth, RG::ResourceHandle slimNormal, bool specular);
         static RG::ResourceHandle AddUpscalePass(RG::RenderGraph&, const std::array<RG::ResourceHandle, 3>&,
             const DiUpscaleBindings&);
 

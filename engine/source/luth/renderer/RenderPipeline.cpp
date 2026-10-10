@@ -26,6 +26,7 @@
 #include "luth/renderer/features/rt/RtSunShadowFeature.h"
 #include "luth/renderer/features/rt/RestirDiFeature.h"
 #include "luth/renderer/features/rt/DiDenoiserFeature.h"
+#include "luth/renderer/features/rt/DiUpscaleFeature.h"
 #include "luth/renderer/features/rt/RtFogFeature.h"
 #include "luth/renderer/features/SkyFeature.h"
 #include "luth/renderer/features/ForwardOpaqueCompatibility.h"
@@ -177,9 +178,12 @@ namespace Luth
             diDefinition.AddFeature<RestirDiFeature>();
             diDefinition.AddFeature<DiDenoiserFeature>();
             diDefinition.AddFeature<DiDenoiserFeature>(DiDenoiserSignal::Specular);
+            diDefinition.AddFeature<DiUpscaleFeature>();
+            diDefinition.AddFeature<DiUpscaleFeature>(DiDenoiserSignal::Specular);
             PipelineInputContract diInputs;
             diInputs.resources = {{RtSceneResources::Parameters}, {RestirDiResources::Bindings}, {DiDenoiserResources::Bindings},
-                {DiDenoiserResources::SpecularBindings}, {RenderResources::MaterialID},
+                {DiDenoiserResources::SpecularBindings}, {DiUpscaleResources::Bindings},
+                {DiUpscaleResources::SpecularBindings}, {RenderResources::MaterialID},
                 {RenderResources::SurfaceDepth}, {RenderResources::Normal}, {RenderResources::MotionVectors},
                 {RenderResources::Roughness}, {RenderResources::LightData}, {RtSceneResources::Scene, ResourceOutputPresence::Optional}};
             diInputs.capabilities = {&RtSceneResources::RayScene};
@@ -890,10 +894,17 @@ namespace Luth
             const auto specularDenoiser = static_cast<SvgfDenoiser*>(m_DenoiseDiSpec.get())->PrepareDiBindings(
                 *m_CurrentViewResources, frameIndex, view.id, m_CurrentViewResources->generation, s.GetSvgfDiSpecSettings());
             const DiDenoiserBindingRef specularBinding{&specularDenoiser};
+            const auto upscale = m_Restir.PrepareUpscaleBindings(*m_CurrentViewResources, frameIndex, view.id,
+                m_CurrentViewResources->generation, DiDenoiserSignal::Diffuse, s.GetRestirSettings());
+            const auto specularUpscale = m_Restir.PrepareUpscaleBindings(*m_CurrentViewResources, frameIndex, view.id,
+                m_CurrentViewResources->generation, DiDenoiserSignal::Specular, s.GetRestirSettings());
+            const DiUpscaleBindingRef upscaleBinding{&upscale}, specularUpscaleBinding{&specularUpscale};
             const std::array resources{RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters),
                 RenderInputBinding::Present(RestirDiResources::Bindings, binding),
                 RenderInputBinding::Present(DiDenoiserResources::Bindings, denoiserBinding),
                 RenderInputBinding::Present(DiDenoiserResources::SpecularBindings, specularBinding),
+                RenderInputBinding::Present(DiUpscaleResources::Bindings, upscaleBinding),
+                RenderInputBinding::Present(DiUpscaleResources::SpecularBindings, specularUpscaleBinding),
                 RenderInputBinding::Present(RenderResources::MaterialID, materialOutput),
                 RenderInputBinding::Present(RenderResources::LightData, uploadedLights),
                 RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
@@ -907,8 +918,8 @@ namespace Luth
             ViewRenderInputs inputs;
             inputs.id = view.id; inputs.resourceGeneration = m_CurrentViewResources->generation;
             inputs.width = m_CurrentViewResources->width; inputs.height = m_CurrentViewResources->height;
-            const std::array exports{RenderOutputBinding::Capture(DiDenoiserResources::Diffuse, denoisedDiffuse),
-                RenderOutputBinding::Capture(DiDenoiserResources::Specular, denoisedSpecular)};
+            const std::array exports{RenderOutputBinding::Capture(DiUpscaleResources::Diffuse, denoisedDiffuse),
+                RenderOutputBinding::Capture(DiUpscaleResources::Specular, denoisedSpecular)};
             const auto built = m_RestirDiComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports);
             if (!built.success) {
                 for (const auto& diagnostic : built.diagnostics)
@@ -920,15 +931,6 @@ namespace Luth
 
         // The optional raw specular producer gates its denoiser through the typed contract.
         RG::ResourceHandle denoisedDiSpecHandle = denoisedSpecular.handle;
-        // Half-res DI: AddPasses returns the half svgfDiHalf / svgfDiSpecHalf handles; bilaterally upscale
-        // each into the full svgfDenoised / svgfDiSpecDenoised that GeometryPass / pbr Set 3 b5/b8 consume.
-        if (m_System.GetRestirSettings().halfResolution)
-        {
-            if (denoisedDIHandle.IsValid())
-                denoisedDIHandle = m_Restir.AddUpscalePass(rg, denoisedDIHandle, surfaceDepth.handle, slimGB.normal, false);
-            if (denoisedDiSpecHandle.IsValid())
-                denoisedDiSpecHandle = m_Restir.AddUpscalePass(rg, denoisedDiSpecHandle, surfaceDepth.handle, slimGB.normal, true);
-        }
 
         // ReSTIR GI: 1-bounce indirect diffuse via per-pixel reservoir resampling. Returns the demodulated
         // GI image; restirParams.y gates the remodulation in pbr.frag. Invalid when disabled / no TLAS.

@@ -853,15 +853,18 @@ namespace Luth
         if (signal != DiDenoiserSignal::Diffuse && signal != DiDenoiserSignal::Specular)
             throw std::invalid_argument("DI upscale: invalid signal");
         DiUpscaleBindings native;
-        if (!m_UpscalePipeline || !vr.diUpscale) return native;
+        if (!vr.diUpscale) return native;
         const auto& state = *vr.diUpscale;
         const u32 channel = signal == DiDenoiserSignal::Specular ? 1u : 0u;
         const auto& owner = state.denoisers[channel];
         if (state.id != id || !owner || owner->id != id || owner->signal != signal)
             throw std::invalid_argument("DI upscale: incompatible view owner");
         native.signal = signal; native.view = id; native.generation = generation; native.frameIndex = frame;
-        native.retained = vr.diUpscale; native.pipeline = m_UpscalePipeline->GetHandle();
-        native.layout = m_UpscalePipeline->GetLayout(); native.set = state.sets[channel];
+        native.retained = vr.diUpscale;
+        if (m_UpscalePipeline) {
+            native.pipeline = m_UpscalePipeline->GetHandle(); native.layout = m_UpscalePipeline->GetLayout();
+        }
+        native.set = state.sets[channel];
         native.globalSet = vr.globalDescriptorSet[frame % MAX_FRAMES_IN_FLIGHT];
         native.width = owner->width; native.height = owner->height;
         native.fullWidth = vr.width; native.fullHeight = vr.height;
@@ -878,17 +881,6 @@ namespace Luth
         }
         freeze(owner->svgfDenoised, native.output, native.outputImage, native.outputView);
         return native;
-    }
-
-    RG::ResourceHandle RtRestirSubsystem::AddUpscalePass(RG::RenderGraph& graph, RG::ResourceHandle half,
-        RG::ResourceHandle depth, RG::ResourceHandle normal, bool specular)
-    {
-        if (!half.IsValid() || !m_Pipeline || !m_Pipeline->GetCurrentViewResources()) return half;
-        const auto& vr = *m_Pipeline->GetCurrentViewResources();
-        const auto native = PrepareUpscaleBindings(vr, Renderer::GetFrameData()->GetRenderFrameIndex(),
-            {vr.id}, vr.generation, specular ? DiDenoiserSignal::Specular : DiDenoiserSignal::Diffuse,
-            m_Pipeline->GetSystem().GetRestirSettings());
-        return AddUpscalePass(graph, {half, depth, normal}, native);
     }
 
     RG::ResourceHandle RtRestirSubsystem::AddUpscalePass(RG::RenderGraph& graph,
