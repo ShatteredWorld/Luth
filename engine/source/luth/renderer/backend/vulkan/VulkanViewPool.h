@@ -23,10 +23,10 @@ namespace Luth
             {
                 // Preserve the existing hybrid budget during domain migration.
                 count = 5;
-                maxSets = 205 - 15 * frames - 49;
+                maxSets = 205 - 15 * frames - 50;
                 sizes[0] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 48 - 4 * frames};
-                sizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 248 - 11 * frames - 117};
-                sizes[2] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 317 - 32 * frames - 118};
+                sizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 248 - 11 * frames - 118};
+                sizes[2] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 317 - 32 * frames - 121};
                 sizes[3] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 126 - 11 * frames - 2};
                 sizes[4] = {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 8};
             }

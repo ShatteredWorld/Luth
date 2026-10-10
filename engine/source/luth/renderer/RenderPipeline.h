@@ -4,6 +4,7 @@
 #include "luth/renderer/features/rt/ReflectionDenoiserViewState.h"
 #include "luth/renderer/features/rt/DiUpscaleViewState.h"
 #include "luth/renderer/features/rt/GiUpscaleViewState.h"
+#include "luth/renderer/features/rt/ReflectionUpscaleViewState.h"
 
 #include "luth/core/types/LuthMath.h"
 #include "luth/core/UUID.h"
@@ -200,7 +201,7 @@ namespace Luth
         u64                      ptResetHash = 0;
 
         std::shared_ptr<ReflectionViewState> reflection; // Borrowed raw reflection domain state.
-        VkDescriptorSet          reflUpscaleDescSet = VK_NULL_HANDLE;   // half-res reflection bilateral-upscale set
+        std::shared_ptr<ReflectionUpscaleViewState> reflectionUpscale; // Borrowed immutable reflection upscale bindings.
     };
 
     // Orchestrates per-frame render-graph assembly and execution. Created by RenderingSystem and

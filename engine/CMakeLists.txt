@@ -60,8 +60,10 @@ add_library(Luth STATIC
     source/luth/renderer/features/rt/ReflectionFeature.cpp
     source/luth/renderer/features/rt/ReflectionDenoiserViewState.cpp
     source/luth/renderer/features/rt/ReflectionDenoiserFeature.cpp
+    source/luth/renderer/features/rt/ReflectionUpscaleViewState.cpp
     source/luth/renderer/features/rt/ReflectionViewState.cpp
     source/luth/renderer/subsystems/ReflectionViewResources.cpp
+    source/luth/renderer/subsystems/ReflectionUpscale.cpp
     source/luth/renderer/features/rt/RestirGiViewState.cpp
     source/luth/renderer/features/rt/RestirDiFeature.cpp
     source/luth/renderer/features/rt/RestirGiFeature.cpp

@@ -34,6 +34,7 @@ namespace Luth
     }
     void ReflectionsSubsystem::ReleaseView(RenderViewId id)
     {
+        m_UpscaleViews.Release(id, [] { Renderer::WaitForGPU(); });
         m_Views.Release(id, [] { Renderer::WaitForGPU(); });
     }
 }

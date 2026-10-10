@@ -1075,7 +1075,13 @@ namespace Luth
         RG::ResourceHandle denoisedReflHandle = denoisedReflection.handle;
         // Bilateral upscale bridges the working signal into the full output consumed by Set 3 b7.
         if (denoisedReflHandle.IsValid() && m_System.GetReflectionsSettings().halfResolution)
-            denoisedReflHandle = m_Reflections.AddUpscalePass(rg, denoisedReflHandle, surfaceDepth.handle, slimGB.normal);
+        {
+            const auto frameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            const auto upscale = m_Reflections.PrepareUpscaleBindings(*m_CurrentViewResources, frameIndex,
+                view.id, m_CurrentViewResources->generation, s.GetSvgfSpecSettings());
+            denoisedReflHandle = ReflectionsSubsystem::AddUpscalePass(rg,
+                {denoisedReflHandle, surfaceDepth.handle, slimGB.normal}, upscale);
+        }
 
         // Legacy depth/geometry bridge shares graph-local references with the compiled
         // feature. Disabled/PT frames publish absent AO and register no GTAO passes.

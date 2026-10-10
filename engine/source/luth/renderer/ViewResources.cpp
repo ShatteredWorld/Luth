@@ -117,6 +117,10 @@ namespace Luth
         const bool reflectionDenoiserReplaced = vr.reflectionDenoiser && vr.reflectionDenoiser != reflectionDenoiser;
         vr.reflectionDenoiser = std::move(reflectionDenoiser);
         if (reflectionDenoiserReplaced) vr.generation = m_System.InvalidateView(id);
+        auto reflectionUpscale = m_RtNativeInitialized ? m_Reflections.EnsureUpscaleView(id, targets, vr.reflectionDenoiser) : nullptr;
+        const bool reflectionUpscaleReplaced = vr.reflectionUpscale && vr.reflectionUpscale != reflectionUpscale;
+        vr.reflectionUpscale = std::move(reflectionUpscale);
+        if (reflectionUpscaleReplaced) vr.generation = m_System.InvalidateView(id);
 
         auto restirGi = m_RtNativeInitialized ? m_RestirGi.EnsureView(id, targets,
             m_System.GetRestirGiSettings().halfResolution) : nullptr;
@@ -167,7 +171,6 @@ namespace Luth
             if (m_RtNativeInitialized)
             {
                 m_PathTrace.WriteView(vr);              // re-bind PT accumulator + display image (recreated on resize)
-                m_Reflections.WriteUpscaleView(vr, targets);    // re-bind refl upscale half-input + full output
 
             }
             m_Lighting.WriteShadowView(vr);         // re-bind Set 3 b4 sun mask + b5 denoised DI + b6 denoised GI
@@ -176,7 +179,6 @@ namespace Luth
         }
 
         if (reflectionDenoiserReplaced && m_RtNativeInitialized) {
-            m_Reflections.WriteUpscaleView(vr, targets);
             m_Lighting.WriteShadowView(vr);
         }
         if (giDenoiserReplaced && m_RtNativeInitialized) {
@@ -305,13 +307,11 @@ namespace Luth
         if (m_RtNativeInitialized)
         {
             allocSingle(m_PathTrace.GetSetLayout(),          vr.ptDescSet,            "View.PathTrace");
-            allocSingle(m_Reflections.GetUpscaleLayout(),    vr.reflUpscaleDescSet,   "View.ReflUpscale");
         }
         m_Lighting.WriteShadowView(vr);
         if (m_RtNativeInitialized)
         {
             m_PathTrace.WriteView(vr);
-            m_Reflections.WriteUpscaleView(vr, targets);    // bind refl upscale half-input + full output
 
         }
         // Global writes borrow the final AO binding from the independent GTAO state.
@@ -395,6 +395,7 @@ namespace Luth
         vr.restirGi.reset();
         vr.diUpscale.reset();
         vr.giUpscale.reset();
+        vr.reflectionUpscale.reset();
         vr.diDenoiser.reset();
         vr.giDenoiser.reset();
         vr.ptAccum.reset();

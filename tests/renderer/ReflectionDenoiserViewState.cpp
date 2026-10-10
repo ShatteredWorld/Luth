@@ -1,3 +1,4 @@
+#include "luth/renderer/features/rt/ReflectionUpscaleViewState.h"
 #include <doctest/doctest.h>
 #include "luth/renderer/features/rt/ReflectionDenoiserViewState.h"
 #include "luth/renderer/subsystems/SvgfDenoiser.h"
@@ -92,9 +93,9 @@ TEST_CASE("ReflectionDenoiserViewState: local descriptor budget covers both temp
     CHECK(budget.sizes[1].descriptorCount == 1 + 2 * 6 + 2 * 3 + 2 * 3);
     for (const u32 frames : {2u, 3u}) {
         const VulkanViewPool shared(true, frames);
-        CHECK(shared.maxSets + budget.maxSets == 205 - 15 * frames - 42);
-        CHECK(shared.sizes[1].descriptorCount + budget.sizes[1].descriptorCount == 248 - 11 * frames - 92);
-        CHECK(shared.sizes[2].descriptorCount + budget.sizes[0].descriptorCount == 317 - 32 * frames - 97);
+        CHECK(shared.maxSets + ReflectionUpscalePoolBudget{}.maxSets + budget.maxSets == 205 - 15 * frames - 42);
+        CHECK(shared.sizes[1].descriptorCount + ReflectionUpscalePoolBudget{}.sizes[1].descriptorCount + budget.sizes[1].descriptorCount == 248 - 11 * frames - 92);
+        CHECK(shared.sizes[2].descriptorCount + ReflectionUpscalePoolBudget{}.sizes[0].descriptorCount + budget.sizes[0].descriptorCount == 317 - 32 * frames - 97);
     }
 }
 

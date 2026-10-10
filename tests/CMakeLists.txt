@@ -71,6 +71,7 @@ add_executable(LuthTests
     renderer/ReflectionFeature.cpp
     renderer/ReflectionDenoiserViewState.cpp
     renderer/ReflectionDenoiserFeature.cpp
+    renderer/ReflectionUpscaleViewState.cpp
     renderer/ReflectionViewState.cpp
     renderer/RestirGiViewState.cpp
     renderer/RestirDiFeature.cpp

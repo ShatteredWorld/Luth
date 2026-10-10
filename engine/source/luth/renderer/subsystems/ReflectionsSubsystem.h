@@ -3,6 +3,7 @@
 #include "luth/core/types/LuthTypes.h"
 #include "luth/renderer/features/rt/ReflectionViewState.h"
 #include "luth/renderer/features/rt/ReflectionBindings.h"
+#include "luth/renderer/features/rt/ReflectionUpscaleViewState.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 
@@ -16,6 +17,7 @@ namespace Luth
     class FrameTargets;
     struct ViewResources;
     struct PreparedRtScene;
+    struct SvgfSettings;
 
     // RT specular reflections. A rayQuery-in-compute pass that casts one GGX-VNDF
     // reflection ray per opaque pixel from the slim G-buffer (oct normal + roughness + depth), shades the
@@ -54,13 +56,13 @@ namespace Luth
 
         VkDescriptorSetLayout GetSetLayout() const { return m_SetLayout; }
 
-        // Half-res reflections bilateral upscale (shared bilateral_upscale.slang): resolves the half-res
-        // svgfSpecHalf into the full-res svgfSpecDenoised, depth/normal-guided. Only wired when
-        // ReflectionsSettings::halfResolution. Mirrors RtRestirGiSubsystem's upscale.
-        VkDescriptorSetLayout GetUpscaleLayout() const { return m_UpscaleSetLayout; }
-        void WriteUpscaleView(ViewResources& vr, FrameTargets& targets);
-        RG::ResourceHandle AddUpscalePass(RG::RenderGraph& rg, RG::ResourceHandle reflHalf,
-                                          RG::ResourceHandle sceneDepth, RG::ResourceHandle slimNormal);
+        // Immutable per-view bilateral-upscale bindings borrow the denoiser and guides.
+        std::shared_ptr<ReflectionUpscaleViewState> EnsureUpscaleView(RenderViewId, const FrameTargets&,
+            const std::shared_ptr<ReflectionDenoiserViewState>&);
+        ReflectionUpscaleBindings PrepareUpscaleBindings(const ViewResources&, u64 frameIndex,
+            RenderViewId, u64 generation, const SvgfSettings&) const;
+        static RG::ResourceHandle AddUpscalePass(RG::RenderGraph&,
+            const std::array<RG::ResourceHandle, 3>&, const ReflectionUpscaleBindings&);
 
         // ReflectionsSettings::enabled is the gate. Out-of-line: needs the RenderingSystem definition,
         // which can't be pulled into this header (RenderPipeline include cycle).
@@ -68,6 +70,8 @@ namespace Luth
 
     private:
         ReflectionViewStates m_Views;
+        ReflectionUpscaleViewStates m_UpscaleViews;
+        u64 m_NextUpscaleGeneration = 1;
         u64 m_NextSourceGeneration = 1;
         RenderPipeline* m_Pipeline = nullptr;
 

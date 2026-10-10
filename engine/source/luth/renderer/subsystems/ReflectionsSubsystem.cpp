@@ -141,6 +141,7 @@ namespace Luth
     void ReflectionsSubsystem::Shutdown()
     {
         LH_PROFILE_FUNCTION();
+        m_UpscaleViews.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_Views.ReleaseAll([] { Renderer::WaitForGPU(); });
         VkDevice device = VulkanContext::Get().GetDevice();
         m_ReflPipeline.reset();
@@ -345,95 +346,4 @@ namespace Luth
         return reflHandle;
     }
 
-    void ReflectionsSubsystem::WriteUpscaleView(ViewResources& vr, FrameTargets& targets)
-    {
-        LH_PROFILE_FUNCTION();
-        if (vr.reflUpscaleDescSet == VK_NULL_HANDLE || !vr.reflectionDenoiser) return;
-        if (!vr.reflectionDenoiser->svgfHalf || !vr.reflectionDenoiser->svgfDenoised || !targets.GetSceneDepth() || !targets.GetSlimNormal()) return;
-
-        VkDescriptorImageInfo halfInfo{ m_Sampler,
-            std::static_pointer_cast<VKTexture>(vr.reflectionDenoiser->svgfHalf)->GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
-        VkDescriptorImageInfo depthInfo{ m_Sampler,
-            std::static_pointer_cast<VKTexture>(targets.GetSceneDepth())->GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkDescriptorImageInfo normalInfo{ m_Sampler,
-            std::static_pointer_cast<VKTexture>(targets.GetSlimNormal())->GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkDescriptorImageInfo outInfo{ VK_NULL_HANDLE,
-            std::static_pointer_cast<VKTexture>(vr.reflectionDenoiser->svgfDenoised)->GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
-
-        VkWriteDescriptorSet w[4]{};
-        for (u32 i = 0; i < 4; ++i)
-        {
-            w[i] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-            w[i].dstSet = vr.reflUpscaleDescSet; w[i].dstBinding = i; w[i].descriptorCount = 1;
-        }
-        w[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[0].pImageInfo = &halfInfo;
-        w[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[1].pImageInfo = &depthInfo;
-        w[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[2].pImageInfo = &normalInfo;
-        w[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          w[3].pImageInfo = &outInfo;
-        vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 4, w, 0, nullptr);
-    }
-
-    RG::ResourceHandle ReflectionsSubsystem::AddUpscalePass(RG::RenderGraph& rg, RG::ResourceHandle reflHalf,
-                                                            RG::ResourceHandle sceneDepth, RG::ResourceHandle slimNormal)
-    {
-        LH_PROFILE_FUNCTION();
-        if (!m_UpscalePipeline || !reflHalf.IsValid()) return reflHalf;
-        ViewResources* preflightVr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
-        if (!preflightVr || !preflightVr->reflectionDenoiser || preflightVr->reflUpscaleDescSet == VK_NULL_HANDLE || !preflightVr->reflectionDenoiser->svgfDenoised)
-            return reflHalf;
-
-        // Collapsed half extents already target the full output; avoid importing it twice.
-        const auto& state = *preflightVr->reflectionDenoiser;
-        if (state.width == state.svgfDenoised->GetWidth() && state.height == state.svgfDenoised->GetHeight()) return reflHalf;
-
-        struct UpData { RG::ResourceHandle half, depth, normal, out; };
-        RG::ResourceHandle outHandle{};
-        rg.AddComputePass<UpData>(
-            "ReflUpscale",
-            RG::QueueFamily::AsyncCompute,
-            [&, this](UpData& data, RG::RenderPassBuilder& builder) {
-                data.half = builder.ReadStorageImageGeneral(reflHalf);  // svgfSpecHalf stays GENERAL (atrous imageStore)
-                if (sceneDepth.IsValid()) data.depth  = builder.ReadStorageImage(sceneDepth);
-                if (slimNormal.IsValid()) data.normal = builder.ReadStorageImage(slimNormal);
-
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                auto outTex = std::static_pointer_cast<VKTexture>(vr->reflectionDenoiser->svgfDenoised);
-                RG::TextureDesc desc;
-                desc.name   = "SvgfSpecDenoised";
-                desc.width  = outTex->GetWidth();
-                desc.height = outTex->GetHeight();
-                desc.format = RG::TextureFormat::RGBA16_Float;
-                data.out = rg.ImportResource(desc, (void*)outTex->GetImage(), (void*)outTex->GetImageView(),
-                                             RG::ResourceState::Undefined);
-                data.out  = builder.WriteStorageImage(data.out);
-                outHandle = data.out;
-            },
-            [this](UpData&, RG::RenderPassContext& ctx) {
-                VkCommandBuffer cmd = ctx.commandBuffer;
-                ViewResources*  vr  = m_Pipeline->GetCurrentViewResources();
-                if (!vr || !vr->reflectionDenoiser || vr->reflUpscaleDescSet == VK_NULL_HANDLE || !vr->reflectionDenoiser->svgfDenoised || !vr->reflectionDenoiser->svgfHalf) return;
-
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                m_UpscalePipeline->Bind(cmd);
-                VkDescriptorSet sets[2] = { vr->globalDescriptorSet[slot], vr->reflUpscaleDescSet };
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    m_UpscalePipeline->GetLayout(), 0, 2, sets, 0, nullptr);
-
-                auto full = std::static_pointer_cast<VKTexture>(vr->reflectionDenoiser->svgfDenoised);
-                auto half = std::static_pointer_cast<VKTexture>(vr->reflectionDenoiser->svgfHalf);
-                const SvgfSettings& ss = m_Pipeline->GetSystem().GetSvgfSpecSettings();
-                ReflUpscalePC pc{};
-                pc.fullW = (i32)full->GetWidth();  pc.fullH = (i32)full->GetHeight();
-                pc.halfW = (i32)half->GetWidth();  pc.halfH = (i32)half->GetHeight();
-                pc.phiDepth  = ss.depthThreshold;
-                pc.phiNormal = 32.0f;
-                vkCmdPushConstants(cmd, m_UpscalePipeline->GetLayout(),
-                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ReflUpscalePC), &pc);
-
-                const u32 gx = (full->GetWidth()  + 7) / 8;
-                const u32 gy = (full->GetHeight() + 7) / 8;
-                vkCmdDispatch(cmd, gx, gy, 1);
-            });
-        return outHandle;
-    }
 }
