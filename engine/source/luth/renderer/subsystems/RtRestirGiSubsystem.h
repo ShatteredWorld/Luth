@@ -1,7 +1,7 @@
 #pragma once
 
 #include "luth/core/types/LuthTypes.h"
-#include "luth/renderer/features/rt/RestirGiViewState.h"
+#include "luth/renderer/features/rt/RestirGiBindings.h"
 #include "luth/renderer/features/rt/GiReservoirVizBindings.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
@@ -14,6 +14,7 @@
 namespace Luth
 {
     class FrameTargets;
+    struct PreparedRtScene;
     class RenderPipeline;
     struct ViewResources;
 
@@ -41,9 +42,13 @@ namespace Luth
         // trace), then demodulated shade. Returns the GI image handle (demodulated indirect-diffuse
         // irradiance) consumed by GeometryPass. No-op handle when disabled / no TLAS. slimMotion feeds
         // temporal reprojection.
-        RG::ResourceHandle AddPasses(RG::RenderGraph& rg, RG::ResourceHandle sceneDepth,
-                                     RG::ResourceHandle slimNormal, RG::ResourceHandle slimMotion,
-                                     GraphBufferRef* spatialOutput = nullptr);
+        RestirGiBindings PrepareBindings(const ViewResources&, u64 frameIndex, RenderViewId, u64 generation,
+            const PreparedRtScene*, const RestirGiSettings&, const Mat4& inverseViewProjection,
+            const Memory::GPUSubRegion& lights) const;
+        struct Outputs { RG::ResourceHandle irradiance; RG::BufferHandle spatial; };
+        static Outputs AddPasses(RG::RenderGraph&, RG::ResourceHandle sceneDepth,
+            RG::ResourceHandle slimNormal, RG::ResourceHandle slimMotion,
+            const RestirGiBindings&, RG::BufferHandle lights);
 
         // Half-res GI bilateral upscale: reads the half-res denoised GI (svgfGiHalf) + full-res depth/normal
         // guides, writes the full-res svgfGiDenoised. Only wired when RestirGiSettings::halfResolution.

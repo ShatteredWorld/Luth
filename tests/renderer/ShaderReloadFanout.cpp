@@ -81,9 +81,9 @@ TEST_CASE("ShaderReloadFanout: dormant RT domains contribute no native passes")
     CHECK_FALSE(scene.AddRtSunShadowsPass(graph, input, input, {}).handle.IsValid());
     const auto direct = di.AddPasses(graph, input, input, input, input, {});
     CHECK_FALSE(direct.di.IsValid()); CHECK_FALSE(direct.spec.IsValid());
-    GraphBufferRef spatial{{99, 1}, {}};
-    CHECK_FALSE(gi.AddPasses(graph, input, input, input, &spatial).IsValid());
-    CHECK_FALSE(spatial.handle.IsValid());
+    const auto indirect = gi.AddPasses(graph, input, input, input, {}, {});
+    CHECK_FALSE(indirect.irradiance.IsValid());
+    CHECK_FALSE(indirect.spatial.IsValid());
     CHECK_FALSE(pt.AddPasses(graph).IsValid());
     CHECK_FALSE(reflections.AddPasses(graph, input, input, input).IsValid());
     for (const auto channel : {DenoiserChannel::Di, DenoiserChannel::Gi,

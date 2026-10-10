@@ -65,6 +65,7 @@ add_executable(LuthTests
     renderer/RestirDiViewState.cpp
     renderer/RestirGiViewState.cpp
     renderer/RestirDiFeature.cpp
+    renderer/RestirGiFeature.cpp
     renderer/DeformationFeature.cpp
     renderer/VisibilityFeature.cpp
     renderer/DepthPrepassFeature.cpp

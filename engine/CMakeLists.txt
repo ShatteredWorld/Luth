@@ -55,6 +55,7 @@ add_library(Luth STATIC
     source/luth/renderer/features/rt/RestirDiViewState.cpp
     source/luth/renderer/features/rt/RestirGiViewState.cpp
     source/luth/renderer/features/rt/RestirDiFeature.cpp
+    source/luth/renderer/features/rt/RestirGiFeature.cpp
     source/luth/renderer/features/DeformationFeature.cpp
     source/luth/renderer/features/VisibilityFeature.cpp
     source/luth/renderer/features/DepthPrepassFeature.cpp

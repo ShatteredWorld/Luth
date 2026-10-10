@@ -530,39 +530,56 @@ namespace Luth
         vkUpdateDescriptorSets(device, n, writes, 0, nullptr);
     }
 
-    RG::ResourceHandle RtRestirGiSubsystem::AddPasses(RG::RenderGraph& rg,
-                                                      RG::ResourceHandle sceneDepth,
-                                                      RG::ResourceHandle slimNormal,
-                                                      RG::ResourceHandle slimMotion, GraphBufferRef* spatialOutput)
+    RestirGiBindings RtRestirGiSubsystem::PrepareBindings(const ViewResources& vr, u64 frameIndex,
+        RenderViewId view, u64 generation, const PreparedRtScene* scene, const RestirGiSettings& settings,
+        const Mat4& inverseViewProjection, const Memory::GPUSubRegion& lights) const
     {
-        if (spatialOutput) *spatialOutput = {};
-        if (!m_Pipeline) return {};
+        RestirGiBindings packet;
+        packet.frameIndex = frameIndex; packet.view = view; packet.generation = generation;
+        packet.settings = settings; packet.inverseViewProjection = inverseViewProjection;
+        packet.lights = lights;
+        packet.fullWidth = vr.width; packet.fullHeight = vr.height;
+        if (!m_InitialPipeline || !m_TemporalPipeline || !m_SpatialPipeline || !m_ShadePipeline || !vr.restirGi)
+            return packet;
+        const u32 slot = static_cast<u32>(frameIndex % MAX_FRAMES_IN_FLIGHT);
+        const std::array pipelines{m_InitialPipeline.get(), m_TemporalPipeline.get(),
+            m_SpatialPipeline.get(), m_ShadePipeline.get()};
+        for (u32 i = 0; i < pipelines.size(); ++i) {
+            packet.pipelines[i] = pipelines[i]->GetHandle(); packet.layouts[i] = pipelines[i]->GetLayout();
+        }
+        packet.retained = vr.restirGi;
+        packet.width = vr.restirGi->width; packet.height = vr.restirGi->height;
+        packet.scratch = vr.restirGi->restirGiReservoir; packet.spatial = vr.restirGi->restirGiSpatial;
+        packet.sets = {vr.globalDescriptorSet[slot], vr.lightDescSet[slot], vr.restirGi->restirGiDescSet[slot],
+            MaterialSystem::GetDescriptorSet(slot), VulkanContext::Get().GetBindlessSet().GetSet()};
+        for (u32 i = 0; i < packet.sources.size(); ++i) {
+            auto source = std::static_pointer_cast<VKTexture>(vr.restirGi->sources[i]);
+            packet.sources[i] = source.get();
+            if (source) { packet.sourceImages[i] = source->GetImage(); packet.sourceViews[i] = source->GetImageView(); }
+        }
+        const std::array outputs{vr.restirGi->restirGiDI};
+        for (u32 i = 0; i < outputs.size(); ++i) {
+            if (!outputs[i]) continue;
+            auto texture = std::static_pointer_cast<VKTexture>(outputs[i]);
+            packet.images[i] = texture->GetImage(); packet.imageViews[i] = texture->GetImageView();
+            packet.outputs[i] = {texture.get()};
+        }
+        if (scene) { packet.tlas = scene->GetTlas(); packet.geometryTable = scene->GetGeometryTableBDA(); }
+        return packet;
+    }
+
+    RtRestirGiSubsystem::Outputs RtRestirGiSubsystem::AddPasses(RG::RenderGraph& rg,
+        RG::ResourceHandle sceneDepth, RG::ResourceHandle slimNormal,
+        RG::ResourceHandle slimMotion, const RestirGiBindings& native, RG::BufferHandle lights)
+    {
         LH_PROFILE_FUNCTION();
-        const RestirGiSettings& settings = m_Pipeline->GetSystem().GetRestirGiSettings();
-        if (!settings.enabled || !m_InitialPipeline || !m_TemporalPipeline || !m_SpatialPipeline || !m_ShadePipeline) return {};
-
-        ViewResources* preflightVr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
-        if (!preflightVr || !preflightVr->restirGi || !preflightVr->restirGi->restirGiDI
-            || !preflightVr->restirGi->restirGiReservoir.buffer || !preflightVr->restirGi->restirGiSpatial.buffer) return {};
-        if (m_Pipeline->GetRt().GetTlas() == VK_NULL_HANDLE) return {};
-
-        const u32 frameAbs = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
-
-        // Post-spatial history topology: initial + temporal share the single SCRATCH reservoir (b2,
-        // same-frame lifetime); the SPATIAL buffer doubles as temporal history (read at b4) and
-        // spatial output (written at b6), persisting across frames. No ping-pong, no parity swap.
-        const Memory::GPUSubRegion scratchRes = preflightVr->restirGi->restirGiReservoir;
-        const Memory::GPUSubRegion spatialRes = preflightVr->restirGi->restirGiSpatial;
-
-        // Build invViewProj + frameSeed once; initial/shade share GiPC, temporal + spatial each use
-        // their own PC (all inside the shared fixed pcRange, different fields).
-        const Mat4 invVP = Math::Inverse(m_Pipeline->GetGlobal().GetCachedViewProj());
-        // GI working resolution (half when RestirGiSettings::halfResolution): derive from restirGiDI's
-        // extent (the alloc-time sizing source of truth). G-buffer reads remap to full res in-shader.
-        auto giTex0 = std::static_pointer_cast<VKTexture>(preflightVr->restirGi->restirGiDI);
-        const i32 giW2    = giTex0 ? static_cast<i32>(giTex0->GetWidth())  : static_cast<i32>(preflightVr->width);
-        const i32 giH2    = giTex0 ? static_cast<i32>(giTex0->GetHeight()) : static_cast<i32>(preflightVr->height);
-        const i32 giScale = ((u32)giW2 == preflightVr->width && (u32)giH2 == preflightVr->height) ? 1 : 2;
+        const auto& settings = native.settings;
+        if (!settings.enabled || std::any_of(native.pipelines.begin(), native.pipelines.end(), [](auto p) { return !p; })) return {};
+        const u32 frameAbs = static_cast<u32>(native.frameIndex);
+        const auto scratchRes = native.scratch, spatialRes = native.spatial;
+        const Mat4 invVP = native.inverseViewProjection;
+        const i32 giW2 = static_cast<i32>(native.width), giH2 = static_cast<i32>(native.height);
+        const i32 giScale = native.width == native.fullWidth && native.height == native.fullHeight ? 1 : 2;
 
         GiPC pc{};
         pc.invViewProj     = invVP;
@@ -576,7 +593,7 @@ namespace Luth
         // Geometry-table BDA read at preflight, paired with the same m_LastResult that GlobalSubsystem
         // binds to Set 0 b6, so the table's instanceCustomIndex mapping matches the bound TLAS. Zero
         // until the first real TLAS build (only the empty TLAS exists -> all rays miss -> never deref'd).
-        pc.geomTableBDA    = m_Pipeline->GetRt().GetGeometryTableBDA();
+        pc.geomTableBDA    = native.geometryTable;
 
         GiTemporalPC tpc{};
         tpc.invViewProj     = invVP;
@@ -598,7 +615,7 @@ namespace Luth
         spc.gbufferScale     = giScale;
         spc.dispatchW        = giW2;
         spc.dispatchH        = giH2;
-        spc.geomTableBDA     = m_Pipeline->GetRt().GetGeometryTableBDA();
+        spc.geomTableBDA     = native.geometryTable;
 
         // Initial pass: cosine-sampled 1-bounce path + single-light NEE, writes the SCRATCH reservoir
         // at b2. The scratch buffer is imported ONCE here; its handle threads through temporal
@@ -613,7 +630,8 @@ namespace Luth
         rg.AddComputePass<GiInitialData>(
             "GiInitial",
             RG::QueueFamily::AsyncCompute,
-            [&, this](GiInitialData& data, RG::RenderPassBuilder& builder) {
+            [&](GiInitialData& data, RG::RenderPassBuilder& builder) {
+                builder.ReadBuffer(lights);
                 if (sceneDepth.IsValid()) data.depth  = builder.ReadStorageImage(sceneDepth);
                 if (slimNormal.IsValid()) data.normal = builder.ReadStorageImage(slimNormal);
 
@@ -622,10 +640,8 @@ namespace Luth
                 data.reservoir  = builder.WriteBuffer(data.reservoir);
                 reservoirHandle = data.reservoir;
             },
-            [this, pc](GiInitialData&, RG::RenderPassContext& ctx) {
+            [native, pc](GiInitialData&, RG::RenderPassContext& ctx) {
                 VkCommandBuffer cmd = ctx.commandBuffer;
-                ViewResources*  vr  = m_Pipeline->GetCurrentViewResources();
-                if (!vr || !vr->restirGi || vr->restirGi->restirGiDescSet[0] == VK_NULL_HANDLE) return;
 
                 // AS-build -> AS-read barrier. dstStageMask is COMPUTE_SHADER (NOT RAY_TRACING):
                 // rayQuery executes in the compute stage; a RAY_TRACING dst here is a TDR trap.
@@ -639,21 +655,13 @@ namespace Luth
                 asDep.pMemoryBarriers    = &asBarrier;
                 vkCmdPipelineBarrier2(cmd, &asDep);
 
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                m_InitialPipeline->Bind(cmd);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, native.pipelines[0]);
                 // Set 3 = Material SSBO (render-frame slot, same convention as the PBR pass), Set 4 =
                 // bindless textures, for the secondary-hit material fetch. Both only deref'd on a
                 // committed hit, so a stale/empty slot on a miss is harmless.
-                VkDescriptorSet sets[5] = {
-                    vr->globalDescriptorSet[slot],
-                    vr->lightDescSet[slot],
-                    vr->restirGi->restirGiDescSet[slot],
-                    MaterialSystem::GetDescriptorSet(slot),
-                    VulkanContext::Get().GetBindlessSet().GetSet(),
-                };
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    m_InitialPipeline->GetLayout(), 0, 5, sets, 0, nullptr);
-                vkCmdPushConstants(cmd, m_InitialPipeline->GetLayout(),
+                    native.layouts[0], 0, 5, native.sets.data(), 0, nullptr);
+                vkCmdPushConstants(cmd, native.layouts[0],
                     VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(GiPC), &pc);
 
                 const u32 groupX = (static_cast<u32>(pc.dispatchW) + 7) / 8;
@@ -682,7 +690,7 @@ namespace Luth
         rg.AddComputePass<GiTemporalData>(
             "GiTemporal",
             RG::QueueFamily::AsyncCompute,
-            [&, this](GiTemporalData& data, RG::RenderPassBuilder& builder) {
+            [&](GiTemporalData& data, RG::RenderPassBuilder& builder) {
                 if (sceneDepth.IsValid()) data.depth  = builder.ReadStorageImage(sceneDepth);
                 if (slimNormal.IsValid()) data.normal = builder.ReadStorageImage(slimNormal);
                 if (slimMotion.IsValid()) data.motion = builder.ReadStorageImage(slimMotion);
@@ -695,21 +703,13 @@ namespace Luth
                 data.reservoirCurr = builder.WriteBuffer(data.reservoirCurr);
                 reservoirHandle    = data.reservoirCurr;
             },
-            [this, tpc](GiTemporalData&, RG::RenderPassContext& ctx) {
+            [native, tpc](GiTemporalData&, RG::RenderPassContext& ctx) {
                 VkCommandBuffer cmd = ctx.commandBuffer;
-                ViewResources*  vr  = m_Pipeline->GetCurrentViewResources();
-                if (!vr || !vr->restirGi || vr->restirGi->restirGiDescSet[0] == VK_NULL_HANDLE) return;
 
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                m_TemporalPipeline->Bind(cmd);
-                VkDescriptorSet sets[3] = {
-                    vr->globalDescriptorSet[slot],
-                    vr->lightDescSet[slot],
-                    vr->restirGi->restirGiDescSet[slot],
-                };
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, native.pipelines[1]);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    m_TemporalPipeline->GetLayout(), 0, 3, sets, 0, nullptr);
-                vkCmdPushConstants(cmd, m_TemporalPipeline->GetLayout(),
+                    native.layouts[1], 0, 3, native.sets.data(), 0, nullptr);
+                vkCmdPushConstants(cmd, native.layouts[1],
                     VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(GiTemporalPC), &tpc);
 
                 const u32 groupX = (static_cast<u32>(tpc.dispatchW) + 7) / 8;
@@ -735,7 +735,7 @@ namespace Luth
         rg.AddComputePass<GiSpatialData>(
             "GiSpatial",
             RG::QueueFamily::AsyncCompute,
-            [&, this](GiSpatialData& data, RG::RenderPassBuilder& builder) {
+            [&](GiSpatialData& data, RG::RenderPassBuilder& builder) {
                 if (sceneDepth.IsValid()) data.depth  = builder.ReadStorageImage(sceneDepth);
                 if (slimNormal.IsValid()) data.normal = builder.ReadStorageImage(slimNormal);
 
@@ -743,23 +743,13 @@ namespace Luth
                 data.reservoirOut = builder.WriteBuffer(spatialHandle);
                 spatialHandle     = data.reservoirOut;
             },
-            [this, spc](GiSpatialData&, RG::RenderPassContext& ctx) {
+            [native, spc](GiSpatialData&, RG::RenderPassContext& ctx) {
                 VkCommandBuffer cmd = ctx.commandBuffer;
-                ViewResources*  vr  = m_Pipeline->GetCurrentViewResources();
-                if (!vr || !vr->restirGi || vr->restirGi->restirGiDescSet[0] == VK_NULL_HANDLE) return;
 
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                m_SpatialPipeline->Bind(cmd);
-                VkDescriptorSet sets[5] = {
-                    vr->globalDescriptorSet[slot],
-                    vr->lightDescSet[slot],
-                    vr->restirGi->restirGiDescSet[slot],
-                    MaterialSystem::GetDescriptorSet(slot),
-                    VulkanContext::Get().GetBindlessSet().GetSet(),
-                };
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, native.pipelines[2]);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    m_SpatialPipeline->GetLayout(), 0, 5, sets, 0, nullptr);
-                vkCmdPushConstants(cmd, m_SpatialPipeline->GetLayout(),
+                    native.layouts[2], 0, 5, native.sets.data(), 0, nullptr);
+                vkCmdPushConstants(cmd, native.layouts[2],
                     VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(GiSpatialPC), &spc);
 
                 const u32 groupX = (static_cast<u32>(spc.dispatchW) + 7) / 8;
@@ -780,39 +770,29 @@ namespace Luth
         rg.AddComputePass<GiShadeData>(
             "GiShade",
             RG::QueueFamily::AsyncCompute,
-            [&, this](GiShadeData& data, RG::RenderPassBuilder& builder) {
+            [&](GiShadeData& data, RG::RenderPassBuilder& builder) {
                 if (sceneDepth.IsValid()) data.depth  = builder.ReadStorageImage(sceneDepth);
                 if (slimNormal.IsValid()) data.normal = builder.ReadStorageImage(slimNormal);
                 data.reservoir = builder.ReadBuffer(spatialHandle);
 
-                ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                auto giTex = std::static_pointer_cast<VKTexture>(vr->restirGi->restirGiDI);
                 RG::TextureDesc desc;
                 desc.name   = "RestirGiDI";
-                desc.width  = giTex->GetWidth();
-                desc.height = giTex->GetHeight();
+                desc.width  = native.width;
+                desc.height = native.height;
                 desc.format = RG::TextureFormat::RGBA16_Float;
                 data.gi  = rg.ImportResource(desc,
-                    (void*)giTex->GetImage(), (void*)giTex->GetImageView(),
+                    (void*)native.images[0], (void*)native.imageViews[0],
                     RG::ResourceState::Undefined);
                 data.gi  = builder.WriteStorageImage(data.gi);
                 diHandle = data.gi;
             },
-            [this, pc](GiShadeData&, RG::RenderPassContext& ctx) {
+            [native, pc](GiShadeData&, RG::RenderPassContext& ctx) {
                 VkCommandBuffer cmd = ctx.commandBuffer;
-                ViewResources*  vr  = m_Pipeline->GetCurrentViewResources();
-                if (!vr || !vr->restirGi || vr->restirGi->restirGiDescSet[0] == VK_NULL_HANDLE) return;
 
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                m_ShadePipeline->Bind(cmd);
-                VkDescriptorSet sets[3] = {
-                    vr->globalDescriptorSet[slot],
-                    vr->lightDescSet[slot],
-                    vr->restirGi->restirGiDescSet[slot],
-                };
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, native.pipelines[3]);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    m_ShadePipeline->GetLayout(), 0, 3, sets, 0, nullptr);
-                vkCmdPushConstants(cmd, m_ShadePipeline->GetLayout(),
+                    native.layouts[3], 0, 3, native.sets.data(), 0, nullptr);
+                vkCmdPushConstants(cmd, native.layouts[3],
                     VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(GiPC), &pc);
 
                 const u32 groupX = (static_cast<u32>(pc.dispatchW) + 7) / 8;
@@ -820,9 +800,7 @@ namespace Luth
                 vkCmdDispatch(cmd, groupX, groupY, 1);
             });
 
-        if (spatialOutput) *spatialOutput = {spatialHandle,
-            {&preflightVr->restirGi->restirGiSpatial, spatialRes.offset, spatialRes.size}};
-        return diHandle;
+        return {diHandle, spatialHandle};
     }
 
     void RtRestirGiSubsystem::WriteReservoirVizView(RestirGiViewState& state, const FrameTargets& targets)

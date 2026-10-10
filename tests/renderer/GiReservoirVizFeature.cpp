@@ -130,8 +130,9 @@ TEST_CASE("GiReservoirVizFeature: cold preparation and producer export reset nee
     CHECK_FALSE(native.PrepareReservoirVizBindings(VK_NULL_HANDLE, {}, {}, 0, 0, 0, 0, 0, 0, 0, false).enabled);
     const auto cold = native.PrepareReservoirVizBindings(VK_NULL_HANDLE, {}, {}, 640, 480, 320, 240, 8, 4, 16, true);
     CHECK(cold.enabled); CHECK_FALSE(cold.pipeline); CHECK_FALSE(cold.depth);
-    Memory::LinearAllocator scratch(64 * 1024); RG::RenderGraph graph(scratch); GraphBufferRef stale{{55, 1}, {}};
-    CHECK_FALSE(native.AddPasses(graph, {}, {}, {}, &stale).IsValid()); CHECK_FALSE(stale.handle.IsValid()); CHECK(graph.GetPasses().empty());
+    Memory::LinearAllocator scratch(64 * 1024); RG::RenderGraph graph(scratch);
+    const auto absent = RtRestirGiSubsystem::AddPasses(graph, {}, {}, {}, RestirGiBindings{}, {});
+    CHECK_FALSE(absent.irradiance.IsValid()); CHECK_FALSE(absent.spatial.IsValid()); CHECK(graph.GetPasses().empty());
 }
 TEST_CASE("GiReservoirVizFeature: combined stages sort reversed declarations and pass through to one final output [renderfeatures]")
 {
