@@ -25,6 +25,8 @@ namespace Luth
         VkImageView outputView = VK_NULL_HANDLE;
         std::shared_ptr<const ReflectionDenoiserViewState> retained;
         SvgfSettings settings;
+        bool historyValid = false;
+        f32 HistoryCap() const { return historyValid ? static_cast<f32>(settings.historyCap) : 0.0f; }
         RenderViewId view;
         u64 generation = 0, frameIndex = 0;
         u32 width = 0, height = 0, fullWidth = 0, fullHeight = 0;

@@ -61,6 +61,7 @@ add_executable(LuthTests
     renderer/GiDenoiserFeature.cpp
     renderer/DiTemporalHistory.cpp
     renderer/GiTemporalHistory.cpp
+    renderer/ReflectionTemporalHistory.cpp
     renderer/DiDenoiserViewState.cpp
     renderer/GiDenoiserViewState.cpp
     renderer/DiUpscaleViewState.cpp
@@ -71,6 +72,7 @@ add_executable(LuthTests
     renderer/ReflectionFeature.cpp
     renderer/ReflectionDenoiserViewState.cpp
     renderer/ReflectionDenoiserFeature.cpp
+    renderer/ReflectionUpscaleFeature.cpp
     renderer/ReflectionUpscaleViewState.cpp
     renderer/ReflectionViewState.cpp
     renderer/RestirGiViewState.cpp

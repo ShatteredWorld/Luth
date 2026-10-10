@@ -177,6 +177,7 @@ namespace Luth
             VkPushConstantRange pcRange{ VK_SHADER_STAGE_COMPUTE_BIT, 0, k_ReflPCSize };
             m_ReflPipeline = std::make_unique<VKComputePipeline>(
                 m_Spv, layouts, std::vector<VkPushConstantRange>{ pcRange });
+            m_Views.ForEach([](auto& state) { state->history.Invalidate(); });
             return true;
         }
 
@@ -191,6 +192,7 @@ namespace Luth
             VkPushConstantRange upc{ VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ReflUpscalePC) };
             m_UpscalePipeline = std::make_unique<VKComputePipeline>(
                 m_UpscaleSpv, ulayouts, std::vector<VkPushConstantRange>{ upc });
+            m_Views.ForEach([](auto& state) { state->history.Invalidate(); });
             return true;
         }
         return false;

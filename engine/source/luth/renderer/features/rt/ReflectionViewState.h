@@ -1,6 +1,6 @@
 #pragma once
 #include <vulkan/vulkan.h>
-#include "luth/renderer/features/RenderViewState.h"
+#include "luth/renderer/features/rt/TemporalSignalHistory.h"
 #include "luth/renderer/resources/Texture.h"
 #include <array>
 #include <algorithm>
@@ -28,6 +28,7 @@ namespace Luth
         static std::shared_ptr<ReflectionViewState> Create(RenderViewId, const ViewStateConfig&, VkDescriptorSetLayout);
         RenderViewId id;
         u32 width = 0, height = 0;
+        TemporalSignalHistory history;
         u64 sourceGeneration = 0;
         std::shared_ptr<Texture> radiance;
         std::array<std::shared_ptr<Texture>, 3> sources; // depth, normal, roughness

@@ -28,6 +28,7 @@
 #include "luth/renderer/features/rt/RestirGiFeature.h"
 #include "luth/renderer/features/rt/ReflectionFeature.h"
 #include "luth/renderer/features/rt/ReflectionDenoiserFeature.h"
+#include "luth/renderer/features/rt/ReflectionUpscaleFeature.h"
 #include "luth/renderer/features/rt/GiDenoiserFeature.h"
 #include "luth/renderer/features/rt/GiUpscaleFeature.h"
 #include "luth/renderer/features/rt/DiDenoiserFeature.h"
@@ -184,9 +185,10 @@ namespace Luth
             RenderPipelineDefinition reflectionDefinition;
             reflectionDefinition.AddFeature<ReflectionFeature>();
             reflectionDefinition.AddFeature<ReflectionDenoiserFeature>();
+            reflectionDefinition.AddFeature<ReflectionUpscaleFeature>();
             PipelineInputContract reflectionInputs;
             reflectionInputs.resources = {{RtSceneResources::Parameters}, {ReflectionResources::Bindings},
-                {ReflectionDenoiserResources::Bindings}, {RenderResources::MaterialID},
+                {ReflectionDenoiserResources::Bindings}, {ReflectionUpscaleResources::Bindings}, {RenderResources::MaterialID},
                 {RenderResources::SurfaceDepth}, {RenderResources::Normal}, {RenderResources::Roughness},
                 {RenderResources::LightData}, {RtSceneResources::Scene, ResourceOutputPresence::Optional}};
             reflectionInputs.capabilities = {&RtSceneResources::RayScene};
@@ -571,6 +573,8 @@ namespace Luth
         if (m_CurrentViewResources->diSpecDenoiser) m_CurrentViewResources->diSpecDenoiser->history.Begin();
         if (m_CurrentViewResources->restirGi) m_CurrentViewResources->restirGi->history.Begin();
         if (m_CurrentViewResources->giDenoiser) m_CurrentViewResources->giDenoiser->history.Begin();
+        if (m_CurrentViewResources->reflection) m_CurrentViewResources->reflection->history.Begin();
+        if (m_CurrentViewResources->reflectionDenoiser) m_CurrentViewResources->reflectionDenoiser->history.Begin();
         if (m_CurrentViewResources->taa) m_CurrentViewResources->taa->recorded = false;
     }
 
@@ -1032,14 +1036,13 @@ namespace Luth
             if (denoisedGi.handle.IsValid() && denoiser.ChainReady() && m_CurrentViewResources->giDenoiser)
                 m_CurrentViewResources->giDenoiser->history.Record(frameIndex, generation);
         }
-        RG::ResourceHandle denoisedGiHandle = filteredGi.handle;
 
         // RT specular reflections: one GGX-VNDF ray/pixel from the slim G-buffer, then
         // a dedicated specular SVGF with explicit roughness and radiance/hit-distance contracts.
         // The spec reproject computes virtual motion internally from the raw signal's hit distance.
-        // denoisedReflHandle feeds GeometryPass (pbr.frag composites it via Set 3 b7). AsyncCompute,
+        // The full-resolution typed signal feeds GeometryPass (pbr.frag composites it via Set 3 b7). AsyncCompute,
         // after the TLAS build (Reflections declares scene demand).
-        GraphTextureRef reflectionOutput, denoisedReflection;
+        GraphTextureRef reflectionOutput, denoisedReflection, filteredReflection;
         if (m_ReflectionComposition) {
             const auto frameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
             const auto native = m_Reflections.PrepareBindings(*m_CurrentViewResources, frameIndex, view.id,
@@ -1049,10 +1052,14 @@ namespace Luth
             const auto denoiser = static_cast<SvgfDenoiser&>(*m_DenoiseRefl).PrepareReflectionBindings(
                 *m_CurrentViewResources, frameIndex, view.id, m_CurrentViewResources->generation, s.GetSvgfSpecSettings());
             const ReflectionDenoiserBindingRef denoiserBinding{&denoiser};
+            const auto upscale = m_Reflections.PrepareUpscaleBindings(*m_CurrentViewResources, frameIndex,
+                view.id, m_CurrentViewResources->generation, s.GetSvgfSpecSettings());
+            const ReflectionUpscaleBindingRef upscaleBinding{&upscale};
             const std::array resources{
                 RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters),
                 RenderInputBinding::Present(ReflectionResources::Bindings, binding),
                 RenderInputBinding::Present(ReflectionDenoiserResources::Bindings, denoiserBinding),
+                RenderInputBinding::Present(ReflectionUpscaleResources::Bindings, upscaleBinding),
                 RenderInputBinding::Present(RenderResources::MaterialID, materialOutput),
                 RenderInputBinding::Present(RenderResources::LightData, uploadedLights),
                 RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
@@ -1064,23 +1071,19 @@ namespace Luth
             ViewRenderInputs inputs; inputs.id = view.id; inputs.resourceGeneration = m_CurrentViewResources->generation;
             inputs.width = m_CurrentViewResources->width; inputs.height = m_CurrentViewResources->height;
             const std::array exports{RenderOutputBinding::Capture(ReflectionResources::Radiance, reflectionOutput),
-                RenderOutputBinding::Capture(ReflectionDenoiserResources::Radiance, denoisedReflection)};
+                RenderOutputBinding::Capture(ReflectionDenoiserResources::Radiance, denoisedReflection),
+                RenderOutputBinding::Capture(ReflectionUpscaleResources::Radiance, filteredReflection)};
             const auto built = m_ReflectionComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports);
             if (!built.success) {
                 for (const auto& diagnostic : built.diagnostics)
                     LH_LOG(Renderer, error, "Reflection composition: {}", diagnostic.message);
                 return false;
             }
-        }
-        RG::ResourceHandle denoisedReflHandle = denoisedReflection.handle;
-        // Bilateral upscale bridges the working signal into the full output consumed by Set 3 b7.
-        if (denoisedReflHandle.IsValid() && m_System.GetReflectionsSettings().halfResolution)
-        {
-            const auto frameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
-            const auto upscale = m_Reflections.PrepareUpscaleBindings(*m_CurrentViewResources, frameIndex,
-                view.id, m_CurrentViewResources->generation, s.GetSvgfSpecSettings());
-            denoisedReflHandle = ReflectionsSubsystem::AddUpscalePass(rg,
-                {denoisedReflHandle, surfaceDepth.handle, slimGB.normal}, upscale);
+            const auto generation = m_CurrentViewResources->generation;
+            if (reflectionOutput.handle.IsValid() && m_CurrentViewResources->reflection)
+                m_CurrentViewResources->reflection->history.Record(frameIndex, generation);
+            if (denoisedReflection.handle.IsValid() && denoiser.ChainReady() && m_CurrentViewResources->reflectionDenoiser)
+                m_CurrentViewResources->reflectionDenoiser->history.Record(frameIndex, generation);
         }
 
         // Legacy depth/geometry bridge shares graph-local references with the compiled
@@ -1138,7 +1141,7 @@ namespace Luth
             // Transitional RT references are barrier reads; existing native Set 3 owns their descriptors.
             const GraphTextureRef sunSignal = rtShadowMask;
             const GraphTextureRef diSignal{denoisedDIHandle, {}},
-                giSignal{denoisedGiHandle, {}}, reflectionSignal{denoisedReflHandle, {}}, specularSignal{denoisedDiSpecHandle, {}};
+                giSignal = filteredGi, reflectionSignal = filteredReflection, specularSignal{denoisedDiSpecHandle, {}};
             const auto optionalImage = [](auto key, const GraphTextureRef& value) {
                 return value.handle.IsValid() ? RenderInputBinding::Present(key, value) : RenderInputBinding::Absent(key);
             };
