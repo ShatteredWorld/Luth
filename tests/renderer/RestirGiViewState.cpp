@@ -1,3 +1,4 @@
+#include "luth/renderer/features/rt/ReflectionDenoiserViewState.h"
 #include "luth/renderer/features/rt/ReflectionViewState.h"
 #include "luth/renderer/features/rt/GiUpscaleViewState.h"
 #include <doctest/doctest.h>
@@ -79,9 +80,9 @@ TEST_CASE("RestirGiViewState: local pool includes cycled raw and reservoir visua
         CHECK(local.sizes[2].type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
         CHECK(local.sizes[2].descriptorCount == 3 * frames + 1);
         const VulkanViewPool shared(true, frames);
-        CHECK(shared.maxSets + ReflectionPoolBudget{}.maxSets + GiUpscalePoolBudget{}.maxSets + GiDenoiserPoolBudget{}.maxSets + local.maxSets == 205 - 14 * frames - 32);
-        CHECK(shared.sizes[1].descriptorCount + ReflectionPoolBudget{}.sizes[1].descriptorCount + GiUpscalePoolBudget{}.sizes[1].descriptorCount + GiDenoiserPoolBudget{}.sizes[1].descriptorCount + local.sizes[1].descriptorCount == 248 - 10 * frames - 65);
-        CHECK(shared.sizes[2].descriptorCount + ReflectionPoolBudget{}.sizes[0].descriptorCount + GiUpscalePoolBudget{}.sizes[0].descriptorCount + GiDenoiserPoolBudget{}.sizes[0].descriptorCount + local.sizes[0].descriptorCount == 317 - 29 * frames - 69);
+        CHECK(shared.maxSets + ReflectionDenoiserPoolBudget{}.maxSets + ReflectionPoolBudget{}.maxSets + GiUpscalePoolBudget{}.maxSets + GiDenoiserPoolBudget{}.maxSets + local.maxSets == 205 - 14 * frames - 32);
+        CHECK(shared.sizes[1].descriptorCount + ReflectionDenoiserPoolBudget{}.sizes[1].descriptorCount + ReflectionPoolBudget{}.sizes[1].descriptorCount + GiUpscalePoolBudget{}.sizes[1].descriptorCount + GiDenoiserPoolBudget{}.sizes[1].descriptorCount + local.sizes[1].descriptorCount == 248 - 10 * frames - 65);
+        CHECK(shared.sizes[2].descriptorCount + ReflectionDenoiserPoolBudget{}.sizes[0].descriptorCount + ReflectionPoolBudget{}.sizes[0].descriptorCount + GiUpscalePoolBudget{}.sizes[0].descriptorCount + GiDenoiserPoolBudget{}.sizes[0].descriptorCount + local.sizes[0].descriptorCount == 317 - 29 * frames - 69);
         CHECK(shared.sizes[3].descriptorCount + local.sizes[2].descriptorCount == 126 - 8 * frames - 1);
     }
 }

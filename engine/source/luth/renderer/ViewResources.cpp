@@ -113,6 +113,11 @@ namespace Luth
         vr.reflection = std::move(reflection);
         if (reflectionReplaced) vr.generation = m_System.InvalidateView(id);
 
+        auto reflectionDenoiser = m_RtNativeInitialized ? static_cast<SvgfDenoiser*>(m_DenoiseRefl.get())->EnsureReflectionView(id, targets, vr.reflection) : nullptr;
+        const bool reflectionDenoiserReplaced = vr.reflectionDenoiser && vr.reflectionDenoiser != reflectionDenoiser;
+        vr.reflectionDenoiser = std::move(reflectionDenoiser);
+        if (reflectionDenoiserReplaced) vr.generation = m_System.InvalidateView(id);
+
         auto restirGi = m_RtNativeInitialized ? m_RestirGi.EnsureView(id, targets,
             m_System.GetRestirGiSettings().halfResolution) : nullptr;
         const bool restirGiReplaced = vr.restirGi && vr.restirGi != restirGi;
@@ -151,15 +156,12 @@ namespace Luth
             vr.generation = m_System.GetViews().Get(id)->generation;
             AllocateViewResources(vr, targets);
         }
-        else if (vr.width != newW || vr.height != newH ||
-                 (m_RtNativeInitialized && vr.reflHalfCached != (m_System.GetReflectionsSettings().halfResolution ? 1u : 0u)))
+        else if (vr.width != newW || vr.height != newH)
         {
             // Stable descriptor slots may still be referenced by earlier submissions.
             Renderer::WaitForGPU();
             vr.generation = m_System.InvalidateView(id);
-            const u32 halfW = std::max(newW / 2, 1u);
-            const u32 halfH = std::max(newH / 2, 1u);
-            RecreateViewTextures(vr, newW, newH, halfW, halfH);
+            RecreateViewTextures(vr, newW, newH);
 
 
             if (m_RtNativeInitialized)
@@ -167,14 +169,16 @@ namespace Luth
                 m_PathTrace.WriteView(vr);              // re-bind PT accumulator + display image (recreated on resize)
                 m_Reflections.WriteUpscaleView(vr, targets);    // re-bind refl upscale half-input + full output
 
-                m_DenoiseRefl->WriteView(vr, targets);  // re-bind specular SVGF inputs + output to the new images
             }
             m_Lighting.WriteShadowView(vr);         // re-bind Set 3 b4 sun mask + b5 denoised DI + b6 denoised GI
             // Set 0 bindings 1-4 reference the (re)created IBL + GTAO textures.
             m_Global.WriteView(vr, MakeGlobalCtx(*this, vr));
         }
 
-        if (reflectionReplaced && m_RtNativeInitialized) m_DenoiseRefl->WriteView(vr, targets);
+        if (reflectionDenoiserReplaced && m_RtNativeInitialized) {
+            m_Reflections.WriteUpscaleView(vr, targets);
+            m_Lighting.WriteShadowView(vr);
+        }
         if (giDenoiserReplaced && m_RtNativeInitialized) {
             // Lighting borrows the new GI output; EnsureGiView completed the safe point.
             m_Lighting.WriteShadowView(vr);
@@ -200,6 +204,7 @@ namespace Luth
         m_Restir.ReleaseView(id);
         static_cast<SvgfDenoiser*>(m_DenoiseGi.get())->ReleaseGiView(id);
         m_RestirGi.ReleaseView(id);
+        static_cast<SvgfDenoiser*>(m_DenoiseRefl.get())->ReleaseReflectionView(id);
         m_Reflections.ReleaseView(id);
         m_Transparency.ReleaseView(id);
         m_PostProcess.ReleaseTaaView(id);
@@ -254,9 +259,7 @@ namespace Luth
 
         const u32 fullW = targets.GetSceneColor()->GetWidth();
         const u32 fullH = targets.GetSceneColor()->GetHeight();
-        const u32 halfW = std::max(fullW / 2, 1u);
-        const u32 halfH = std::max(fullH / 2, 1u);
-        RecreateViewTextures(vr, fullW, fullH, halfW, halfH);
+        RecreateViewTextures(vr, fullW, fullH);
 
         auto allocSingle = [&](VkDescriptorSetLayout layout, VkDescriptorSet& outSet, const char* tag) {
             if (layout == VK_NULL_HANDLE) return;
@@ -303,8 +306,6 @@ namespace Luth
         {
             allocSingle(m_PathTrace.GetSetLayout(),          vr.ptDescSet,            "View.PathTrace");
             allocSingle(m_Reflections.GetUpscaleLayout(),    vr.reflUpscaleDescSet,   "View.ReflUpscale");
-            m_DenoiseGi->AllocateViewSets(vr);
-            m_DenoiseRefl->AllocateViewSets(vr);
         }
         m_Lighting.WriteShadowView(vr);
         if (m_RtNativeInitialized)
@@ -312,23 +313,15 @@ namespace Luth
             m_PathTrace.WriteView(vr);
             m_Reflections.WriteUpscaleView(vr, targets);    // bind refl upscale half-input + full output
 
-            m_DenoiseRefl->WriteView(vr, targets);
         }
         // Global writes borrow the final AO binding from the independent GTAO state.
         m_Global.WriteView(vr, MakeGlobalCtx(*this, vr));
     }
 
-    void RenderPipeline::RecreateViewTextures(ViewResources& vr, u32 fullW, u32 fullH, u32 halfW, u32 halfH)
+    void RenderPipeline::RecreateViewTextures(ViewResources& vr, u32 fullW, u32 fullH)
     {
         // This remaining compatibility allocation group is entirely RT-owned.
         if (!m_RtNativeInitialized) return;
-
-        // Remaining reflection denoiser history allocates at half when requested;
-        // svgfSpecDenoised stays full. Raw trace resources belong to ReflectionsSubsystem.
-        const bool reflHalf = m_System.GetReflectionsSettings().halfResolution;
-        const u32  reflW    = reflHalf ? halfW : fullW;
-        const u32  reflH    = reflHalf ? halfH : fullH;
-        vr.reflHalfCached   = reflHalf ? 1u : 0u;
 
         // Path-traced reference mode. ptAccum = viewport-sized RGBA32F STORAGE: the in-place fp32
         // progressive running mean, kept GENERAL, only ever touched by the PT megakernel (read-before-write
@@ -343,40 +336,9 @@ namespace Luth
             /*arrayLayers*/ 1, /*createFlags*/ 0u, /*mipLevels*/ 1,
             VK_IMAGE_USAGE_STORAGE_BIT);
 
-        // Specular (RT-reflection) SVGF history: flat parallel to the GI SVGF. History + a-trous run
-        // at the reflection working res (half when halfResolution); svgfSpecDenoised stays FULL (the
-        // bilateral-upscale output). svgfSpecGeom carries hitDist in its .a (vs GI's unused .a) for
-        // reflected-depth disocclusion. svgfSpecHalf is the half a-trous final the upscale reads; written
-        // each frame, so no clear. Cross-frame history below is bootstrap-cleared (at reflW/reflH).
-        vr.svgfSpecDenoised = std::make_shared<VKTexture>(fullW, fullH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-        vr.svgfSpecHalf     = std::make_shared<VKTexture>(reflW, reflH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-        for (u32 i = 0; i < 2; ++i)
-        {
-            vr.svgfSpecColorHist[i] = std::make_shared<VKTexture>(reflW, reflH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-            vr.svgfSpecMoments[i]   = std::make_shared<VKTexture>(reflW, reflH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-            vr.svgfSpecGeom[i]      = std::make_shared<VKTexture>(reflW, reflH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-        }
-        vr.svgfSpecAtrous[0] = std::make_shared<VKTexture>(reflW, reflH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-        vr.svgfSpecAtrous[1] = std::make_shared<VKTexture>(reflW, reflH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-
-        // Bootstrap clear: freshly-allocated VMA storage images have UNDEFINED layout and undefined
-        // pixel content. The SVGF reproject
-        // imageLoads its prev history on frame 0; without this clear the first read is NaN-prone garbage
-        // (and imageLoad needs GENERAL). One-shot submit per view-resize only.
-        VkImage clearTargets[9] = {
-            // PathTrace fp32 accumulator: read-before-write cross-frame, so zero it to GENERAL on resize.
-            std::static_pointer_cast<VKTexture>(vr.ptAccum)->GetImage(),
-            // Specular SVGF history: frame 0's prev imageLoad must be well-defined.
-            std::static_pointer_cast<VKTexture>(vr.svgfSpecColorHist[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfSpecColorHist[1])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfSpecMoments[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfSpecMoments[1])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfSpecGeom[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfSpecGeom[1])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfSpecAtrous[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfSpecAtrous[1])->GetImage(),
-        };
-        constexpr u32 kClearCount = 9;
+        // Only the PT accumulator remains in this compatibility allocation group.
+        VkImage clearTargets[1] = {std::static_pointer_cast<VKTexture>(vr.ptAccum)->GetImage()};
+        constexpr u32 kClearCount = 1;
         VulkanContext::Get().ImmediateSubmit([&](VkCommandBuffer cmd) {
             VkImageMemoryBarrier toDst[kClearCount]{};
             for (u32 i = 0; i < kClearCount; ++i)
@@ -438,16 +400,7 @@ namespace Luth
         vr.ptAccum.reset();
         vr.ptColor.reset();
         vr.reflection.reset();
-        vr.svgfSpecDenoised.reset();
-        vr.svgfSpecHalf.reset();
-        for (u32 i = 0; i < 2; ++i)
-        {
-            vr.svgfSpecColorHist[i].reset();
-            vr.svgfSpecMoments[i].reset();
-            vr.svgfSpecGeom[i].reset();
-        }
-        vr.svgfSpecAtrous[0].reset();
-        vr.svgfSpecAtrous[1].reset();
+        vr.reflectionDenoiser.reset();
         vr.diSpecDenoiser.reset();
         if (vr.descPool != VK_NULL_HANDLE)
         {

@@ -5,6 +5,7 @@
 
 #include "luth/renderer/features/rt/DiDenoiserViewState.h"
 #include "luth/renderer/features/rt/GiDenoiserViewState.h"
+#include "luth/renderer/features/rt/ReflectionDenoiserViewState.h"
 #include "luth/renderer/features/rt/DiDenoiserBindings.h"
 #include "luth/renderer/features/rt/GiDenoiserBindings.h"
 #include <memory>
@@ -18,8 +19,8 @@ namespace Luth
     struct ViewResources;
     struct SvgfSettings;
 
-    // Which signal this instance denoises. Selects the ViewResources image/descriptor set (svgf* /
-    // svgfGi* / svgfSpec* / svgfDiSpec*) + the SvgfSettings instance + the RG/debug pass names. Di/Gi
+    // Which signal this instance denoises. Selects domain-owned view state, settings and
+    // RG/debug pass names. Di/Gi
     // denoise a demodulated diffuse irradiance; Reflections denoises the RT specular radiance via a
     // SPECULAR reproject variant (svgf_spec_reproject.slang, hit-distance virtual reprojection,
     // b3 = slim roughness). DiSpecular denoises the ReSTIR-DI demodulated specular with the ordinary
@@ -49,6 +50,9 @@ namespace Luth
         std::shared_ptr<GiDenoiserViewState> EnsureGiView(RenderViewId, FrameTargets&,
             const std::shared_ptr<RestirGiViewState>&);
         void ReleaseGiView(RenderViewId);
+        std::shared_ptr<ReflectionDenoiserViewState> EnsureReflectionView(RenderViewId, FrameTargets&,
+            const std::shared_ptr<ReflectionViewState>&);
+        void ReleaseReflectionView(RenderViewId);
         DiDenoiserBindings PrepareDiBindings(const ViewResources&, u64 frameIndex, RenderViewId,
             u64 generation, const SvgfSettings&) const;
         static RG::ResourceHandle AddDiPasses(RG::RenderGraph&,
@@ -72,6 +76,7 @@ namespace Luth
 
         DiDenoiserViewStates m_DiViews;
         GiDenoiserViewStates m_GiViews;
+        ReflectionDenoiserViewStates m_ReflectionViews;
         u64 m_NextSourceGeneration = 1;
         DenoiserChannel m_Channel = DenoiserChannel::Di;
         RenderPipeline* m_Pipeline = nullptr;

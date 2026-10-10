@@ -1,3 +1,4 @@
+#include "luth/renderer/features/rt/ReflectionDenoiserViewState.h"
 #include "luth/renderer/features/rt/ReflectionViewState.h"
 #include <doctest/doctest.h>
 #include "luth/renderer/features/rt/GiDenoiserViewState.h"
@@ -59,9 +60,9 @@ TEST_CASE("GiUpscaleViewState: local descriptor budget preserves the compatibili
     CHECK(local.sizes[1].type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE); CHECK(local.sizes[1].descriptorCount == 1);
     for (u32 frames : {2u, 3u}) {
         const VulkanViewPool shared(true, frames);
-        CHECK(shared.maxSets + ReflectionPoolBudget{}.maxSets + local.maxSets == 205 - 15 * frames - 40);
-        CHECK(shared.sizes[1].descriptorCount + ReflectionPoolBudget{}.sizes[1].descriptorCount + local.sizes[1].descriptorCount == 248 - 11 * frames - 90);
-        CHECK(shared.sizes[2].descriptorCount + ReflectionPoolBudget{}.sizes[0].descriptorCount + local.sizes[0].descriptorCount == 317 - 32 * frames - 91);
+        CHECK(shared.maxSets + ReflectionDenoiserPoolBudget{}.maxSets + ReflectionPoolBudget{}.maxSets + local.maxSets == 205 - 15 * frames - 40);
+        CHECK(shared.sizes[1].descriptorCount + ReflectionDenoiserPoolBudget{}.sizes[1].descriptorCount + ReflectionPoolBudget{}.sizes[1].descriptorCount + local.sizes[1].descriptorCount == 248 - 11 * frames - 90);
+        CHECK(shared.sizes[2].descriptorCount + ReflectionDenoiserPoolBudget{}.sizes[0].descriptorCount + ReflectionPoolBudget{}.sizes[0].descriptorCount + local.sizes[0].descriptorCount == 317 - 32 * frames - 91);
     }
 }
 TEST_CASE("GiUpscaleViewState: native registration preserves GI upscale name and borrowed handles") {

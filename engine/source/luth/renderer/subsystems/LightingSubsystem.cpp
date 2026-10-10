@@ -396,13 +396,13 @@ namespace Luth
             giImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
 
-        // Binding 7 (RT reflections): post-denoise specular radiance. Bound to vr.svgfSpecDenoised
+        // Binding 7 (RT reflections): post-denoise specular radiance. Bound to vr.reflectionDenoiser->svgfDenoised
         // (the specular denoiser owns the slot, mirroring b5/b6). pbr.frag composites it into the split-sum
         // specular IBL when reflParams.x > 0.5; the GeometryPass Read transitions it to SHADER_READ_ONLY.
         VkDescriptorImageInfo reflImgInfo{};
-        if (m_HybridSignalsEnabled && vr.svgfSpecDenoised)
+        if (m_HybridSignalsEnabled && vr.reflectionDenoiser && vr.reflectionDenoiser->svgfDenoised)
         {
-            auto vkRefl = std::static_pointer_cast<VKTexture>(vr.svgfSpecDenoised);
+            auto vkRefl = std::static_pointer_cast<VKTexture>(vr.reflectionDenoiser->svgfDenoised);
             reflImgInfo.sampler     = m_SunShadowMaskSampler;
             reflImgInfo.imageView   = vkRefl->GetImageView();
             reflImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

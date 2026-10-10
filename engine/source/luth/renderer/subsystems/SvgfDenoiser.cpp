@@ -73,16 +73,11 @@ namespace Luth
         ChannelRefs Resolve(DenoiserChannel ch, ViewResources& vr) {
             if (ch == DenoiserChannel::Reflections)
             {
-                // Half-res reflections: a-trous final + passthrough write svgfSpecHalf (a bilateral upscale
-                // resolves it into the full svgfSpecDenoised). Detect from the history extent vs the full
-                // denoised image; mirrors the DiSpecular/Gi half detection, no setting plumbing.
-                const bool specHalf = vr.svgfSpecHalf && vr.svgfSpecColorHist[0] && vr.svgfSpecDenoised
-                    && std::static_pointer_cast<VKTexture>(vr.svgfSpecColorHist[0])->GetWidth()
-                       < std::static_pointer_cast<VKTexture>(vr.svgfSpecDenoised)->GetWidth();
-                return { vr.svgfSpecColorHist, vr.svgfSpecMoments, vr.svgfSpecGeom, vr.svgfSpecAtrous,
-                         specHalf ? &vr.svgfSpecHalf : &vr.svgfSpecDenoised, vr.reflection ? &vr.reflection->radiance : nullptr,
-                         &vr.svgfSpecPassthroughDescSet, vr.svgfSpecReprojectDescSet,
-                         vr.svgfSpecMomentsDescSet, vr.svgfSpecAtrousDescSet };
+                auto& state = *vr.reflectionDenoiser;
+                return {state.svgfColorHist, state.svgfMoments, state.svgfGeom, state.svgfAtrous,
+                    state.WorkingOutput(), state.Noisy(),
+                    &state.svgfPassthroughDescSet, state.svgfReprojectDescSet,
+                    state.svgfMomentsDescSet, state.svgfAtrousDescSet};
             }
             if (ch == DenoiserChannel::DiSpecular)
             {
@@ -189,6 +184,48 @@ namespace Luth
     void SvgfDenoiser::ReleaseGiView(RenderViewId id)
     {
         m_GiViews.Release(id, [] { Renderer::WaitForGPU(); });
+    }
+
+    std::shared_ptr<ReflectionDenoiserViewState> SvgfDenoiser::EnsureReflectionView(RenderViewId id,
+        FrameTargets& targets, const std::shared_ptr<ReflectionViewState>& input)
+    {
+        if (m_Channel != DenoiserChannel::Reflections || !m_PassLayout || !m_ReprojectLayout
+            || !m_MomentsLayout || !m_AtrousLayout || !input) return {};
+        if (input->id != id) throw std::invalid_argument("Reflection denoiser: incompatible raw view identity");
+        const auto& color = targets.GetSceneColor();
+        if (!color || !input->radiance) throw std::invalid_argument("Reflection denoiser: missing color or raw input");
+        std::array<std::shared_ptr<Texture>, 4> sources{targets.GetSceneDepth(), targets.GetSlimNormal(),
+            targets.GetSlimRoughness(), targets.GetSlimMaterialID()};
+        std::array<VkImageView, 4> views{};
+        for (u32 i = 0; i < sources.size(); ++i) {
+            if (!sources[i] || sources[i]->GetWidth() != color->GetWidth() || sources[i]->GetHeight() != color->GetHeight())
+                throw std::invalid_argument("Reflection denoiser: incompatible descriptor source");
+            views[i] = std::static_pointer_cast<VKTexture>(sources[i])->GetImageView();
+            if (!views[i]) throw std::invalid_argument("Reflection denoiser: missing source image view");
+        }
+        const auto* prior = m_ReflectionViews.Find(id);
+        const u64 generation = prior && (*prior)->input == input && (*prior)->sources == sources
+            && (*prior)->sourceViews == views ? (*prior)->sourceGeneration : m_NextSourceGeneration++;
+        const bool half = input->width != targets.GetSceneColor()->GetWidth()
+            || input->height != targets.GetSceneColor()->GetHeight();
+        const auto config = ReflectionDenoiserViewState::Config(targets.GetSceneColor()->GetWidth(),
+            targets.GetSceneColor()->GetHeight(), half, generation);
+        const auto extent = ReflectionViewState::WorkingExtent(config);
+        if (input->width != extent[0] || input->height != extent[1] || input->radiance->GetWidth() != extent[0]
+            || input->radiance->GetHeight() != extent[1])
+            throw std::invalid_argument("Reflection denoiser: incompatible raw working extent");
+        return m_ReflectionViews.Ensure(id, config, [&](const ViewStateConfig& c) {
+            auto state = ReflectionDenoiserViewState::Create(id, c,
+                {m_PassLayout, m_ReprojectLayout, m_MomentsLayout, m_AtrousLayout});
+            state->input = input; state->sources = sources; state->sourceViews = views;
+            ViewResources bridge; bridge.reflection = input; bridge.reflectionDenoiser = state;
+            WriteNativeView(bridge, targets);
+            return state;
+        }, [] { Renderer::WaitForGPU(); });
+    }
+    void SvgfDenoiser::ReleaseReflectionView(RenderViewId id)
+    {
+        m_ReflectionViews.Release(id, [] { Renderer::WaitForGPU(); });
     }
 
     const SvgfSettings& SvgfDenoiser::Settings() const
@@ -349,6 +386,7 @@ namespace Luth
         VkDevice device = VulkanContext::Get().GetDevice();
         m_DiViews.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_GiViews.ReleaseAll([] { Renderer::WaitForGPU(); });
+        m_ReflectionViews.ReleaseAll([] { Renderer::WaitForGPU(); });
         m_PassthroughPipeline.reset();
         m_ReprojectPipeline.reset();
         m_MomentsPipeline.reset();
@@ -436,82 +474,13 @@ namespace Luth
         return false;
     }
 
-    void SvgfDenoiser::AllocateViewSets(ViewResources& vr)
+    void SvgfDenoiser::AllocateViewSets(ViewResources&)
     {
-        LH_PROFILE_FUNCTION();
-        if (m_Channel == DenoiserChannel::Di || m_Channel == DenoiserChannel::DiSpecular || m_Channel == DenoiserChannel::Gi || vr.descPool == VK_NULL_HANDLE) return;
-        VkDevice device = VulkanContext::Get().GetDevice();
-        ChannelRefs c = Resolve(m_Channel, vr);
-        const std::string pfx = (m_Channel == DenoiserChannel::Gi) ? "View.SvgfGi" : "View.Svgf";
-
-        if (m_PassLayout != VK_NULL_HANDLE)
-        {
-            VkDescriptorSetAllocateInfo ai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-            ai.descriptorPool = vr.descPool; ai.descriptorSetCount = 1; ai.pSetLayouts = &m_PassLayout;
-            if (vkAllocateDescriptorSets(device, &ai, c.passthroughSet) != VK_SUCCESS)
-            {
-                LH_LOG(Renderer, error, "SvgfDenoiser: passthrough set alloc failed; bump view pool sizes");
-                *c.passthroughSet = VK_NULL_HANDLE;
-            }
-            else VulkanContext::SetDebugName(*c.passthroughSet, (pfx + "Passthrough").c_str());
-        }
-
-        if (m_ReprojectLayout != VK_NULL_HANDLE)
-        {
-            VkDescriptorSetLayout layouts[2] = { m_ReprojectLayout, m_ReprojectLayout };
-            VkDescriptorSetAllocateInfo ai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-            ai.descriptorPool = vr.descPool; ai.descriptorSetCount = 2; ai.pSetLayouts = layouts;
-            if (vkAllocateDescriptorSets(device, &ai, c.reprojectSet) != VK_SUCCESS)
-            {
-                LH_LOG(Renderer, error, "SvgfDenoiser: reproject sets alloc failed; bump view pool sizes");
-                c.reprojectSet[0] = c.reprojectSet[1] = VK_NULL_HANDLE;
-            }
-            else
-            {
-                VulkanContext::SetDebugName(c.reprojectSet[0], (pfx + "Reproject0").c_str());
-                VulkanContext::SetDebugName(c.reprojectSet[1], (pfx + "Reproject1").c_str());
-            }
-        }
-
-        if (m_MomentsLayout != VK_NULL_HANDLE)
-        {
-            VkDescriptorSetLayout layouts[2] = { m_MomentsLayout, m_MomentsLayout };
-            VkDescriptorSetAllocateInfo ai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-            ai.descriptorPool = vr.descPool; ai.descriptorSetCount = 2; ai.pSetLayouts = layouts;
-            if (vkAllocateDescriptorSets(device, &ai, c.momentsSet) != VK_SUCCESS)
-            {
-                LH_LOG(Renderer, error, "SvgfDenoiser: moments sets alloc failed; bump view pool sizes");
-                c.momentsSet[0] = c.momentsSet[1] = VK_NULL_HANDLE;
-            }
-            else
-            {
-                VulkanContext::SetDebugName(c.momentsSet[0], (pfx + "Moments0").c_str());
-                VulkanContext::SetDebugName(c.momentsSet[1], (pfx + "Moments1").c_str());
-            }
-        }
-
-        if (m_AtrousLayout != VK_NULL_HANDLE)
-        {
-            VkDescriptorSetLayout layouts[2] = { m_AtrousLayout, m_AtrousLayout };
-            VkDescriptorSetAllocateInfo ai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-            ai.descriptorPool = vr.descPool; ai.descriptorSetCount = 2; ai.pSetLayouts = layouts;
-            if (vkAllocateDescriptorSets(device, &ai, c.atrousSet) != VK_SUCCESS)
-            {
-                LH_LOG(Renderer, error, "SvgfDenoiser: atrous sets alloc failed; bump view pool sizes");
-                c.atrousSet[0] = c.atrousSet[1] = VK_NULL_HANDLE;
-            }
-            else
-            {
-                VulkanContext::SetDebugName(c.atrousSet[0], (pfx + "Atrous0").c_str());
-                VulkanContext::SetDebugName(c.atrousSet[1], (pfx + "Atrous1").c_str());
-            }
-        }
+        // All channels allocate descriptors in their domain-owned state stores.
     }
-
-    void SvgfDenoiser::WriteView(ViewResources& vr, FrameTargets& targets)
+    void SvgfDenoiser::WriteView(ViewResources&, FrameTargets&)
     {
-        if (m_Channel != DenoiserChannel::Reflections) return; // Domain-local immutable sets are written during Ensure.
-        WriteNativeView(vr, targets);
+        // Immutable domain bindings are written only during Ensure.
     }
     void SvgfDenoiser::WriteNativeView(ViewResources& vr, FrameTargets& targets)
     {
@@ -670,7 +639,7 @@ namespace Luth
             m_Channel == DenoiserChannel::Gi || !in.di.IsValid()) return {};
 
         ViewResources* vr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
-        if (!vr || (m_Channel == DenoiserChannel::DiSpecular && !vr->diSpecDenoiser)) return {};
+        if (!vr || !vr->reflectionDenoiser) return {};
         ChannelRefs c = Resolve(m_Channel, *vr);
         if (!*c.denoised) return {};
 

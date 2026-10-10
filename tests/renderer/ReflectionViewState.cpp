@@ -1,3 +1,4 @@
+#include "luth/renderer/features/rt/ReflectionDenoiserViewState.h"
 #include <doctest/doctest.h>
 #include "luth/renderer/features/rt/ReflectionViewState.h"
 #include "luth/renderer/backend/vulkan/VulkanViewPool.h"
@@ -69,9 +70,9 @@ TEST_CASE("ReflectionViewState: trace descriptors move out of the compatibility 
     CHECK(local.sizes[1].descriptorCount == 1);
     for (const u32 frames : {2u, 3u}) {
         const VulkanViewPool shared(true, frames), raster(false, frames);
-        CHECK(shared.maxSets + local.maxSets == 205 - 15 * frames - 41);
-        CHECK(shared.sizes[1].descriptorCount + local.sizes[1].descriptorCount == 248 - 11 * frames - 91);
-        CHECK(shared.sizes[2].descriptorCount + local.sizes[0].descriptorCount == 317 - 32 * frames - 94);
+        CHECK(shared.maxSets + ReflectionDenoiserPoolBudget{}.maxSets + local.maxSets == 205 - 15 * frames - 41);
+        CHECK(shared.sizes[1].descriptorCount + ReflectionDenoiserPoolBudget{}.sizes[1].descriptorCount + local.sizes[1].descriptorCount == 248 - 11 * frames - 91);
+        CHECK(shared.sizes[2].descriptorCount + ReflectionDenoiserPoolBudget{}.sizes[0].descriptorCount + local.sizes[0].descriptorCount == 317 - 32 * frames - 94);
         CHECK(raster.maxSets == 4 * frames);
         CHECK(raster.count == 3);
     }

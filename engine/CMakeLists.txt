@@ -58,6 +58,7 @@ add_library(Luth STATIC
     source/luth/renderer/features/rt/GiUpscaleFeature.cpp
     source/luth/renderer/features/rt/RestirDiViewState.cpp
     source/luth/renderer/features/rt/ReflectionFeature.cpp
+    source/luth/renderer/features/rt/ReflectionDenoiserViewState.cpp
     source/luth/renderer/features/rt/ReflectionViewState.cpp
     source/luth/renderer/subsystems/ReflectionViewResources.cpp
     source/luth/renderer/features/rt/RestirGiViewState.cpp

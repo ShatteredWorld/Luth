@@ -1,6 +1,7 @@
 #pragma once
 #include "luth/renderer/features/rt/DiDenoiserViewState.h"
 #include "luth/renderer/features/rt/GiDenoiserViewState.h"
+#include "luth/renderer/features/rt/ReflectionDenoiserViewState.h"
 #include "luth/renderer/features/rt/DiUpscaleViewState.h"
 #include "luth/renderer/features/rt/GiUpscaleViewState.h"
 
@@ -175,23 +176,7 @@ namespace Luth
         std::shared_ptr<GiUpscaleViewState> giUpscale; // Borrowed immutable GI upscale bindings.
         std::shared_ptr<DiUpscaleViewState> diUpscale; // Borrowed immutable bilateral-upscale bindings.
 
-        // RT-reflection specular SVGF: flat parallel to the GI SVGF fields. A third SvgfDenoiser
-        // instance (DenoiserChannel::Reflections) denoises reflRadiance via the hit-distance
-        // virtual-reprojection spec reproject; svgfSpecDenoised feeds pbr.frag Set 3 b7 (the reflection composite).
-        // The geom-history's spare channel carries hitDist for reflected-depth disocclusion (vs the diffuse
-        // geom's unused .a). Same shapes/clears as the GI SVGF.
-        std::shared_ptr<Texture> svgfSpecDenoised;
-        VkDescriptorSet svgfSpecPassthroughDescSet = VK_NULL_HANDLE;
-        std::shared_ptr<Texture> svgfSpecColorHist[2];
-        std::shared_ptr<Texture> svgfSpecMoments[2];
-        std::shared_ptr<Texture> svgfSpecGeom[2];
-        VkDescriptorSet svgfSpecReprojectDescSet[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-        std::shared_ptr<Texture> svgfSpecAtrous[2];
-        VkDescriptorSet svgfSpecMomentsDescSet[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-        VkDescriptorSet svgfSpecAtrousDescSet[2]  = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-        // Half-res reflections: the a-trous final writes svgfSpecHalf; a bilateral upscale resolves it into
-        // the full-res svgfSpecDenoised. reflHalfCached drives realloc. Mirrors the svgfDiSpecHalf trio.
-        std::shared_ptr<Texture> svgfSpecHalf;
+        std::shared_ptr<ReflectionDenoiserViewState> reflectionDenoiser; // Borrowed reflection-channel owner.
 
         // ReSTIR-DI specular SVGF: flat parallel to the spec fields above. A 4th SvgfDenoiser
         // instance (DenoiserChannel::DiSpecular) denoises restirDISpec via the SURFACE-MOTION reproject
@@ -216,7 +201,6 @@ namespace Luth
 
         std::shared_ptr<ReflectionViewState> reflection; // Borrowed raw reflection domain state.
         VkDescriptorSet          reflUpscaleDescSet = VK_NULL_HANDLE;   // half-res reflection bilateral-upscale set
-        u32                      reflHalfCached = ~0u;                  // last-applied halfResolution; drives realloc
     };
 
     // Orchestrates per-frame render-graph assembly and execution. Created by RenderingSystem and
@@ -364,7 +348,7 @@ namespace Luth
     private:
         // Split allocation + per-group descriptor writes for readability.
         void AllocateViewResources(ViewResources& vr, FrameTargets& targets);
-        void RecreateViewTextures(ViewResources& vr, u32 fullW, u32 fullH, u32 halfW, u32 halfH);
+        void RecreateViewTextures(ViewResources& vr, u32 fullW, u32 fullH);
         void DestroyViewResources(ViewResources& vr);
 
         // ---- Subsystems (own their domain state + lifecycle + passes) ----

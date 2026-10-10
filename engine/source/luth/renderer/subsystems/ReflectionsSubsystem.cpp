@@ -348,17 +348,17 @@ namespace Luth
     void ReflectionsSubsystem::WriteUpscaleView(ViewResources& vr, FrameTargets& targets)
     {
         LH_PROFILE_FUNCTION();
-        if (vr.reflUpscaleDescSet == VK_NULL_HANDLE) return;
-        if (!vr.svgfSpecHalf || !vr.svgfSpecDenoised || !targets.GetSceneDepth() || !targets.GetSlimNormal()) return;
+        if (vr.reflUpscaleDescSet == VK_NULL_HANDLE || !vr.reflectionDenoiser) return;
+        if (!vr.reflectionDenoiser->svgfHalf || !vr.reflectionDenoiser->svgfDenoised || !targets.GetSceneDepth() || !targets.GetSlimNormal()) return;
 
         VkDescriptorImageInfo halfInfo{ m_Sampler,
-            std::static_pointer_cast<VKTexture>(vr.svgfSpecHalf)->GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
+            std::static_pointer_cast<VKTexture>(vr.reflectionDenoiser->svgfHalf)->GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
         VkDescriptorImageInfo depthInfo{ m_Sampler,
             std::static_pointer_cast<VKTexture>(targets.GetSceneDepth())->GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo normalInfo{ m_Sampler,
             std::static_pointer_cast<VKTexture>(targets.GetSlimNormal())->GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo outInfo{ VK_NULL_HANDLE,
-            std::static_pointer_cast<VKTexture>(vr.svgfSpecDenoised)->GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
+            std::static_pointer_cast<VKTexture>(vr.reflectionDenoiser->svgfDenoised)->GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
 
         VkWriteDescriptorSet w[4]{};
         for (u32 i = 0; i < 4; ++i)
@@ -379,8 +379,12 @@ namespace Luth
         LH_PROFILE_FUNCTION();
         if (!m_UpscalePipeline || !reflHalf.IsValid()) return reflHalf;
         ViewResources* preflightVr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
-        if (!preflightVr || preflightVr->reflUpscaleDescSet == VK_NULL_HANDLE || !preflightVr->svgfSpecDenoised)
+        if (!preflightVr || !preflightVr->reflectionDenoiser || preflightVr->reflUpscaleDescSet == VK_NULL_HANDLE || !preflightVr->reflectionDenoiser->svgfDenoised)
             return reflHalf;
+
+        // Collapsed half extents already target the full output; avoid importing it twice.
+        const auto& state = *preflightVr->reflectionDenoiser;
+        if (state.width == state.svgfDenoised->GetWidth() && state.height == state.svgfDenoised->GetHeight()) return reflHalf;
 
         struct UpData { RG::ResourceHandle half, depth, normal, out; };
         RG::ResourceHandle outHandle{};
@@ -393,7 +397,7 @@ namespace Luth
                 if (slimNormal.IsValid()) data.normal = builder.ReadStorageImage(slimNormal);
 
                 ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                auto outTex = std::static_pointer_cast<VKTexture>(vr->svgfSpecDenoised);
+                auto outTex = std::static_pointer_cast<VKTexture>(vr->reflectionDenoiser->svgfDenoised);
                 RG::TextureDesc desc;
                 desc.name   = "SvgfSpecDenoised";
                 desc.width  = outTex->GetWidth();
@@ -407,7 +411,7 @@ namespace Luth
             [this](UpData&, RG::RenderPassContext& ctx) {
                 VkCommandBuffer cmd = ctx.commandBuffer;
                 ViewResources*  vr  = m_Pipeline->GetCurrentViewResources();
-                if (!vr || vr->reflUpscaleDescSet == VK_NULL_HANDLE || !vr->svgfSpecDenoised || !vr->svgfSpecHalf) return;
+                if (!vr || !vr->reflectionDenoiser || vr->reflUpscaleDescSet == VK_NULL_HANDLE || !vr->reflectionDenoiser->svgfDenoised || !vr->reflectionDenoiser->svgfHalf) return;
 
                 const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
                 m_UpscalePipeline->Bind(cmd);
@@ -415,8 +419,8 @@ namespace Luth
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                     m_UpscalePipeline->GetLayout(), 0, 2, sets, 0, nullptr);
 
-                auto full = std::static_pointer_cast<VKTexture>(vr->svgfSpecDenoised);
-                auto half = std::static_pointer_cast<VKTexture>(vr->svgfSpecHalf);
+                auto full = std::static_pointer_cast<VKTexture>(vr->reflectionDenoiser->svgfDenoised);
+                auto half = std::static_pointer_cast<VKTexture>(vr->reflectionDenoiser->svgfHalf);
                 const SvgfSettings& ss = m_Pipeline->GetSystem().GetSvgfSpecSettings();
                 ReflUpscalePC pc{};
                 pc.fullW = (i32)full->GetWidth();  pc.fullH = (i32)full->GetHeight();

@@ -1,3 +1,4 @@
+#include "luth/renderer/features/rt/ReflectionDenoiserViewState.h"
 #include "luth/renderer/features/rt/ReflectionViewState.h"
 #include "luth/renderer/features/rt/GiUpscaleViewState.h"
 #include <doctest/doctest.h>
@@ -77,8 +78,8 @@ TEST_CASE("RtSunShadowViewState: local pool removes exactly its descriptors from
         CHECK(local.sizes[1].type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         CHECK(local.sizes[1].descriptorCount == frames);
         const DiDenoiserPoolBudget diffuse;
-        CHECK(shared.maxSets + ReflectionPoolBudget{}.maxSets + GiUpscalePoolBudget{}.maxSets + GiDenoiserPoolBudget{}.maxSets + RestirGiPoolBudget(frames).maxSets + local.maxSets + 2 * diffuse.maxSets + DiUpscalePoolBudget{}.maxSets == 205 - 13 * frames - 16);
-        CHECK(shared.sizes[1].descriptorCount + ReflectionPoolBudget{}.sizes[1].descriptorCount + GiUpscalePoolBudget{}.sizes[1].descriptorCount + GiDenoiserPoolBudget{}.sizes[1].descriptorCount + RestirGiPoolBudget(frames).sizes[1].descriptorCount + local.sizes[1].descriptorCount + 2 * diffuse.sizes[1].descriptorCount + DiUpscalePoolBudget{}.sizes[1].descriptorCount == 248 - 9 * frames - 13);
-        CHECK(shared.sizes[2].descriptorCount + ReflectionPoolBudget{}.sizes[0].descriptorCount + GiUpscalePoolBudget{}.sizes[0].descriptorCount + GiDenoiserPoolBudget{}.sizes[0].descriptorCount + RestirGiPoolBudget(frames).sizes[0].descriptorCount + local.sizes[0].descriptorCount + 2 * diffuse.sizes[0].descriptorCount + DiUpscalePoolBudget{}.sizes[0].descriptorCount == 317 - 27 * frames - 21);
+        CHECK(shared.maxSets + ReflectionDenoiserPoolBudget{}.maxSets + ReflectionPoolBudget{}.maxSets + GiUpscalePoolBudget{}.maxSets + GiDenoiserPoolBudget{}.maxSets + RestirGiPoolBudget(frames).maxSets + local.maxSets + 2 * diffuse.maxSets + DiUpscalePoolBudget{}.maxSets == 205 - 13 * frames - 16);
+        CHECK(shared.sizes[1].descriptorCount + ReflectionDenoiserPoolBudget{}.sizes[1].descriptorCount + ReflectionPoolBudget{}.sizes[1].descriptorCount + GiUpscalePoolBudget{}.sizes[1].descriptorCount + GiDenoiserPoolBudget{}.sizes[1].descriptorCount + RestirGiPoolBudget(frames).sizes[1].descriptorCount + local.sizes[1].descriptorCount + 2 * diffuse.sizes[1].descriptorCount + DiUpscalePoolBudget{}.sizes[1].descriptorCount == 248 - 9 * frames - 13);
+        CHECK(shared.sizes[2].descriptorCount + ReflectionDenoiserPoolBudget{}.sizes[0].descriptorCount + ReflectionPoolBudget{}.sizes[0].descriptorCount + GiUpscalePoolBudget{}.sizes[0].descriptorCount + GiDenoiserPoolBudget{}.sizes[0].descriptorCount + RestirGiPoolBudget(frames).sizes[0].descriptorCount + local.sizes[0].descriptorCount + 2 * diffuse.sizes[0].descriptorCount + DiUpscalePoolBudget{}.sizes[0].descriptorCount == 317 - 27 * frames - 21);
     }
 }
