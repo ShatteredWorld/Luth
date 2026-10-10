@@ -65,6 +65,7 @@ add_executable(LuthTests
     renderer/DiUpscaleViewState.cpp
     renderer/GiUpscaleViewState.cpp
     renderer/DiUpscaleFeature.cpp
+    renderer/GiUpscaleFeature.cpp
     renderer/RestirDiViewState.cpp
     renderer/RestirGiViewState.cpp
     renderer/RestirDiFeature.cpp

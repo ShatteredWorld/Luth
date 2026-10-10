@@ -27,6 +27,7 @@
 #include "luth/renderer/features/rt/RestirDiFeature.h"
 #include "luth/renderer/features/rt/RestirGiFeature.h"
 #include "luth/renderer/features/rt/GiDenoiserFeature.h"
+#include "luth/renderer/features/rt/GiUpscaleFeature.h"
 #include "luth/renderer/features/rt/DiDenoiserFeature.h"
 #include "luth/renderer/features/rt/DiUpscaleFeature.h"
 #include "luth/renderer/features/rt/RtFogFeature.h"
@@ -180,9 +181,11 @@ namespace Luth
             RenderPipelineDefinition giDefinition;
             giDefinition.AddFeature<RestirGiFeature>();
             giDefinition.AddFeature<GiDenoiserFeature>();
+            giDefinition.AddFeature<GiUpscaleFeature>();
             PipelineInputContract giInputs;
             giInputs.resources = {{RtSceneResources::Parameters}, {RestirGiResources::Bindings},
                 {GiDenoiserResources::Bindings}, {RenderResources::MaterialID}, {RenderResources::Roughness},
+                {GiUpscaleResources::Bindings},
                 {RenderResources::SurfaceDepth}, {RenderResources::Normal}, {RenderResources::MotionVectors},
                 {RenderResources::LightData}, {RtSceneResources::Scene, ResourceOutputPresence::Optional}};
             giInputs.capabilities = {&RtSceneResources::RayScene};
@@ -977,9 +980,13 @@ namespace Luth
             const auto denoiser = static_cast<SvgfDenoiser&>(*m_DenoiseGi).PrepareGiBindings(*m_CurrentViewResources, frameIndex,
                 view.id, m_CurrentViewResources->generation, s.GetSvgfGiSettings());
             const GiDenoiserBindingRef denoiserBinding{&denoiser};
+            const auto upscale = m_RestirGi.PrepareUpscaleBindings(*m_CurrentViewResources, frameIndex,
+                view.id, m_CurrentViewResources->generation, s.GetRestirGiSettings());
+            const GiUpscaleBindingRef upscaleBinding{&upscale};
             const std::array resources{RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters),
                 RenderInputBinding::Present(RestirGiResources::Bindings, binding),
                 RenderInputBinding::Present(GiDenoiserResources::Bindings, denoiserBinding),
+                RenderInputBinding::Present(GiUpscaleResources::Bindings, upscaleBinding),
                 RenderInputBinding::Present(RenderResources::MaterialID, materialOutput),
                 RenderInputBinding::Present(RenderResources::Roughness, roughnessOutput),
                 RenderInputBinding::Present(RenderResources::LightData, uploadedLights),
@@ -991,7 +998,7 @@ namespace Luth
             if (rayScene.native) frame.capabilities = RtSceneResources::Requests;
             ViewRenderInputs inputs; inputs.id = view.id; inputs.resourceGeneration = m_CurrentViewResources->generation;
             inputs.width = m_CurrentViewResources->width; inputs.height = m_CurrentViewResources->height;
-            const std::array exports{RenderOutputBinding::Capture(GiDenoiserResources::Diffuse, filteredGi),
+            const std::array exports{RenderOutputBinding::Capture(GiUpscaleResources::Diffuse, filteredGi),
                 RenderOutputBinding::Capture(GiReservoirVizResources::SpatialReservoir, giSpatialReservoir)};
             const auto built = m_RestirGiComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports);
             if (!built.success) {
@@ -1001,15 +1008,6 @@ namespace Luth
             }
         }
         RG::ResourceHandle denoisedGiHandle = filteredGi.handle;
-        // Half-res GI: AddPasses returns the half-res svgfGiHalf handle; bilaterally upscale it into the
-        // full-res svgfGiDenoised that GeometryPass / pbr Set 3 b6 consume. Full-res mode is a no-op.
-        if (denoisedGiHandle.IsValid() && m_System.GetRestirGiSettings().halfResolution) {
-            const auto native = m_RestirGi.PrepareUpscaleBindings(*m_CurrentViewResources,
-                Renderer::GetFrameData()->GetRenderFrameIndex(), view.id, m_CurrentViewResources->generation,
-                s.GetRestirGiSettings());
-            denoisedGiHandle = RtRestirGiSubsystem::AddUpscalePass(rg,
-                {denoisedGiHandle, surfaceDepth.handle, slimGB.normal}, native);
-        }
 
         // RT specular reflections: one GGX-VNDF ray/pixel from the slim G-buffer, then
         // a dedicated specular SVGF (3rd instance, DenoiserChannel::Reflections). The DenoiseInputs.motion

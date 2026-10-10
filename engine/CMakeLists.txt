@@ -55,6 +55,7 @@ add_library(Luth STATIC
     source/luth/renderer/features/rt/DiUpscaleViewState.cpp
     source/luth/renderer/features/rt/GiUpscaleViewState.cpp
     source/luth/renderer/features/rt/DiUpscaleFeature.cpp
+    source/luth/renderer/features/rt/GiUpscaleFeature.cpp
     source/luth/renderer/features/rt/RestirDiViewState.cpp
     source/luth/renderer/features/rt/RestirGiViewState.cpp
     source/luth/renderer/features/rt/RestirDiFeature.cpp
