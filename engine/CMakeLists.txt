@@ -50,6 +50,7 @@ add_library(Luth STATIC
     source/luth/renderer/features/rt/RtSunShadowViewState.cpp
     source/luth/renderer/features/rt/DiDenoiserFeature.cpp
     source/luth/renderer/features/rt/DiDenoiserViewState.cpp
+    source/luth/renderer/features/rt/GiDenoiserViewState.cpp
     source/luth/renderer/features/rt/DiUpscaleViewState.cpp
     source/luth/renderer/features/rt/DiUpscaleFeature.cpp
     source/luth/renderer/features/rt/RestirDiViewState.cpp

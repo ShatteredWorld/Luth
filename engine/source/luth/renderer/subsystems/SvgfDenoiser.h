@@ -4,6 +4,7 @@
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 
 #include "luth/renderer/features/rt/DiDenoiserViewState.h"
+#include "luth/renderer/features/rt/GiDenoiserViewState.h"
 #include "luth/renderer/features/rt/DiDenoiserBindings.h"
 #include <memory>
 #include <string>
@@ -44,6 +45,9 @@ namespace Luth
         std::shared_ptr<DiDenoiserViewState> EnsureDiView(RenderViewId, FrameTargets&,
             const std::shared_ptr<RestirDiViewState>&);
         void ReleaseDiView(RenderViewId);
+        std::shared_ptr<GiDenoiserViewState> EnsureGiView(RenderViewId, FrameTargets&,
+            const std::shared_ptr<RestirGiViewState>&);
+        void ReleaseGiView(RenderViewId);
         DiDenoiserBindings PrepareDiBindings(const ViewResources&, u64 frameIndex, RenderViewId,
             u64 generation, const SvgfSettings&) const;
         static RG::ResourceHandle AddDiPasses(RG::RenderGraph&,
@@ -62,6 +66,7 @@ namespace Luth
         const char*         PassName(int which) const;  // 0=reproject 1=moments 2=atrous 3=passthrough
 
         DiDenoiserViewStates m_DiViews;
+        GiDenoiserViewStates m_GiViews;
         u64 m_NextSourceGeneration = 1;
         DenoiserChannel m_Channel = DenoiserChannel::Di;
         RenderPipeline* m_Pipeline = nullptr;

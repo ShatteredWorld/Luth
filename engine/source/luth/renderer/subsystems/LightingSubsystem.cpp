@@ -382,15 +382,15 @@ namespace Luth
             diImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
 
-        // Binding 6 (ReSTIR GI): post-denoise GI irradiance. Bound to vr.svgfGiDenoised (the GI
+        // Binding 6 (ReSTIR GI): post-denoise GI irradiance. Bound to vr.giDenoiser->svgfDenoised (the GI
         // denoiser owns this slot, mirroring b5/DI): the bind is static and the A/B is denoise-vs-raw
         // with no descriptor swap (the denoiser passes the raw GI through when disabled). Same reused
         // mask sampler. pbr.frag adds it only when restirParams.y > 0.5; the GeometryPass Read
         // transitions it from the denoiser's GENERAL to SHADER_READ_ONLY_OPTIMAL.
         VkDescriptorImageInfo giImgInfo{};
-        if (m_HybridSignalsEnabled && vr.svgfGiDenoised)
+        if (m_HybridSignalsEnabled && vr.giDenoiser && vr.giDenoiser->svgfDenoised)
         {
-            auto vkGI = std::static_pointer_cast<VKTexture>(vr.svgfGiDenoised);
+            auto vkGI = std::static_pointer_cast<VKTexture>(vr.giDenoiser->svgfDenoised);
             giImgInfo.sampler     = m_SunShadowMaskSampler;
             giImgInfo.imageView   = vkGI->GetImageView();
             giImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

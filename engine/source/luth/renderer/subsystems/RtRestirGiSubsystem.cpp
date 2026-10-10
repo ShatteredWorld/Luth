@@ -831,16 +831,16 @@ namespace Luth
     {
         LH_PROFILE_FUNCTION();
         if (vr.giUpscaleDescSet == VK_NULL_HANDLE) return;
-        if (!vr.svgfGiHalf || !vr.svgfGiDenoised || !targets.GetSceneDepth() || !targets.GetSlimNormal()) return;
+        if (!vr.giDenoiser || !vr.giDenoiser->svgfGiHalf || !vr.giDenoiser->svgfDenoised || !targets.GetSceneDepth() || !targets.GetSlimNormal()) return;
 
         VkDescriptorImageInfo halfInfo{ m_Sampler,
-            std::static_pointer_cast<VKTexture>(vr.svgfGiHalf)->GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
+            std::static_pointer_cast<VKTexture>(vr.giDenoiser->svgfGiHalf)->GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
         VkDescriptorImageInfo depthInfo{ m_Sampler,
             std::static_pointer_cast<VKTexture>(targets.GetSceneDepth())->GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo normalInfo{ m_Sampler,
             std::static_pointer_cast<VKTexture>(targets.GetSlimNormal())->GetImageView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo outInfo{ VK_NULL_HANDLE,
-            std::static_pointer_cast<VKTexture>(vr.svgfGiDenoised)->GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
+            std::static_pointer_cast<VKTexture>(vr.giDenoiser->svgfDenoised)->GetImageView(), VK_IMAGE_LAYOUT_GENERAL };
 
         VkWriteDescriptorSet w[4]{};
         for (u32 i = 0; i < 4; ++i)
@@ -861,7 +861,7 @@ namespace Luth
         LH_PROFILE_FUNCTION();
         if (!m_UpscalePipeline || !giHalf.IsValid()) return giHalf;
         ViewResources* preflightVr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
-        if (!preflightVr || preflightVr->giUpscaleDescSet == VK_NULL_HANDLE || !preflightVr->svgfGiDenoised)
+        if (!preflightVr || !preflightVr->giDenoiser || preflightVr->giUpscaleDescSet == VK_NULL_HANDLE || !preflightVr->giDenoiser->svgfDenoised)
             return giHalf;
 
         struct UpData { RG::ResourceHandle half, depth, normal, out; };
@@ -875,7 +875,7 @@ namespace Luth
                 if (slimNormal.IsValid()) data.normal = builder.ReadStorageImage(slimNormal);
 
                 ViewResources* vr = m_Pipeline->GetCurrentViewResources();
-                auto outTex = std::static_pointer_cast<VKTexture>(vr->svgfGiDenoised);
+                auto outTex = std::static_pointer_cast<VKTexture>(vr->giDenoiser->svgfDenoised);
                 RG::TextureDesc desc;
                 desc.name   = "SvgfGiDenoised";
                 desc.width  = outTex->GetWidth();
@@ -889,7 +889,7 @@ namespace Luth
             [this](UpData&, RG::RenderPassContext& ctx) {
                 VkCommandBuffer cmd = ctx.commandBuffer;
                 ViewResources*  vr  = m_Pipeline->GetCurrentViewResources();
-                if (!vr || vr->giUpscaleDescSet == VK_NULL_HANDLE || !vr->svgfGiDenoised || !vr->svgfGiHalf) return;
+                if (!vr || !vr->giDenoiser || vr->giUpscaleDescSet == VK_NULL_HANDLE || !vr->giDenoiser->svgfDenoised || !vr->giDenoiser->svgfGiHalf) return;
 
                 const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
                 m_UpscalePipeline->Bind(cmd);
@@ -897,8 +897,8 @@ namespace Luth
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                     m_UpscalePipeline->GetLayout(), 0, 2, sets, 0, nullptr);
 
-                auto full = std::static_pointer_cast<VKTexture>(vr->svgfGiDenoised);
-                auto half = std::static_pointer_cast<VKTexture>(vr->svgfGiHalf);
+                auto full = std::static_pointer_cast<VKTexture>(vr->giDenoiser->svgfDenoised);
+                auto half = std::static_pointer_cast<VKTexture>(vr->giDenoiser->svgfGiHalf);
                 const RestirGiSettings& s = m_Pipeline->GetSystem().GetRestirGiSettings();
                 GiUpscalePC pc{};
                 pc.fullW = (i32)full->GetWidth();  pc.fullH = (i32)full->GetHeight();

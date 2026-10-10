@@ -113,6 +113,11 @@ namespace Luth
         vr.restirGi = std::move(restirGi);
         if (restirGiReplaced) vr.generation = m_System.InvalidateView(id);
 
+        auto giDenoiser = m_RtNativeInitialized ? static_cast<SvgfDenoiser*>(m_DenoiseGi.get())->EnsureGiView(id, targets, vr.restirGi) : nullptr;
+        const bool giDenoiserReplaced = vr.giDenoiser && vr.giDenoiser != giDenoiser;
+        vr.giDenoiser = std::move(giDenoiser);
+        if (giDenoiserReplaced) vr.generation = m_System.InvalidateView(id);
+
         auto* diffuseDenoiser = static_cast<SvgfDenoiser*>(m_Denoise.get());
         auto diDenoiser = m_RtNativeInitialized ? diffuseDenoiser->EnsureDiView(id, targets, vr.restirDi) : nullptr;
         const bool diDenoiserReplaced = vr.diDenoiser && vr.diDenoiser != diDenoiser;
@@ -137,8 +142,7 @@ namespace Luth
             AllocateViewResources(vr, targets);
         }
         else if (vr.width != newW || vr.height != newH ||
-                 (m_RtNativeInitialized && (vr.giHalfCached != (m_System.GetRestirGiSettings().halfResolution ? 1u : 0u) ||
-                   vr.reflHalfCached != (m_System.GetReflectionsSettings().halfResolution ? 1u : 0u))))
+                 (m_RtNativeInitialized && vr.reflHalfCached != (m_System.GetReflectionsSettings().halfResolution ? 1u : 0u)))
         {
             // Stable descriptor slots may still be referenced by earlier submissions.
             Renderer::WaitForGPU();
@@ -154,7 +158,7 @@ namespace Luth
                 m_PathTrace.WriteView(vr);              // re-bind PT accumulator + display image (recreated on resize)
                 m_Reflections.WriteView(vr, targets);   // re-bind reflection output + slim G-buffer samplers
                 m_Reflections.WriteUpscaleView(vr, targets);    // re-bind refl upscale half-input + full output
-                m_DenoiseGi->WriteView(vr, targets);    // re-bind GI SVGF inputs + output to the new images
+
                 m_DenoiseRefl->WriteView(vr, targets);  // re-bind specular SVGF inputs + output to the new images
             }
             m_Lighting.WriteShadowView(vr);         // re-bind Set 3 b4 sun mask + b5 denoised DI + b6 denoised GI
@@ -162,7 +166,11 @@ namespace Luth
             m_Global.WriteView(vr, MakeGlobalCtx(*this, vr));
         }
 
-        if (restirGiReplaced && m_RtNativeInitialized) m_DenoiseGi->WriteView(vr, targets);
+        if (giDenoiserReplaced && m_RtNativeInitialized) {
+            // Both stable legacy sets borrow the new GI outputs; EnsureGiView completed the safe point.
+            m_RestirGi.WriteUpscaleView(vr, targets);
+            m_Lighting.WriteShadowView(vr);
+        }
         vr.width  = newW;
         vr.height = newH;
         // Explicit owner invalidation must reach temporal preparation even when
@@ -182,6 +190,7 @@ namespace Luth
         static_cast<SvgfDenoiser*>(m_Denoise.get())->ReleaseDiView(id);
         static_cast<SvgfDenoiser*>(m_DenoiseDiSpec.get())->ReleaseDiView(id);
         m_Restir.ReleaseView(id);
+        static_cast<SvgfDenoiser*>(m_DenoiseGi.get())->ReleaseGiView(id);
         m_RestirGi.ReleaseView(id);
         m_Transparency.ReleaseView(id);
         m_PostProcess.ReleaseTaaView(id);
@@ -297,7 +306,7 @@ namespace Luth
             m_PathTrace.WriteView(vr);
             m_Reflections.WriteView(vr, targets);
             m_Reflections.WriteUpscaleView(vr, targets);    // bind refl upscale half-input + full output
-            m_DenoiseGi->WriteView(vr, targets);
+
             m_DenoiseRefl->WriteView(vr, targets);
         }
         // Global writes borrow the final AO binding from the independent GTAO state.
@@ -308,14 +317,6 @@ namespace Luth
     {
         // This remaining compatibility allocation group is entirely RT-owned.
         if (!m_RtNativeInitialized) return;
-
-        // Half-res GI (RestirGiSettings::halfResolution): remaining svgfGi* history
-        // allocate at half extent; svgfGiDenoised stays full (the bilateral-upscale output). giHalfCached
-        // lets EnsureViewResources detect a runtime toggle and realloc (like other allocation settings).
-        const bool giHalf = m_System.GetRestirGiSettings().halfResolution;
-        const u32  giW    = giHalf ? halfW : fullW;
-        const u32  giH    = giHalf ? halfH : fullH;
-        vr.giHalfCached   = giHalf ? 1u : 0u;
 
         // Half-res reflections (ReflectionsSettings::halfResolution): reflRadiance trace output + svgfSpec*
         // history allocate at half; svgfSpecDenoised stays full (the bilateral-upscale output).
@@ -345,20 +346,6 @@ namespace Luth
             /*arrayLayers*/ 1, /*createFlags*/ 0u, /*mipLevels*/ 1,
             VK_IMAGE_USAGE_STORAGE_BIT);
 
-        // GI SVGF: flat parallel set to the DI history above. History + a-trous run at the GI working res
-        // (half when halfResolution); svgfGiDenoised stays FULL (the bilateral-upscale output). svgfGiHalf
-        // is the half a-trous final the upscale reads; written each frame, so no clear.
-        vr.svgfGiDenoised = std::make_shared<VKTexture>(fullW, fullH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-        vr.svgfGiHalf     = std::make_shared<VKTexture>(giW, giH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-        for (u32 i = 0; i < 2; ++i)
-        {
-            vr.svgfGiColorHist[i] = std::make_shared<VKTexture>(giW, giH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-            vr.svgfGiMoments[i]   = std::make_shared<VKTexture>(giW, giH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-            vr.svgfGiGeom[i]      = std::make_shared<VKTexture>(giW, giH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-        }
-        vr.svgfGiAtrous[0] = std::make_shared<VKTexture>(giW, giH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-        vr.svgfGiAtrous[1] = std::make_shared<VKTexture>(giW, giH, TextureFormat::RGBA16F, 1, 0u, 1, VK_IMAGE_USAGE_STORAGE_BIT);
-
         // Specular (RT-reflection) SVGF history: flat parallel to the GI SVGF. History + a-trous run
         // at the reflection working res (half when halfResolution); svgfSpecDenoised stays FULL (the
         // bilateral-upscale output). svgfSpecGeom carries hitDist in its .a (vs GI's unused .a) for
@@ -379,16 +366,7 @@ namespace Luth
         // pixel content. The SVGF reproject
         // imageLoads its prev history on frame 0; without this clear the first read is NaN-prone garbage
         // (and imageLoad needs GENERAL). One-shot submit per view-resize only.
-        VkImage clearTargets[17] = {
-            // GI SVGF history: bootstrap-cleared so frame 0's prev imageLoad is well-defined.
-            std::static_pointer_cast<VKTexture>(vr.svgfGiColorHist[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfGiColorHist[1])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfGiMoments[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfGiMoments[1])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfGiGeom[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfGiGeom[1])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfGiAtrous[0])->GetImage(),
-            std::static_pointer_cast<VKTexture>(vr.svgfGiAtrous[1])->GetImage(),
+        VkImage clearTargets[9] = {
             // PathTrace fp32 accumulator: read-before-write cross-frame, so zero it to GENERAL on resize.
             std::static_pointer_cast<VKTexture>(vr.ptAccum)->GetImage(),
             // Specular SVGF history: frame 0's prev imageLoad must be well-defined.
@@ -401,7 +379,7 @@ namespace Luth
             std::static_pointer_cast<VKTexture>(vr.svgfSpecAtrous[0])->GetImage(),
             std::static_pointer_cast<VKTexture>(vr.svgfSpecAtrous[1])->GetImage(),
         };
-        constexpr u32 kClearCount = 17;
+        constexpr u32 kClearCount = 9;
         VulkanContext::Get().ImmediateSubmit([&](VkCommandBuffer cmd) {
             VkImageMemoryBarrier toDst[kClearCount]{};
             for (u32 i = 0; i < kClearCount; ++i)
@@ -458,18 +436,7 @@ namespace Luth
         vr.restirGi.reset();
         vr.diUpscale.reset();
         vr.diDenoiser.reset();
-        vr.svgfGiDenoised.reset();
-        vr.svgfGiHalf.reset();
-
-
-        for (u32 i = 0; i < 2; ++i)
-        {
-            vr.svgfGiColorHist[i].reset();
-            vr.svgfGiMoments[i].reset();
-            vr.svgfGiGeom[i].reset();
-        }
-        vr.svgfGiAtrous[0].reset();
-        vr.svgfGiAtrous[1].reset();
+        vr.giDenoiser.reset();
         vr.ptAccum.reset();
         vr.ptColor.reset();
         vr.reflRadiance.reset();

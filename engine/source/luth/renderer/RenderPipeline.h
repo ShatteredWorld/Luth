@@ -1,5 +1,6 @@
 #pragma once
 #include "luth/renderer/features/rt/DiDenoiserViewState.h"
+#include "luth/renderer/features/rt/GiDenoiserViewState.h"
 #include "luth/renderer/features/rt/DiUpscaleViewState.h"
 
 #include "luth/core/types/LuthMath.h"
@@ -169,23 +170,7 @@ namespace Luth
         // Diffuse DI histories, output images and descriptors belong to SvgfDenoiser.
         std::shared_ptr<DiDenoiserViewState> diDenoiser; // Borrowed diffuse-channel state.
 
-        // ReSTIR GI SVGF: flat parallel set to the DI fields above (mirroring restirDI/restirGiDI).
-        // A second SvgfDenoiser instance (DenoiserChannel::Gi) drives these; svgfGiDenoised feeds Set 3
-        // b6. Same shapes/clears as DI. see arch/rendering-pipeline.md
-        std::shared_ptr<Texture> svgfGiDenoised;
-        VkDescriptorSet svgfGiPassthroughDescSet = VK_NULL_HANDLE;
-        std::shared_ptr<Texture> svgfGiColorHist[2];
-        std::shared_ptr<Texture> svgfGiMoments[2];
-        std::shared_ptr<Texture> svgfGiGeom[2];
-        VkDescriptorSet svgfGiReprojectDescSet[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-        std::shared_ptr<Texture> svgfGiAtrous[2];
-        VkDescriptorSet svgfGiMomentsDescSet[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-        VkDescriptorSet svgfGiAtrousDescSet[2]  = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-        // Half-res GI: svgfGi* history + reservoirs allocate at half extent; the a-trous final writes
-        // svgfGiHalf, a bilateral upscale resolves it into the full-res svgfGiDenoised. giHalfCached
-        // drives EnsureViewResources realloc on a runtime toggle.
-        std::shared_ptr<Texture> svgfGiHalf;
-        u32 giHalfCached = ~0u;
+        std::shared_ptr<GiDenoiserViewState> giDenoiser; // Borrowed GI-channel owner.
         VkDescriptorSet giUpscaleDescSet = VK_NULL_HANDLE;   // half-res GI bilateral-upscale set (Set 1)
         std::shared_ptr<DiUpscaleViewState> diUpscale; // Borrowed immutable bilateral-upscale bindings.
 

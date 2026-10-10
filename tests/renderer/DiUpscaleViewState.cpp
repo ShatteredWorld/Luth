@@ -1,4 +1,5 @@
 #include <doctest/doctest.h>
+#include "luth/renderer/features/rt/GiDenoiserViewState.h"
 #include "luth/renderer/features/rt/RestirGiViewState.h"
 #include "luth/core/diagnostics/Log.h"
 #include "luth/renderer/FrameTargets.h"
@@ -63,9 +64,9 @@ TEST_CASE("DiUpscaleViewState: descriptor budget accounts for both channels") {
     CHECK(local.sizes[1].type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE); CHECK(local.sizes[1].descriptorCount == 2);
     for (u32 frames : {2u, 3u}) {
         const VulkanViewPool shared(true, frames);
-        CHECK(shared.maxSets + RestirGiPoolBudget(frames).maxSets + local.maxSets == 205 - 14 * frames - 30);
-        CHECK(shared.sizes[1].descriptorCount + RestirGiPoolBudget(frames).sizes[1].descriptorCount + local.sizes[1].descriptorCount == 248 - 10 * frames - 63);
-        CHECK(shared.sizes[2].descriptorCount + RestirGiPoolBudget(frames).sizes[0].descriptorCount + local.sizes[0].descriptorCount == 317 - 29 * frames - 63);
+        CHECK(shared.maxSets + GiDenoiserPoolBudget{}.maxSets + RestirGiPoolBudget(frames).maxSets + local.maxSets == 205 - 14 * frames - 30);
+        CHECK(shared.sizes[1].descriptorCount + GiDenoiserPoolBudget{}.sizes[1].descriptorCount + RestirGiPoolBudget(frames).sizes[1].descriptorCount + local.sizes[1].descriptorCount == 248 - 10 * frames - 63);
+        CHECK(shared.sizes[2].descriptorCount + GiDenoiserPoolBudget{}.sizes[0].descriptorCount + RestirGiPoolBudget(frames).sizes[0].descriptorCount + local.sizes[0].descriptorCount == 317 - 29 * frames - 63);
     }
 }
 TEST_CASE("DiUpscaleViewState: native registration preserves both upscale names and borrowed handles") {
