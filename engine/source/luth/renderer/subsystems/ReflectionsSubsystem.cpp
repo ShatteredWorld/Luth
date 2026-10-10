@@ -236,47 +236,65 @@ namespace Luth
         vkUpdateDescriptorSets(VulkanContext::Get().GetDevice(), 4, writes, 0, nullptr);
     }
 
+    ReflectionBindings ReflectionsSubsystem::PrepareBindings(const ViewResources& vr, u64 frameIndex,
+        RenderViewId view, u64 generation, const PreparedRtScene* scene, const ReflectionsSettings& settings,
+        const Mat4& inverseViewProjection, const Memory::GPUSubRegion& lights, bool environmentReady) const
+    {
+        ReflectionBindings packet;
+        packet.frameIndex = frameIndex; packet.view = view; packet.generation = generation;
+        packet.settings = settings; packet.inverseViewProjection = inverseViewProjection;
+        packet.lights = lights; packet.environmentReady = environmentReady;
+        packet.fullWidth = vr.width; packet.fullHeight = vr.height;
+        if (!m_ReflPipeline || !vr.reflection) return packet;
+        packet.pipeline = m_ReflPipeline->GetHandle(); packet.layout = m_ReflPipeline->GetLayout();
+        packet.retained = vr.reflection;
+        packet.width = vr.reflection->width; packet.height = vr.reflection->height;
+        const u32 slot = static_cast<u32>(frameIndex % MAX_FRAMES_IN_FLIGHT);
+        packet.sets = {vr.globalDescriptorSet[slot], vr.lightDescSet[slot], vr.reflection->descriptorSet,
+            MaterialSystem::GetDescriptorSet(slot), VulkanContext::Get().GetBindlessSet().GetSet()};
+        for (u32 i = 0; i < packet.sources.size(); ++i) {
+            auto texture = std::static_pointer_cast<VKTexture>(vr.reflection->sources[i]);
+            packet.sources[i] = texture.get();
+            if (texture) { packet.sourceImages[i] = texture->GetImage(); packet.sourceViews[i] = vr.reflection->sourceViews[i]; }
+        }
+        if (auto texture = std::static_pointer_cast<VKTexture>(vr.reflection->radiance)) {
+            packet.image = texture->GetImage(); packet.imageView = texture->GetImageView(); packet.output = {texture.get()};
+        }
+        if (scene) { packet.tlas = scene->GetTlas(); packet.geometryTable = scene->GetGeometryTableBDA(); }
+        return packet;
+    }
+
     RG::ResourceHandle ReflectionsSubsystem::AddPasses(RG::RenderGraph& rg,
-                                                       RG::ResourceHandle sceneDepth,
-                                                       RG::ResourceHandle slimNormal,
-                                                       RG::ResourceHandle slimRoughness)
+        RG::ResourceHandle sceneDepth, RG::ResourceHandle slimNormal, RG::ResourceHandle slimRoughness,
+        const ReflectionBindings& native, RG::BufferHandle lights)
     {
         LH_PROFILE_FUNCTION();
-        if (!IsEnabled() || !m_ReflPipeline) return {};
-        ViewResources* preflightVr = m_Pipeline ? m_Pipeline->GetCurrentViewResources() : nullptr;
-        if (!preflightVr || !preflightVr->reflection || !preflightVr->reflection->radiance || preflightVr->reflection->descriptorSet == VK_NULL_HANDLE) return {};
-        if (m_Pipeline->GetRt().GetTlas() == VK_NULL_HANDLE) return {};
-
-        // Reflection working resolution (half when ReflectionsSettings::halfResolution): derive from
-        // reflRadiance's extent (the alloc-time source of truth); G-buffer reads remap to full in-shader.
-        auto reflTex0 = std::static_pointer_cast<VKTexture>(preflightVr->reflection->radiance);
-        const i32 reflW = reflTex0 ? static_cast<i32>(reflTex0->GetWidth())  : static_cast<i32>(preflightVr->width);
-        const i32 reflH = reflTex0 ? static_cast<i32>(reflTex0->GetHeight()) : static_cast<i32>(preflightVr->height);
-        const i32 reflScale = ((u32)reflW == preflightVr->width && (u32)reflH == preflightVr->height) ? 1 : 2;
-
-        const ReflectionsSettings& s = m_Pipeline->GetSystem().GetReflectionsSettings();
+        if (!native.settings.enabled || !native.pipeline) return {};
+        const auto& s = native.settings;
+        const i32 reflW = static_cast<i32>(native.width), reflH = static_cast<i32>(native.height);
+        const i32 reflScale = native.width == native.fullWidth && native.height == native.fullHeight ? 1 : 2;
         ReflPC pc{};
-        pc.invViewProj     = Math::Inverse(m_Pipeline->GetGlobal().GetCachedViewProj());
-        pc.frameSeed       = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex());
+        pc.invViewProj     = native.inverseViewProjection;
+        pc.frameSeed       = static_cast<u32>(native.frameIndex);
         pc.roughnessCutoff = s.roughnessFadeEnd;   // skip above the fade band; pbr.frag blends within it
         pc.maxRayDistance  = s.maxRayDistance;
         pc.fireflyClamp    = s.fireflyClamp;
         pc.minLobeAlpha    = s.minLobeAlpha;
         pc.neeClamp        = s.neeClamp;
-        pc.envReady        = m_Pipeline->GetLighting().IsIBLReady() ? 1u : 0u;
+        pc.envReady        = native.environmentReady ? 1u : 0u;
         pc.gbufferScale    = reflScale;
         pc.dispatchW       = reflW;
         pc.dispatchH       = reflH;
         // Geometry-table BDA paired with the bound TLAS at preflight (same m_LastResult Set 0 b6 binds).
-        pc.geomTableBDA    = m_Pipeline->GetRt().GetGeometryTableBDA();
+        pc.geomTableBDA    = native.geometryTable;
 
         struct ReflData { RG::ResourceHandle refl; RG::ResourceHandle depth; RG::ResourceHandle normal; RG::ResourceHandle rough; };
         RG::ResourceHandle reflHandle{};
         rg.AddComputePass<ReflData>(
             "RtReflections",
             RG::QueueFamily::AsyncCompute,
-            [&, this](ReflData& data, RG::RenderPassBuilder& builder) {
-                ViewResources* v = m_Pipeline->GetCurrentViewResources();
+            [&](ReflData& data, RG::RenderPassBuilder& builder) {
+                builder.ReadBuffer(lights);
 
                 // Slim G-buffer reads: barrier ordering only; the trace samples b1-b3 via the pass-local set.
                 if (sceneDepth.IsValid())    data.depth  = builder.ReadStorageImage(sceneDepth);
@@ -285,24 +303,21 @@ namespace Luth
 
                 // Reflection output: fully overwritten each frame (every pixel gets reflection or env
                 // fallback), so Undefined import (restirGiDI pattern; no cross-frame read -> no clear).
-                auto reflTex = std::static_pointer_cast<VKTexture>(v->reflection->radiance);
                 RG::TextureDesc desc;
                 desc.name   = "Reflections";
-                desc.width  = reflTex->GetWidth();
-                desc.height = reflTex->GetHeight();
+                desc.width  = native.width;
+                desc.height = native.height;
                 desc.format = RG::TextureFormat::RGBA16_Float;
                 data.refl = rg.ImportResource(desc,
-                    (void*)reflTex->GetImage(), (void*)reflTex->GetImageView(),
+                    (void*)native.image, (void*)native.imageView,
                     RG::ResourceState::Undefined);
                 data.refl = builder.WriteStorageImage(data.refl);
                 reflHandle = data.refl;
                 // The host skips this contribution in PathTrace mode; external output writes
                 // are live graph work and do not rely on dead-pass culling for activation.
             },
-            [this, pc](ReflData&, RG::RenderPassContext& ctx) {
+            [native, pc](ReflData&, RG::RenderPassContext& ctx) {
                 VkCommandBuffer cmd = ctx.commandBuffer;
-                ViewResources*  v   = m_Pipeline->GetCurrentViewResources();
-                if (!v || !v->reflection || v->reflection->descriptorSet == VK_NULL_HANDLE) return;
 
                 // AS-build -> AS-read barrier. dstStageMask is COMPUTE_SHADER (NOT RAY_TRACING):
                 // rayQuery executes in the compute stage; a RAY_TRACING dst here is a TDR trap.
@@ -316,18 +331,10 @@ namespace Luth
                 asDep.pMemoryBarriers    = &asBarrier;
                 vkCmdPipelineBarrier2(cmd, &asDep);
 
-                const u32 slot = static_cast<u32>(Renderer::GetFrameData()->GetRenderFrameIndex()) % MAX_FRAMES_IN_FLIGHT;
-                m_ReflPipeline->Bind(cmd);
-                VkDescriptorSet sets[5] = {
-                    v->globalDescriptorSet[slot],
-                    v->lightDescSet[slot],
-                    v->reflection->descriptorSet,
-                    MaterialSystem::GetDescriptorSet(slot),
-                    VulkanContext::Get().GetBindlessSet().GetSet(),
-                };
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, native.pipeline);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                    m_ReflPipeline->GetLayout(), 0, 5, sets, 0, nullptr);
-                vkCmdPushConstants(cmd, m_ReflPipeline->GetLayout(),
+                    native.layout, 0, static_cast<u32>(native.sets.size()), native.sets.data(), 0, nullptr);
+                vkCmdPushConstants(cmd, native.layout,
                     VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ReflPC), &pc);
 
                 const u32 groupX = (static_cast<u32>(pc.dispatchW) + 7) / 8;

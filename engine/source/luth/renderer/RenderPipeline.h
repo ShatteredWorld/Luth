@@ -384,6 +384,7 @@ namespace Luth
         std::unique_ptr<CompiledRenderPipeline> m_RtSunShadowComposition;
         std::unique_ptr<CompiledRenderPipeline> m_RestirDiComposition;
         std::unique_ptr<CompiledRenderPipeline> m_RestirGiComposition;
+        std::unique_ptr<CompiledRenderPipeline> m_ReflectionComposition;
         std::unique_ptr<CompiledRenderPipeline> m_RtFogComposition;
         std::unique_ptr<PreparedPipelineFrame> m_RtScenePlan;
         RtSceneParameters m_RtSceneParameters;

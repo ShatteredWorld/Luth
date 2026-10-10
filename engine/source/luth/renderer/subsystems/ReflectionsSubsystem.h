@@ -2,6 +2,7 @@
 
 #include "luth/core/types/LuthTypes.h"
 #include "luth/renderer/features/rt/ReflectionViewState.h"
+#include "luth/renderer/features/rt/ReflectionBindings.h"
 #include "luth/renderer/rendergraph/RenderGraph.h"
 #include "luth/renderer/backend/vulkan/VulkanComputePipeline.h"
 
@@ -14,6 +15,7 @@ namespace Luth
     class RenderPipeline;
     class FrameTargets;
     struct ViewResources;
+    struct PreparedRtScene;
 
     // RT specular reflections. A rayQuery-in-compute pass that casts one GGX-VNDF
     // reflection ray per opaque pixel from the slim G-buffer (oct normal + roughness + depth), shades the
@@ -42,10 +44,13 @@ namespace Luth
         // Reflection trace dispatch -> writes the demodulated reflection image. Returns its handle
         // (invalid when disabled / no view). AsyncCompute, after the TLAS build. Reads the slim G-buffer
         // (handles threaded for RG barrier ordering).
-        RG::ResourceHandle AddPasses(RG::RenderGraph& rg,
+        ReflectionBindings PrepareBindings(const ViewResources&, u64 frameIndex, RenderViewId,
+            u64 generation, const PreparedRtScene*, const ReflectionsSettings&,
+            const Mat4& inverseViewProjection, const Memory::GPUSubRegion& lights, bool environmentReady) const;
+        static RG::ResourceHandle AddPasses(RG::RenderGraph& rg,
                                      RG::ResourceHandle sceneDepth,
                                      RG::ResourceHandle slimNormal,
-                                     RG::ResourceHandle slimRoughness);
+                                     RG::ResourceHandle slimRoughness, const ReflectionBindings&, RG::BufferHandle lights);
 
         VkDescriptorSetLayout GetSetLayout() const { return m_SetLayout; }
 

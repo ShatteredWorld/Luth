@@ -26,6 +26,7 @@
 #include "luth/renderer/features/rt/RtSunShadowFeature.h"
 #include "luth/renderer/features/rt/RestirDiFeature.h"
 #include "luth/renderer/features/rt/RestirGiFeature.h"
+#include "luth/renderer/features/rt/ReflectionFeature.h"
 #include "luth/renderer/features/rt/GiDenoiserFeature.h"
 #include "luth/renderer/features/rt/GiUpscaleFeature.h"
 #include "luth/renderer/features/rt/DiDenoiserFeature.h"
@@ -160,7 +161,8 @@ namespace Luth
             sceneDefinition.AddFeature<RtFogDemandFeature>();
             sceneDefinition.AddFeature<RestirDiDemandFeature>();
             sceneDefinition.AddFeature<RestirGiDemandFeature>();
-            for (size_t i = 4; i < static_cast<size_t>(RtSceneConsumer::Count); ++i)
+            sceneDefinition.AddFeature<ReflectionDemandFeature>();
+            for (size_t i = 5; i < static_cast<size_t>(RtSceneConsumer::Count); ++i)
                 sceneDefinition.AddFeature<RtSceneDemandFeature>(static_cast<RtSceneConsumer>(i));
             PipelineInputContract sceneInputs;
             sceneInputs.resources = {{RtSceneResources::Parameters}};
@@ -178,6 +180,16 @@ namespace Luth
             auto shadowCompiled = RenderPipelineCompiler{}.Compile(std::move(shadowDefinition), sceneCapabilities, shadowInputs);
             if (!shadowCompiled.ReplaceIfValid(m_RtSunShadowComposition))
                 throw std::runtime_error("RT sun-shadow definition failed semantic validation");
+            RenderPipelineDefinition reflectionDefinition;
+            reflectionDefinition.AddFeature<ReflectionFeature>();
+            PipelineInputContract reflectionInputs;
+            reflectionInputs.resources = {{RtSceneResources::Parameters}, {ReflectionResources::Bindings},
+                {RenderResources::SurfaceDepth}, {RenderResources::Normal}, {RenderResources::Roughness},
+                {RenderResources::LightData}, {RtSceneResources::Scene, ResourceOutputPresence::Optional}};
+            reflectionInputs.capabilities = {&RtSceneResources::RayScene};
+            auto reflectionCompiled = RenderPipelineCompiler{}.Compile(std::move(reflectionDefinition), sceneCapabilities, reflectionInputs);
+            if (!reflectionCompiled.ReplaceIfValid(m_ReflectionComposition))
+                throw std::runtime_error("Reflection definition failed semantic validation");
             RenderPipelineDefinition giDefinition;
             giDefinition.AddFeature<RestirGiFeature>();
             giDefinition.AddFeature<GiDenoiserFeature>();
@@ -497,6 +509,7 @@ namespace Luth
             m_RtSunShadowComposition.reset();
             m_RestirDiComposition.reset();
             m_RestirGiComposition.reset();
+            m_ReflectionComposition.reset();
             m_Rt.Shutdown();
             m_RtNativeInitialized = false;
         }
@@ -1024,9 +1037,34 @@ namespace Luth
         // internally via hit-distance virtual reprojection; hitDist rides reflRadiance's alpha).
         // denoisedReflHandle feeds GeometryPass (pbr.frag composites it via Set 3 b7). AsyncCompute,
         // after the TLAS build (Reflections declares scene demand).
-        RG::ResourceHandle reflHandle = ptEnabled
-            ? RG::ResourceHandle{}
-            : m_Reflections.AddPasses(rg, surfaceDepth.handle, slimGB.normal, slimGB.roughness);
+        GraphTextureRef reflectionOutput;
+        if (m_ReflectionComposition) {
+            const auto frameIndex = Renderer::GetFrameData()->GetRenderFrameIndex();
+            const auto native = m_Reflections.PrepareBindings(*m_CurrentViewResources, frameIndex, view.id,
+                m_CurrentViewResources->generation, rayScene.native, s.GetReflectionsSettings(),
+                Math::Inverse(m_Global.GetCachedViewProj()), lightSSBORegion, m_Lighting.IsIBLReady());
+            const ReflectionBindingRef binding{&native};
+            const std::array resources{
+                RenderInputBinding::Present(RtSceneResources::Parameters, m_RtSceneParameters),
+                RenderInputBinding::Present(ReflectionResources::Bindings, binding),
+                RenderInputBinding::Present(RenderResources::LightData, uploadedLights),
+                RenderInputBinding::Present(RenderResources::SurfaceDepth, surfaceDepth),
+                RenderInputBinding::Present(RenderResources::Normal, normalOutput),
+                RenderInputBinding::Present(RenderResources::Roughness, roughnessOutput),
+                rayScene.native ? RenderInputBinding::Present(RtSceneResources::Scene, rayScene) : RenderInputBinding::Absent(RtSceneResources::Scene)};
+            FrameRenderInputs frame; frame.renderFrameIndex = frameIndex; frame.resources = resources;
+            if (rayScene.native) frame.capabilities = RtSceneResources::Requests;
+            ViewRenderInputs inputs; inputs.id = view.id; inputs.resourceGeneration = m_CurrentViewResources->generation;
+            inputs.width = m_CurrentViewResources->width; inputs.height = m_CurrentViewResources->height;
+            const std::array exports{RenderOutputBinding::Capture(ReflectionResources::Radiance, reflectionOutput)};
+            const auto built = m_ReflectionComposition->Build(rg, frame, inputs, s.GetFrameAllocator(), exports);
+            if (!built.success) {
+                for (const auto& diagnostic : built.diagnostics)
+                    LH_LOG(Renderer, error, "Reflection composition: {}", diagnostic.message);
+                return false;
+            }
+        }
+        const auto reflHandle = reflectionOutput.handle;
         RG::ResourceHandle denoisedReflHandle = m_DenoiseRefl->AddPasses(rg, DenoiseInputs{
             reflHandle, surfaceDepth.handle, slimGB.normal, slimGB.roughness,
             slimGB.roughness, slimGB.materialID, {}, {} });

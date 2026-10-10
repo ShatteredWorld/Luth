@@ -85,7 +85,7 @@ TEST_CASE("ShaderReloadFanout: dormant RT domains contribute no native passes")
     CHECK_FALSE(indirect.irradiance.IsValid());
     CHECK_FALSE(indirect.spatial.IsValid());
     CHECK_FALSE(pt.AddPasses(graph).IsValid());
-    CHECK_FALSE(reflections.AddPasses(graph, input, input, input).IsValid());
+    CHECK_FALSE(reflections.AddPasses(graph, input, input, input, {}, {}).IsValid());
     for (const auto channel : {DenoiserChannel::Di, DenoiserChannel::Gi,
                               DenoiserChannel::Reflections, DenoiserChannel::DiSpecular})
     {
